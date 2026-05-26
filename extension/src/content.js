@@ -1614,11 +1614,13 @@
     if (!tradeSummary) return clearChartLayer(layer);
 
     const chartRect = detectBestVisibleChartRect();
-    const priceScale = chartRect ? detectChartPriceScale(chartRect) : null;
-    if (!chartRect || !priceScale) return clearChartLayer(layer);
+    if (!chartRect) return clearChartLayer(layer);
 
-    const levels = buildTradeChartLevels(tradeSummary, token, priceScale);
+    const detectedScale = detectChartPriceScale(chartRect);
+    const levels = buildTradeChartLevels(tradeSummary, token, detectedScale);
     if (levels.length === 0) return clearChartLayer(layer);
+    const priceScale = detectedScale || buildFallbackChartPriceScale(chartRect, levels, token);
+    if (!priceScale) return clearChartLayer(layer);
 
     layer.innerHTML = "";
     levels.forEach((level) => {
@@ -1627,9 +1629,11 @@
 
       const line = document.createElement("div");
       line.className = `wt-chart-price-line wt-chart-price-line-${level.side}`;
+      if (priceScale.estimated) line.classList.add("wt-chart-price-line-estimated");
       line.style.left = `${chartRect.left}px`;
       line.style.top = `${y}px`;
       line.style.width = `${chartRect.width}px`;
+      if (priceScale.estimated) line.title = "Estimated position because the chart price axis is rendered inside canvas.";
 
       const label = document.createElement("span");
       label.textContent = level.label;
@@ -1658,7 +1662,7 @@
 
   function detectBestVisibleChartRect() {
     const ignoredRoot = root;
-    const candidates = Array.from(document.querySelectorAll("canvas, svg"))
+    const candidates = getChartCandidateElements()
       .filter((element) => !ignoredRoot?.contains(element))
       .map((element) => {
         const rect = element.getBoundingClientRect();
@@ -1682,6 +1686,31 @@
       .sort((a, b) => b.area - a.area);
 
     return candidates[0] || null;
+  }
+
+  function getChartCandidateElements() {
+    const selectors = [
+      "canvas",
+      "iframe",
+      "[class*='chart' i]",
+      "[class*='candle' i]",
+      "[class*='kline' i]",
+      "[class*='tradingview' i]",
+      "[id*='chart' i]",
+      "[id*='tradingview' i]",
+    ];
+    const seen = new Set();
+    return selectors.flatMap((selector) => {
+      try {
+        return Array.from(document.querySelectorAll(selector));
+      } catch {
+        return [];
+      }
+    }).filter((element) => {
+      if (seen.has(element)) return false;
+      seen.add(element);
+      return true;
+    });
   }
 
   function detectChartPriceScale(chartRect) {
@@ -1739,24 +1768,8 @@
   }
 
   function buildTradeChartLevels(summary, token, priceScale) {
-    const entry = selectChartLevel(
-      [
-        { value: summary.entryMarketCapVwapUsd, kind: "mc" },
-        { value: summary.avgEntryNative * (DEFAULT_PRICES[token.chain] || 1) * MARKET_CAP_SUPPLY, kind: "mc" },
-        { value: summary.avgEntryNative * (DEFAULT_PRICES[token.chain] || 1), kind: "price" },
-        { value: summary.avgEntryNative, kind: "price" },
-      ],
-      priceScale,
-    );
-    const exit = selectChartLevel(
-      [
-        { value: summary.exitMarketCapVwapUsd, kind: "mc" },
-        { value: summary.avgExitNative * (DEFAULT_PRICES[token.chain] || 1) * MARKET_CAP_SUPPLY, kind: "mc" },
-        { value: summary.avgExitNative * (DEFAULT_PRICES[token.chain] || 1), kind: "price" },
-        { value: summary.avgExitNative, kind: "price" },
-      ],
-      priceScale,
-    );
+    const entry = selectChartLevel(buildEntryLevelCandidates(summary, token), priceScale);
+    const exit = selectChartLevel(buildExitLevelCandidates(summary, token), priceScale);
 
     return [
       entry
@@ -1784,6 +1797,7 @@
       }))
       .filter((candidate) => Number.isFinite(candidate.value) && candidate.value > 0);
     if (finite.length === 0) return null;
+    if (!priceScale) return selectFallbackLevel(finite);
 
     const min = Math.min(priceScale.topValue, priceScale.bottomValue);
     const max = Math.max(priceScale.topValue, priceScale.bottomValue);
@@ -1797,6 +1811,60 @@
         distance: Math.abs(candidate.value - midpoint) / Math.max(Math.abs(midpoint), 1e-12),
       }))
       .sort((a, b) => a.distance - b.distance)[0] || null;
+  }
+
+  function selectFallbackLevel(candidates) {
+    return candidates.find((candidate) => candidate.kind === "mc") || candidates[0] || null;
+  }
+
+  function buildEntryLevelCandidates(summary, token) {
+    return [
+      { value: summary.entryMarketCapVwapUsd, kind: "mc" },
+      { value: summary.avgEntryNative * (DEFAULT_PRICES[token.chain] || 1) * MARKET_CAP_SUPPLY, kind: "mc" },
+      { value: summary.avgEntryNative * (DEFAULT_PRICES[token.chain] || 1), kind: "price" },
+      { value: summary.avgEntryNative, kind: "price" },
+    ];
+  }
+
+  function buildExitLevelCandidates(summary, token) {
+    return [
+      { value: summary.exitMarketCapVwapUsd, kind: "mc" },
+      { value: summary.avgExitNative * (DEFAULT_PRICES[token.chain] || 1) * MARKET_CAP_SUPPLY, kind: "mc" },
+      { value: summary.avgExitNative * (DEFAULT_PRICES[token.chain] || 1), kind: "price" },
+      { value: summary.avgExitNative, kind: "price" },
+    ];
+  }
+
+  function buildFallbackChartPriceScale(chartRect, levels, token) {
+    const primaryKind = levels.find((level) => level.kind === "mc") ? "mc" : "price";
+    const currentValue = primaryKind === "mc"
+      ? Number(token.marketCap || 0)
+      : Number(token.unitPriceUsd || token.unitPriceNative || 0);
+    const values = levels
+      .filter((level) => level.kind === primaryKind)
+      .map((level) => Number(level.value))
+      .filter((value) => Number.isFinite(value) && value > 0);
+    if (Number.isFinite(currentValue) && currentValue > 0) values.push(currentValue);
+    if (values.length === 0) return null;
+
+    let min = Math.min(...values);
+    let max = Math.max(...values);
+    if (min === max) {
+      min *= 0.85;
+      max *= 1.15;
+    } else {
+      const padding = (max - min) * 0.28;
+      min = Math.max(0, min - padding);
+      max += padding;
+    }
+
+    return {
+      estimated: true,
+      topY: chartRect.top + chartRect.height * 0.14,
+      bottomY: chartRect.bottom - chartRect.height * 0.14,
+      topValue: max,
+      bottomValue: min,
+    };
   }
 
   function priceToY(value, priceScale) {

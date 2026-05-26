@@ -205,6 +205,14 @@
   text-overflow: ellipsis;
 }
 
+.wt-chart-price-line-estimated {
+  border-top-style: dashed;
+}
+
+.wt-chart-price-line-estimated span {
+  opacity: 0.94;
+}
+
 .wt-chart-price-line-entry {
   color: #31e6ba;
 }
