@@ -580,13 +580,6 @@
                 <button class="wt-button" data-action="set-balance">Set</button>
               </div>
             </div>
-            <div class="wt-setting-group">
-              <label class="wt-label" for="wt-add-position">Add current-token position</label>
-              <div class="wt-custom-row">
-                <input id="wt-add-position" class="wt-input" data-add-position type="number" min="0" step="0.01" placeholder="Cost" />
-                <button class="wt-button" data-action="add-position">Add</button>
-              </div>
-            </div>
           </div>
         </section>
       </div>
@@ -669,15 +662,6 @@
       } else {
         setStatus("Enter a valid balance amount.");
       }
-    } else if (action === "add-position") {
-      const input = root.querySelector("[data-add-position]");
-      const amount = Number(input.value);
-      if (Number.isFinite(amount) && amount > 0) {
-        input.value = "";
-        void addManualPosition(amount);
-      } else {
-        setStatus("Enter a valid position cost.");
-      }
     } else if (action === "open-add") {
       openAddModal();
     } else if (action === "open-note") {
@@ -747,63 +731,13 @@
     setStatus(`Set balance to ${formatters.native(amount, chain)}.`);
   }
 
-  async function addManualPosition(amountNative) {
-    updateActiveToken();
-    const token = activeToken;
-    if (!token.key) return setStatus("Open a Padre token page first.");
-    if (!token.unitPriceNative) return setStatus("Price unavailable. Wait for Padre market cap to load.");
-
-    const chain = token.chain;
-    const tokenAmount = amountNative / token.unitPriceNative;
-    const existing = state.positions[token.key] || createEmptyPosition(token);
-    const before = snapshotPosition(existing);
-    const newCost = existing.costNative + amountNative;
-    const newTokenAmount = existing.tokenAmount + tokenAmount;
-    const updated = {
-      ...existing,
-      tokenName: token.name,
-      lastUrl: token.url,
-      tokenAmount: newTokenAmount,
-      costNative: newCost,
-      avgEntryNative: newCost / newTokenAmount,
-      avgEntryUsd: (newCost / newTokenAmount) * (DEFAULT_PRICES[chain] || 1),
-      buyCount: (existing.buyCount || 0) + 1,
-      updatedAt: new Date().toISOString(),
-    };
-
-    state.positions[token.key] = updated;
-    recordExecution({
-      side: "buy",
-      chain,
-      token,
-      positionId: updated.positionId,
-      requestedAmountNative: amountNative,
-      grossNative: amountNative,
-      netNative: 0,
-      fees: { platformFeeNative: 0, gasFeeNative: 0, priorityFeeNative: 0, bribeFeeNative: 0, totalFeeNative: 0, executionDelayMs: 0 },
-      slippagePct: 0,
-      tokenAmount,
-      executionPriceNative: token.unitPriceNative,
-      pnlNative: 0,
-      positionBefore: before,
-      positionAfter: snapshotPosition(updated),
-      costBasisNative: 0,
-    });
-    await persistAndSync("manual-position");
-    closeModals();
-    render();
-    setStatus(`Added ${formatters.native(amountNative, chain)} paper position.`);
-  }
-
   function openAddModal() {
     const modal = root.querySelector(`#${selectors.addModal}`);
     if (!modal) return;
     const fundsInput = root.querySelector("[data-deposit]");
     const setBalanceInput = root.querySelector("[data-set-balance]");
-    const positionInput = root.querySelector("[data-add-position]");
     if (fundsInput) fundsInput.value = "";
     if (setBalanceInput) setBalanceInput.value = "";
-    if (positionInput) positionInput.value = "";
     modal.classList.add("wt-modal-open");
     modal.setAttribute("aria-hidden", "false");
   }
