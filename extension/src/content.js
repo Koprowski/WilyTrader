@@ -2,7 +2,7 @@
   "use strict";
 
   const STORAGE_KEY = "wilytrader_state_v2";
-  const SCHEMA_VERSION = 8;
+  const SCHEMA_VERSION = 9;
   const LEGACY_DEFAULT_BUY_AMOUNTS = [0.1, 0.2, 0.5, 1];
   const PADRE_FOUR_DEFAULT_BUY_AMOUNTS = [0.1, 0.25, 0.5, 1];
   const PADRE_EIGHT_DEFAULT_BUY_AMOUNTS = [0.1, 0.25, 0.5, 1, 3, 0.005, 5, 7];
@@ -16,8 +16,8 @@
   };
   const AGGRESSIVE_MEME_FEES = {
     gasFeeNative: 0.000005,
-    priorityFeeNative: 0.007,
-    bribeFeeNative: 0.003,
+    priorityFeeNative: 0.001,
+    bribeFeeNative: 0.01,
   };
   const SLIPPAGE_ICON = `
     <svg width="14" height="14" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -36,15 +36,6 @@
       <path d="M3 15.2C3 14.5 3.5 14 4.2 14H8.2C9.5 14 10.7 14.5 11.6 15.3L12.1 15.8H15.4C16.1 15.8 16.7 16.4 16.7 17.1C16.7 17.8 16.1 18.4 15.4 18.4H11.7C11.3 18.4 11 18.7 11 19.1C11 19.5 11.3 19.8 11.7 19.8H16.1C16.7 19.8 17.3 19.6 17.8 19.2L21.1 16.8C21.8 16.3 22 15.4 21.5 14.8C21.1 14.2 20.2 14 19.6 14.5L17.2 16.2C16.9 15.1 15.9 14.4 14.8 14.4H12.7L12.3 14C11.1 12.9 9.6 12.3 8 12.3H4.2C3.5 12.3 3 12.8 3 13.5V15.2Z"></path>
       <path d="M4 16.1H8.2C9.1 16.1 9.9 16.5 10.5 17.1L11 17.6V21H4C3.4 21 3 20.6 3 20V17.1C3 16.5 3.4 16.1 4 16.1Z"></path>
       <path d="M12.2 3.1H21C21.6 3.1 22 3.5 22 4.1V10.3C22 10.9 21.6 11.3 21 11.3H12.2C11.6 11.3 11.2 10.9 11.2 10.3V4.1C11.2 3.5 11.6 3.1 12.2 3.1ZM16.6 9.5C17.9 9.5 19 8.5 19 7.2C19 5.9 17.9 4.9 16.6 4.9C15.3 4.9 14.2 5.9 14.2 7.2C14.2 8.5 15.3 9.5 16.6 9.5Z"></path>
-    </svg>`;
-  const NOTE_ICON = `
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-      <path d="M5 4H15.5L19 7.5V20H5V4Z"></path>
-      <path d="M15 4V8H19"></path>
-      <path d="M8 12H16"></path>
-      <path d="M8 15H13"></path>
-      <path d="M17.5 14.5V19.5"></path>
-      <path d="M15 17H20"></path>
     </svg>`;
   const LEDGER_ICON = `
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -103,7 +94,6 @@
     settingsModal: "wt-settings-modal",
     logModal: "wt-log-modal",
     addModal: "wt-add-modal",
-    noteModal: "wt-note-modal",
   };
 
   let state = null;
@@ -308,6 +298,18 @@
     if (Number(storedSettings.sellBribeFeeNative) === PADRE_DEFAULT_FEES.bribeFeeNative || storedSettings.sellBribeFeeNative === undefined) {
       settings.sellBribeFeeNative = DEFAULT_STATE.settings.sellBribeFeeNative;
     }
+    if (Number(storedSettings.buyPriorityFeeNative) === 0.007) {
+      settings.buyPriorityFeeNative = DEFAULT_STATE.settings.buyPriorityFeeNative;
+    }
+    if (Number(storedSettings.sellPriorityFeeNative) === 0.007) {
+      settings.sellPriorityFeeNative = DEFAULT_STATE.settings.sellPriorityFeeNative;
+    }
+    if (Number(storedSettings.buyBribeFeeNative) === 0.003) {
+      settings.buyBribeFeeNative = DEFAULT_STATE.settings.buyBribeFeeNative;
+    }
+    if (Number(storedSettings.sellBribeFeeNative) === 0.003) {
+      settings.sellBribeFeeNative = DEFAULT_STATE.settings.sellBribeFeeNative;
+    }
   }
 
   function arraysEqual(a, b) {
@@ -451,10 +453,8 @@
           </div>
           <div class="wt-header-controls">
             <button class="wt-icon-btn" data-action="open-add" title="Add funds or position" aria-label="Add funds or position">+</button>
-            <button class="wt-icon-btn" data-action="open-note" title="Add note" aria-label="Add note">${NOTE_ICON}</button>
             <button class="wt-icon-btn" data-action="view-log" title="Ledger" aria-label="Ledger">${LEDGER_ICON}</button>
             <button class="wt-icon-btn" data-action="settings" title="Settings" aria-label="Settings">&#9881;</button>
-            <button class="wt-icon-btn" data-action="export" title="Download JSON" aria-label="Download JSON">DL</button>
           </div>
         </header>
         <div class="wt-body">
@@ -601,23 +601,6 @@
           </div>
         </section>
       </div>
-      <div id="${selectors.noteModal}" class="wt-modal" aria-hidden="true">
-        <section class="wt-modal-panel" aria-label="WilyTrader add note">
-          <header class="wt-modal-header">
-            <div class="wt-title">Add Note</div>
-            <button class="wt-icon-btn" data-action="close-modal" title="Close" aria-label="Close">x</button>
-          </header>
-          <div class="wt-modal-body">
-            <div class="wt-setting-group">
-              <label class="wt-label" for="wt-note-input">Note</label>
-              <div class="wt-custom-row">
-                <input id="wt-note-input" class="wt-input" data-note type="text" placeholder="Optional rationale tag" />
-                <button class="wt-button" data-action="add-note">Add</button>
-              </div>
-            </div>
-          </div>
-        </section>
-      </div>
       <div id="${selectors.logModal}" class="wt-modal" aria-hidden="true">
         <section class="wt-modal-panel" aria-label="WilyTrader execution log">
           <header class="wt-modal-header">
@@ -628,6 +611,7 @@
             <div class="wt-button-row">
               <button class="wt-button" data-action="copy">Copy JSON</button>
               <button class="wt-button" data-action="export">Save JSON</button>
+              <button class="wt-button" data-action="new-session">New Session</button>
             </div>
             <div class="wt-ledger-summary" data-ledger-summary></div>
             <div class="wt-log-full" data-log-full></div>
@@ -696,8 +680,6 @@
       }
     } else if (action === "open-add") {
       openAddModal();
-    } else if (action === "open-note") {
-      openNoteModal();
     } else if (action === "settings") {
       openSettingsModal();
     } else if (action === "close-modal") {
@@ -710,6 +692,8 @@
       openLogModal();
     } else if (action === "add-note") {
       runTask(addNote());
+    } else if (action === "new-session") {
+      runTask(startNewSession());
     } else if (action === "bridge-sync") {
       runTask(syncBridge("manual"));
     } else if (action === "export") {
@@ -770,15 +754,6 @@
     const setBalanceInput = root.querySelector("[data-set-balance]");
     if (fundsInput) fundsInput.value = "";
     if (setBalanceInput) setBalanceInput.value = "";
-    modal.classList.add("wt-modal-open");
-    modal.setAttribute("aria-hidden", "false");
-  }
-
-  function openNoteModal() {
-    const modal = root.querySelector(`#${selectors.noteModal}`);
-    if (!modal) return;
-    const input = root.querySelector("[data-note]");
-    if (input) input.value = "";
     modal.classList.add("wt-modal-open");
     modal.setAttribute("aria-hidden", "false");
   }
@@ -1415,6 +1390,7 @@
     if (!summaryEl) return;
     const summary = buildCurrentSessionSummary();
     const rows = [
+      ["Runtime", formatDuration(summary.elapsedMs)],
       ["Started", summary.startedAt ? new Date(summary.startedAt).toLocaleString() : "Current"],
       ["Executions", String(summary.executionCount)],
       ["Realized", formatters.native(summary.realizedPnlNative, summary.chain)],
@@ -1461,7 +1437,16 @@
       activeOpenPnlNative: round(activeOpenPnlNative),
       totalFeesNative: round(totalFeesNative),
       totalPnlNative: round(realizedPnlNative + activeOpenPnlNative),
+      elapsedMs: Date.now() - (Date.parse(state.sessionStartedAt || "") || Date.now()),
     };
+  }
+
+  function formatDuration(ms) {
+    const totalSeconds = Math.max(0, Math.floor(Number(ms || 0) / 1000));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
   }
 
   function calculateOpenPnlPct(position, token) {
@@ -1572,8 +1557,8 @@
     }
   }
 
-  async function clearTradeLog() {
-    if (!window.confirm("Clear paper ledger, notes, and open positions?")) return;
+  async function startNewSession() {
+    if (!window.confirm("End this session and start a new one? Current trades and notes will be archived as a previous session summary.")) return;
     const sessionSummary = buildCurrentSessionSummary();
     if (sessionSummary.executionCount > 0 || state.notes.length > 0) {
       state.sessions.push({
@@ -1590,7 +1575,22 @@
     state.positions = {};
     state.notes = [];
     state.sessionStartedAt = new Date().toISOString();
+    await persistAndSync("new-session");
+    renderFullLog();
+    render();
+    setStatus("New session started.");
+  }
+
+  async function clearTradeLog() {
+    if (!window.confirm("Clear paper ledger, notes, open positions, and previous sessions?")) return;
+    state.sessions = [];
+    state.executions = [];
+    state.closedPositions = [];
+    state.positions = {};
+    state.notes = [];
+    state.sessionStartedAt = new Date().toISOString();
     await persistAndSync("clear");
+    renderFullLog();
     render();
     setStatus("Paper ledger cleared.");
   }

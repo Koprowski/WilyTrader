@@ -72,6 +72,11 @@
   display: none;
 }
 
+.wt-minimized {
+  border: 3px solid #2f8cff;
+  box-shadow: 0 0 0 1px rgba(47, 140, 255, 0.35), 0 0 22px rgba(47, 140, 255, 0.46);
+}
+
 .wt-section {
   display: flex;
   flex-direction: column;
