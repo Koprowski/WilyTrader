@@ -8,24 +8,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function saveFallbackArtifacts(message, sender) {
   const payload = message.payload || {};
-  const event = message.event || {};
-  const sessionSlug = makeSessionSlug(payload);
+  const event = message.event || payload.event || {};
+  const sessionSlug = makeSessionSlug(payload, message);
   const eventSlug = makeEventSlug(event);
   const basePath = `WilyTrader/${sessionSlug}/${eventSlug}`;
 
-  const ledgerDownloadId = await downloadDataUrl({
-    url: jsonDataUrl(payload),
-    filename: `${basePath}-ledger.json`,
-  });
+  let ledgerDownloadId = null;
+  if (message.saveLedger === true) {
+    ledgerDownloadId = await downloadDataUrl({
+      url: jsonDataUrl(payload),
+      filename: `${basePath}-ledger.json`,
+    });
+  }
 
   let screenshotDownloadId = null;
-  if (message.captureScreenshot !== false) {
+  if (message.captureScreenshot === true) {
     const dataUrl = await captureVisibleTab(sender?.tab?.windowId);
     const screenshotUrl = await maybeCropDataUrl(dataUrl, message.captureRect);
     screenshotDownloadId = await downloadDataUrl({
       url: screenshotUrl,
       filename: `${basePath}.png`,
     });
+  }
+
+  if (!ledgerDownloadId && !screenshotDownloadId) {
+    throw new Error("No fallback artifact requested.");
   }
 
   return {
@@ -95,15 +102,15 @@ async function blobToDataUrl(blob) {
   return `data:${blob.type || "application/octet-stream"};base64,${btoa(binary)}`;
 }
 
-function makeSessionSlug(payload) {
-  const startedAt = payload?.currentSessionSummary?.startedAt || payload?.exportedAt || new Date().toISOString();
+function makeSessionSlug(payload, message = {}) {
+  const startedAt = message.sessionStartedAt || payload?.currentSessionSummary?.startedAt || payload?.exportedAt || new Date().toISOString();
   return sanitizeFilePart(String(startedAt).replace(/[:.]/g, "-"));
 }
 
 function makeEventSlug(event) {
   const timestamp = sanitizeFilePart(String(event.timestamp || new Date().toISOString()).replace(/[:.]/g, "-"));
   const side = sanitizeFilePart(String(event.side || "trade"));
-  const token = sanitizeFilePart(String(event.tokenName || event.tokenAddress || "token")).slice(0, 40);
+  const token = sanitizeFilePart(String(event.tokenAddress || event.tokenName || "token")).slice(0, 40);
   const executionId = sanitizeFilePart(String(event.executionId || "execution")).slice(0, 60);
   return `${timestamp}-${side}-${token}-${executionId}`;
 }

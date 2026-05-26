@@ -161,6 +161,58 @@
   text-overflow: ellipsis;
 }
 
+.wt-pnl-up {
+  color: #31e6ba;
+}
+
+.wt-pnl-down {
+  color: #ff5f6d;
+}
+
+.wt-pnl-flat {
+  color: #d8dce8;
+}
+
+.wt-chart-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483646;
+  pointer-events: none;
+}
+
+.wt-chart-price-line {
+  position: fixed;
+  height: 0;
+  border-top: 2px solid currentColor;
+  filter: drop-shadow(0 0 4px rgba(0, 0, 0, 0.72));
+}
+
+.wt-chart-price-line span {
+  position: absolute;
+  top: -13px;
+  right: 6px;
+  max-width: min(210px, 44vw);
+  padding: 2px 6px;
+  border: 1px solid currentColor;
+  border-radius: 5px;
+  background: rgba(16, 18, 22, 0.92);
+  color: currentColor;
+  font-size: 10px;
+  line-height: 1.15;
+  font-weight: 800;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wt-chart-price-line-entry {
+  color: #31e6ba;
+}
+
+.wt-chart-price-line-exit {
+  color: #ff5f6d;
+}
+
 .wt-button-row,
 .wt-custom-row {
   display: grid;

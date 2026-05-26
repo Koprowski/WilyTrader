@@ -2,13 +2,14 @@
   "use strict";
 
   const STORAGE_KEY = "wilytrader_state_v2";
-  const SCHEMA_VERSION = 10;
+  const SCHEMA_VERSION = 11;
   const LEGACY_DEFAULT_BUY_AMOUNTS = [0.1, 0.2, 0.5, 1];
   const PADRE_FOUR_DEFAULT_BUY_AMOUNTS = [0.1, 0.25, 0.5, 1];
   const PADRE_EIGHT_DEFAULT_BUY_AMOUNTS = [0.1, 0.25, 0.5, 1, 3, 0.005, 5, 7];
   const SIX_SLOT_DEFAULT_BUY_AMOUNTS = [0.1, 0.25, 0.5, 1, 3, 0.005];
   const LEGACY_DEFAULT_SELL_PERCENTS = [10, 25, 50, 100];
   const PADRE_DEFAULT_SELL_PERCENTS = [5, 15, 33, 55, 20, 40, 86, 100];
+  const WILYTRADER_V10_DEFAULT_SELL_PERCENTS = [10, 20, 25, 33, 50, 67, 75, 100];
   const PADRE_DEFAULT_FEES = {
     gasFeeNative: 0.001,
     priorityFeeNative: 0.01,
@@ -64,6 +65,22 @@
   const BRIDGE_BASE_URL = "http://127.0.0.1:17365/v1/wilytrader";
   const MARKET_CAP_SUPPLY = 1_000_000_000;
   const DEFAULT_PRICES = { SOL: 190, BNB: 600 };
+  const SOLANA_ADDRESS_PATTERN = /[1-9A-HJ-NP-Za-km-z]{32,44}/;
+  const ETHEREUM_ADDRESS_PATTERN = /0x[a-fA-F0-9]{40}/;
+  const PLATFORM_ADAPTERS = [
+    {
+      id: "padre",
+      label: "Padre",
+      hosts: ["trade.padre.gg"],
+      detectToken: detectPadreToken,
+    },
+    {
+      id: "axiom",
+      label: "Axiom",
+      hosts: ["axiom.trade"],
+      detectToken: detectAxiomToken,
+    },
+  ];
   const DEFAULT_STATE = {
     schemaVersion: SCHEMA_VERSION,
     balances: { SOL: 3, BNB: 1 },
@@ -75,7 +92,7 @@
     notes: [],
     settings: {
       buyAmounts: [0.1, 0.25, 0.5, 1, 2, 5],
-      sellPercents: [10, 20, 25, 33, 50, 67, 75, 100],
+      sellPercents: [5, 10, 15, 33, 50, 67, 85, 100],
       platformFeePct: 2,
       buyGasFeeNative: AGGRESSIVE_MEME_FEES.gasFeeNative,
       sellGasFeeNative: AGGRESSIVE_MEME_FEES.gasFeeNative,
@@ -104,6 +121,7 @@
     price: "wt-price",
     balance: "wt-balance",
     position: "wt-position",
+    chartLayer: "wt-chart-layer",
     log: "wt-log",
     settingsModal: "wt-settings-modal",
     logModal: "wt-log-modal",
@@ -118,6 +136,7 @@
   let tradeInFlight = false;
   let extensionContextValid = true;
   let lastSyncedExecutionId = null;
+  let chartLineRefreshId = null;
 
   const formatters = {
     native(value, chain, decimals = 4) {
@@ -150,7 +169,7 @@
     updateActiveToken();
     render();
     bindRouteWatcher();
-    void syncBridge("startup");
+    if (isOverlayVisibleRoute()) void syncBridge("startup");
   }
 
   function storageGet(keys) {
@@ -216,7 +235,7 @@
     const message = error?.message || String(error || "");
     if (message.includes("Extension context invalidated")) {
       extensionContextValid = false;
-      setStatus("Extension reloaded. Refresh the Padre tab to reconnect WilyTrader.");
+      setStatus("Extension reloaded. Refresh this tab to reconnect WilyTrader.");
       return;
     }
     console.error("[WilyTrader]", error);
@@ -286,7 +305,11 @@
     ) {
       settings.buyAmounts = DEFAULT_STATE.settings.buyAmounts;
     }
-    if (arraysEqual(storedSettings.sellPercents, LEGACY_DEFAULT_SELL_PERCENTS) || arraysEqual(storedSettings.sellPercents, PADRE_DEFAULT_SELL_PERCENTS)) {
+    if (
+      arraysEqual(storedSettings.sellPercents, LEGACY_DEFAULT_SELL_PERCENTS) ||
+      arraysEqual(storedSettings.sellPercents, PADRE_DEFAULT_SELL_PERCENTS) ||
+      arraysEqual(storedSettings.sellPercents, WILYTRADER_V10_DEFAULT_SELL_PERCENTS)
+    ) {
       settings.sellPercents = DEFAULT_STATE.settings.sellPercents;
     }
     if (Number(storedSettings.buySlippagePct) === 30 || storedSettings.buySlippagePct === undefined) {
@@ -372,39 +395,86 @@
 
   function detectToken() {
     const url = new URL(window.location.href);
+    const adapter = getPlatformAdapter(url.hostname);
+    if (!adapter) return buildEmptyToken(null, "Unsupported page");
+    if (!isOverlayVisibleRoute(url)) return buildEmptyToken(adapter);
+    return adapter.detectToken(url);
+  }
+
+  function getPlatformAdapter(hostname = window.location.hostname) {
+    const normalizedHost = String(hostname || "").toLowerCase();
+    return PLATFORM_ADAPTERS.find((adapter) =>
+      adapter.hosts.some((host) => normalizedHost === host || normalizedHost.endsWith(`.${host}`)),
+    ) || null;
+  }
+
+  function isOverlayVisibleRoute(url = new URL(window.location.href)) {
+    const adapter = getPlatformAdapter(url.hostname);
+    if (!adapter) return false;
+    if (adapter.id === "axiom") return isAxiomMemeRoute(url);
+    if (adapter.id === "padre") return isPadreTradeRoute(url);
+    return false;
+  }
+
+  function isAxiomMemeRoute(url) {
+    const path = normalizePathname(url.pathname);
+    if (path.startsWith("/meme/")) return true;
+    if (path !== "/meme") return false;
+    return Boolean(findTokenAddress([url.search, safeDecode(url.hash || "")].join(" ")));
+  }
+
+  function isPadreTradeRoute(url) {
     const pathParts = url.pathname.split("/").filter(Boolean);
     const tradeIndex = pathParts.indexOf("trade");
-    const chainSlug = tradeIndex >= 0 ? pathParts[tradeIndex + 1] : null;
-    const address = tradeIndex >= 0 ? pathParts[tradeIndex + 2] : null;
-    const chain = chainSlug === "bsc" ? "BNB" : "SOL";
-    const platformChain = chainSlug || "solana";
-    const name = detectTokenName(address);
-    const marketCap = detectMarketCap();
+    return tradeIndex >= 0 && Boolean(pathParts[tradeIndex + 1] && pathParts[tradeIndex + 2]);
+  }
+
+  function normalizePathname(pathname) {
+    return `/${String(pathname || "").replace(/^\/+/, "")}`.toLowerCase();
+  }
+
+  function applyOverlayVisibility() {
+    if (!root) return false;
+    const visible = isOverlayVisibleRoute();
+    root.hidden = !visible;
+    root.setAttribute("aria-hidden", visible ? "false" : "true");
+    if (!visible) {
+      closeModals();
+      clearChartLayer(root.querySelector(`#${selectors.chartLayer}`));
+    }
+    return visible;
+  }
+
+  function buildEmptyToken(adapter, name = null) {
+    return {
+      platform: adapter?.id || "unknown",
+      platformLabel: adapter?.label || "Unsupported",
+      chain: "SOL",
+      platformChain: "solana",
+      address: null,
+      key: null,
+      name: name || `No ${adapter?.label || "supported"} token page`,
+      marketCap: null,
+      unitPriceUsd: null,
+      unitPriceNative: null,
+    };
+  }
+
+  function buildDetectedToken(adapter, { address, chain = "SOL", platformChain = "solana", name, marketCap }) {
     const unitPriceUsd = marketCap ? marketCap / MARKET_CAP_SUPPLY : null;
     const chainUsd = DEFAULT_PRICES[chain] || 1;
     const unitPriceNative = unitPriceUsd ? unitPriceUsd / chainUsd : null;
 
-    if (!address || !url.hostname.includes("trade.padre.gg")) {
-      return {
-        platform: "padre",
-        chain,
-        platformChain,
-        address: null,
-        key: null,
-        name: "No token page",
-        marketCap: null,
-        unitPriceUsd: null,
-        unitPriceNative: null,
-      };
-    }
+    if (!address) return buildEmptyToken(adapter);
 
     return {
-      platform: "padre",
+      platform: adapter.id,
+      platformLabel: adapter.label,
       chain,
       platformChain,
       address,
-      key: `padre:${chain}:${address}`,
-      name,
+      key: `${adapter.id}:${chain}:${address}`,
+      name: name || shortenAddress(address),
       marketCap,
       unitPriceUsd,
       unitPriceNative,
@@ -412,15 +482,85 @@
     };
   }
 
-  function detectTokenName(address) {
-    const heading = document.querySelector("h1.MuiTypography-h1");
+  function detectPadreToken(url) {
+    const adapter = getPlatformAdapter(url.hostname);
+    const pathParts = url.pathname.split("/").filter(Boolean);
+    const tradeIndex = pathParts.indexOf("trade");
+    const chainSlug = tradeIndex >= 0 ? pathParts[tradeIndex + 1] : null;
+    const address = tradeIndex >= 0 ? pathParts[tradeIndex + 2] : null;
+    const chain = chainSlug === "bsc" ? "BNB" : "SOL";
+    const platformChain = chainSlug || "solana";
+    const name = detectTokenName(address, adapter);
+    const marketCap = detectMarketCap();
+    return buildDetectedToken(adapter, {
+      address,
+      chain,
+      platformChain,
+      name,
+      marketCap,
+    });
+  }
+
+  function detectAxiomToken(url) {
+    const adapter = getPlatformAdapter(url.hostname);
+    const address = detectAxiomTokenAddress(url);
+    const name = detectTokenName(address, adapter);
+    const marketCap = detectMarketCap();
+    return buildDetectedToken(adapter, {
+      address,
+      chain: "SOL",
+      platformChain: "solana",
+      name,
+      marketCap,
+    });
+  }
+
+  function detectAxiomTokenAddress(url) {
+    const urlCandidate = [
+      url.pathname,
+      url.search,
+      safeDecode(url.hash || ""),
+    ].join(" ");
+    const fromUrl = findTokenAddress(urlCandidate);
+    if (fromUrl) return fromUrl;
+
+    const labels = ["ca", "contract", "contract address", "mint", "pair"];
+    const candidates = getPageTextCandidates(1500);
+
+    for (const text of candidates) {
+      const lowerText = text.toLowerCase();
+      if (!labels.some((label) => lowerText.includes(label))) continue;
+      const fromLabel = findTokenAddress(text);
+      if (fromLabel) return fromLabel;
+    }
+
+    return findTokenAddress(candidates.join(" "));
+  }
+
+  function findTokenAddress(text) {
+    const source = String(text || "");
+    return source.match(ETHEREUM_ADDRESS_PATTERN)?.[0] || source.match(SOLANA_ADDRESS_PATTERN)?.[0] || null;
+  }
+
+  function safeDecode(value) {
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  }
+
+  function detectTokenName(address, adapter) {
+    const heading = queryPageSelector(
+      "h1.MuiTypography-h1, h1, h2, [data-testid*='token-name' i], [class*='token-name' i], [class*='pair-name' i], [class*='asset-name' i]",
+    );
     const headingText = cleanText(heading?.textContent);
-    if (headingText) return headingText;
+    if (headingText && !findTokenAddress(headingText)) return headingText;
 
     const title = document.title || "";
     const titleMatch = title.match(/^([^|$]+?)(?:\s*[|$]|$)/);
     const fromTitle = cleanText(titleMatch?.[1]);
-    if (fromTitle && !fromTitle.toLowerCase().includes("padre")) return fromTitle;
+    if (fromTitle && !fromTitle.toLowerCase().includes(adapter?.id || "")) return fromTitle;
 
     return address ? shortenAddress(address) : "Unknown token";
   }
@@ -429,10 +569,7 @@
     const titleMatch = (document.title || "").match(/\$([0-9.]+)\s*([KMB])?/i);
     if (titleMatch) return parseCompactNumber(titleMatch[1], titleMatch[2]);
 
-    const candidates = Array.from(document.querySelectorAll("body *"))
-      .slice(0, 1200)
-      .map((el) => cleanText(el.textContent))
-      .filter(Boolean);
+    const candidates = getPageTextCandidates(1200);
 
     for (const text of candidates) {
       const match = text.match(/(?:MC|MCap|Market Cap)\s*:?\s*\$?\s*([0-9.]+)\s*([KMB])?/i);
@@ -450,6 +587,18 @@
 
   function cleanText(text) {
     return String(text || "").replace(/\s+/g, " ").trim();
+  }
+
+  function queryPageSelector(selector) {
+    return Array.from(document.querySelectorAll(selector)).find((element) => !root?.contains(element)) || null;
+  }
+
+  function getPageTextCandidates(limit = 1200) {
+    return Array.from(document.querySelectorAll("body *"))
+      .filter((element) => !root?.contains(element))
+      .slice(0, limit)
+      .map((element) => cleanText(element.textContent))
+      .filter(Boolean);
   }
 
   function shortenAddress(address) {
@@ -472,17 +621,17 @@
     root.innerHTML = `
       <section class="${selectors.panel}" aria-label="WilyTrader paper trading panel">
         <header class="wt-header">
-          <button class="wt-icon-btn" data-action="toggle" title="Minimize" aria-label="Minimize">-</button>
+          <button type="button" class="wt-icon-btn" data-action="toggle" title="Minimize" aria-label="Minimize">-</button>
           <div>
             <div class="wt-title">WilyTrader</div>
             <div id="${selectors.status}" class="wt-muted">Local ledger</div>
           </div>
           <div class="wt-header-controls">
-            <button class="wt-icon-btn" data-action="open-add" title="Add funds or position" aria-label="Add funds or position">+</button>
-            <button class="wt-icon-btn wt-collapsed-action" data-action="buy-default" title="Buy default" aria-label="Buy default">${CIRCLE_UP_ICON}</button>
-            <button class="wt-icon-btn wt-collapsed-action" data-action="sell-all" title="Sell 100%" aria-label="Sell 100%">${CIRCLE_DOWN_ICON}</button>
-            <button class="wt-icon-btn" data-action="view-log" title="Ledger" aria-label="Ledger">${LEDGER_ICON}</button>
-            <button class="wt-icon-btn" data-action="settings" title="Settings" aria-label="Settings">&#9881;</button>
+            <button type="button" class="wt-icon-btn" data-action="open-add" title="Add funds or position" aria-label="Add funds or position">+</button>
+            <button type="button" class="wt-icon-btn wt-collapsed-action" data-action="buy-default" title="Buy default" aria-label="Buy default">${CIRCLE_UP_ICON}</button>
+            <button type="button" class="wt-icon-btn wt-collapsed-action" data-action="sell-all" title="Sell 100%" aria-label="Sell 100%">${CIRCLE_DOWN_ICON}</button>
+            <button type="button" class="wt-icon-btn" data-action="view-log" title="Ledger" aria-label="Ledger">${LEDGER_ICON}</button>
+            <button type="button" class="wt-icon-btn" data-action="settings" title="Settings" aria-label="Settings">&#9881;</button>
           </div>
         </header>
         <div class="wt-body">
@@ -541,6 +690,7 @@
           </div>
         </div>
       </section>
+      <div id="${selectors.chartLayer}" class="wt-chart-layer" aria-hidden="true"></div>
       <div id="${selectors.settingsModal}" class="wt-modal" aria-hidden="true">
         <section class="wt-modal-panel" aria-label="WilyTrader settings">
           <header class="wt-modal-header">
@@ -554,7 +704,7 @@
             </div>
             <div class="wt-setting-group">
               <label class="wt-label" for="wt-sell-percents">Sell buttons (%)</label>
-              <input id="wt-sell-percents" class="wt-input" data-setting="sellPercents" placeholder="10, 20, 25, 33, 50, 67, 75, 100" />
+              <input id="wt-sell-percents" class="wt-input" data-setting="sellPercents" placeholder="5, 10, 15, 33, 50, 67, 85, 100" />
             </div>
             <div class="wt-settings-grid">
               <div class="wt-setting-group">
@@ -604,9 +754,9 @@
             </label>
             <label class="wt-check-row">
               <input type="checkbox" data-setting="fallbackDownloadsEnabled" />
-              <span>If Snipalot is unavailable, save fallback files to Chrome Downloads</span>
+              <span>If Snipalot is unavailable, save fallback screenshots to Chrome Downloads</span>
             </label>
-            <div class="wt-settings-note">Snipalot saves to the active trade session folder. The Chrome fallback saves under Downloads/WilyTrader and crops to the largest visible Padre chart when possible.</div>
+            <div class="wt-settings-note">Snipalot saves to the active trade session folder. The Chrome fallback saves under Downloads/WilyTrader and crops to the largest visible chart when possible.</div>
             <div class="wt-button-row">
               <button class="wt-button" data-action="reset-settings">Defaults</button>
               <button class="wt-button" data-action="save-settings">Save</button>
@@ -657,13 +807,17 @@
       </div>
     `;
     document.documentElement.appendChild(root);
-    root.addEventListener("click", handleClick);
+    root.addEventListener("pointerdown", stopOverlayEvent, true);
+    root.addEventListener("click", handleClick, true);
     root.addEventListener("change", handleChange);
     window.addEventListener("unhandledrejection", handleUnhandledRejection);
     window.addEventListener("error", handleWindowError);
+    window.addEventListener("resize", () => renderTradeChartLines());
+    window.addEventListener("scroll", () => renderTradeChartLines(), true);
     const panel = root.querySelector(`.${selectors.panel}`);
     applyPanelPosition(panel);
     makeDraggable(root.querySelector(".wt-header"), panel);
+    if (!chartLineRefreshId) chartLineRefreshId = window.setInterval(renderTradeChartLines, 1000);
   }
 
   function handleUnhandledRejection(event) {
@@ -678,16 +832,26 @@
     handleExtensionContextError(event.error || event.message);
   }
 
+  function stopOverlayEvent(event) {
+    if (!root?.contains(event.target)) return;
+    event.stopPropagation();
+  }
+
   function handleClick(event) {
     const target = event.target.closest("button");
     if (!target || !root?.contains(target)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
 
     const action = target.dataset.action;
     const buyAmount = target.dataset.buyAmount;
     const sellPct = target.dataset.sellPct;
+    const hasBuyAmount = Object.hasOwn(target.dataset, "buyAmount");
+    const hasSellPct = Object.hasOwn(target.dataset, "sellPct");
 
-    if (buyAmount) runTask(buy(Number(buyAmount)));
-    else if (sellPct) runTask(sell(Number(sellPct)));
+    if (hasBuyAmount) runTask(buy(Number(buyAmount)));
+    else if (hasSellPct) runTask(sell(Number(sellPct)));
     else if (action === "custom-buy") {
       const input = root.querySelector("[data-custom-buy]");
       const amount = Number(input.value);
@@ -935,8 +1099,8 @@
     try {
     updateActiveToken();
     const token = activeToken;
-    if (!token.key) return setStatus("Open a Padre token page first.");
-    if (!token.unitPriceNative) return setStatus("Price unavailable. Wait for Padre market cap to load.");
+    if (!token.key) return setStatus("Open a supported token page first.");
+    if (!token.unitPriceNative) return setStatus(`Price unavailable. Wait for ${token.platformLabel || "the platform"} market cap to load.`);
 
     const delayedToken = await waitForSimulatedExecution("buy", token);
     if (!delayedToken) return;
@@ -1008,7 +1172,7 @@
     const token = activeToken;
     const position = token.key ? state.positions[token.key] : null;
     if (!token.key || !position) return setStatus("No open paper position for this token.");
-    if (!token.unitPriceNative) return setStatus("Price unavailable. Wait for Padre market cap to load.");
+    if (!token.unitPriceNative) return setStatus(`Price unavailable. Wait for ${token.platformLabel || "the platform"} market cap to load.`);
 
     const delayedToken = await waitForSimulatedExecution("sell", token);
     if (!delayedToken) return;
@@ -1093,7 +1257,8 @@
     return {
       positionId: createId("pos"),
       status: "open",
-      platform: "padre",
+      platform: token.platform,
+      platformLabel: token.platformLabel,
       chain: token.chain,
       platformChain: token.platformChain,
       tokenAddress: token.address,
@@ -1182,8 +1347,9 @@
       schemaVersion: 2,
       timestamp: new Date(timestampMs).toISOString(),
       timestampMs,
-      source: "wilytrader-padre-overlay",
-      platform: "padre",
+      source: `wilytrader-${fields.token.platform}-overlay`,
+      platform: fields.token.platform,
+      platformLabel: fields.token.platformLabel,
       chain: fields.chain,
       side: fields.side,
       positionId: fields.positionId,
@@ -1348,7 +1514,9 @@
 
   function render() {
     if (!root || !state) return;
+    const visible = applyOverlayVisibility();
     updateActiveToken();
+    if (!visible) return;
 
     const tokenEl = root.querySelector(`#${selectors.token}`);
     const balanceEl = root.querySelector(`#${selectors.balance}`);
@@ -1361,14 +1529,18 @@
 
     const token = activeToken;
     const position = token.key ? state.positions[token.key] : null;
-    const summary = position ? buildPositionSummary(position.positionId, "open") : null;
+    const summary = position ? buildPositionSummary(position.positionId, "open") : findLatestTokenPositionSummary(token);
+    const openPnlPct = position ? calculateOpenPnlPct(position, token) : 0;
 
     tokenEl.textContent = token.address
       ? `${token.name} (${shortenAddress(token.address)})`
-      : "Open a Padre token page";
+      : "Open a supported token page";
     balanceEl.textContent = `Bal ${formatters.compactNative(state.balances[token.chain] || 0, token.chain)}`;
-    positionEl.textContent = summary
-      ? `Pos ${formatters.native(summary.investedNative, token.chain)} ${formatters.pct(calculateOpenPnlPct(position, token))}`
+    positionEl.classList.toggle("wt-pnl-up", Boolean(position) && openPnlPct > 0);
+    positionEl.classList.toggle("wt-pnl-down", Boolean(position) && openPnlPct < 0);
+    positionEl.classList.toggle("wt-pnl-flat", Boolean(position) && openPnlPct === 0);
+    positionEl.textContent = position
+      ? `Pos ${formatters.native(position.costNative, token.chain)} ${formatters.pct(openPnlPct)}`
       : "Pos none";
     if (buyChainEl) buyChainEl.textContent = token.chain;
     if (sellAssetsEl) {
@@ -1387,6 +1559,7 @@
     state.settings.buyAmounts = buyPresets;
     buyPresets.forEach((amount) => {
       const button = document.createElement("button");
+      button.type = "button";
       button.className = "wt-trade-button wt-buy-button";
       button.dataset.buyAmount = String(amount);
       button.textContent = String(amount);
@@ -1401,6 +1574,7 @@
     customInput.placeholder = "Custom";
     buyButtonsEl.appendChild(customInput);
     const customButton = document.createElement("button");
+    customButton.type = "button";
     customButton.className = "wt-trade-button wt-buy-button wt-custom-buy-button";
     customButton.dataset.action = "custom-buy";
     customButton.textContent = "Buy";
@@ -1409,7 +1583,9 @@
     sellButtonsEl.innerHTML = "";
     state.settings.sellPercents.forEach((percent) => {
       const button = document.createElement("button");
+      button.type = "button";
       button.className = "wt-trade-button wt-sell-button";
+      button.dataset.action = "sell-percent";
       button.dataset.sellPct = String(percent);
       button.textContent = `${percent}%`;
       sellButtonsEl.appendChild(button);
@@ -1425,6 +1601,216 @@
         logEl.appendChild(item);
       });
     }
+    renderTradeChartLines(summary);
+  }
+
+  function renderTradeChartLines(summary = null) {
+    const layer = root?.querySelector(`#${selectors.chartLayer}`);
+    if (!layer || !state || !activeToken?.key) return clearChartLayer(layer);
+
+    const token = activeToken;
+    const position = state.positions[token.key] || null;
+    const tradeSummary = summary || (position ? buildPositionSummary(position.positionId, "open") : findLatestTokenPositionSummary(token));
+    if (!tradeSummary) return clearChartLayer(layer);
+
+    const chartRect = detectBestVisibleChartRect();
+    const priceScale = chartRect ? detectChartPriceScale(chartRect) : null;
+    if (!chartRect || !priceScale) return clearChartLayer(layer);
+
+    const levels = buildTradeChartLevels(tradeSummary, token, priceScale);
+    if (levels.length === 0) return clearChartLayer(layer);
+
+    layer.innerHTML = "";
+    levels.forEach((level) => {
+      const y = priceToY(level.value, priceScale);
+      if (!Number.isFinite(y) || y < chartRect.top - 1 || y > chartRect.bottom + 1) return;
+
+      const line = document.createElement("div");
+      line.className = `wt-chart-price-line wt-chart-price-line-${level.side}`;
+      line.style.left = `${chartRect.left}px`;
+      line.style.top = `${y}px`;
+      line.style.width = `${chartRect.width}px`;
+
+      const label = document.createElement("span");
+      label.textContent = level.label;
+      line.appendChild(label);
+      layer.appendChild(line);
+    });
+  }
+
+  function clearChartLayer(layer) {
+    if (layer) layer.innerHTML = "";
+  }
+
+  function findLatestTokenPositionSummary(token) {
+    if (!token?.key) return null;
+    const closed = state.closedPositions
+      .filter((position) => position.tokenAddress === token.address && position.chain === token.chain)
+      .sort((a, b) => Date.parse(b.finalExitAt || b.firstEntryAt || "") - Date.parse(a.finalExitAt || a.firstEntryAt || ""));
+    if (closed[0]) return closed[0];
+
+    const relatedExecution = state.executions
+      .slice()
+      .reverse()
+      .find((execution) => execution.tokenAddress === token.address && execution.chain === token.chain);
+    return relatedExecution ? buildPositionSummary(relatedExecution.positionId) : null;
+  }
+
+  function detectBestVisibleChartRect() {
+    const ignoredRoot = root;
+    const candidates = Array.from(document.querySelectorAll("canvas, svg"))
+      .filter((element) => !ignoredRoot?.contains(element))
+      .map((element) => {
+        const rect = element.getBoundingClientRect();
+        const visibleLeft = Math.max(rect.left, 0);
+        const visibleTop = Math.max(rect.top, 0);
+        const visibleRight = Math.min(rect.right, window.innerWidth);
+        const visibleBottom = Math.min(rect.bottom, window.innerHeight);
+        const width = Math.max(0, visibleRight - visibleLeft);
+        const height = Math.max(0, visibleBottom - visibleTop);
+        return {
+          left: visibleLeft,
+          top: visibleTop,
+          right: visibleRight,
+          bottom: visibleBottom,
+          width,
+          height,
+          area: width * height,
+        };
+      })
+      .filter((rect) => rect.area >= 40_000 && rect.width >= 240 && rect.height >= 160)
+      .sort((a, b) => b.area - a.area);
+
+    return candidates[0] || null;
+  }
+
+  function detectChartPriceScale(chartRect) {
+    const labels = collectChartPriceLabels(chartRect);
+    if (labels.length < 2) return null;
+
+    const unique = [];
+    labels.forEach((label) => {
+      if (!unique.some((existing) => Math.abs(existing.value - label.value) <= Math.max(1e-12, Math.abs(label.value) * 1e-6))) {
+        unique.push(label);
+      }
+    });
+
+    const sorted = unique.sort((a, b) => a.y - b.y);
+    const top = sorted[0];
+    const bottom = sorted[sorted.length - 1];
+    if (!top || !bottom || top.y === bottom.y || top.value === bottom.value) return null;
+
+    return {
+      labels: sorted,
+      topY: top.y,
+      bottomY: bottom.y,
+      topValue: top.value,
+      bottomValue: bottom.value,
+    };
+  }
+
+  function collectChartPriceLabels(chartRect) {
+    const labels = [];
+    Array.from(document.querySelectorAll("body *")).forEach((element) => {
+      if (root?.contains(element)) return;
+      if (element.children.length > 0) return;
+      const text = cleanText(element.textContent);
+      const value = parsePriceLabel(text);
+      if (!Number.isFinite(value) || value <= 0) return;
+
+      const rect = element.getBoundingClientRect();
+      if (!rect || rect.width <= 0 || rect.height <= 0) return;
+
+      const y = rect.top + rect.height / 2;
+      const nearChartVertically = y >= chartRect.top - 24 && y <= chartRect.bottom + 24;
+      const nearRightScale = rect.left >= chartRect.left + chartRect.width * 0.55 && rect.left <= chartRect.right + 120;
+      if (nearChartVertically && nearRightScale) labels.push({ value, y });
+    });
+
+    return labels;
+  }
+
+  function parsePriceLabel(text) {
+    const label = cleanText(text);
+    if (!label || label.length > 24 || /[%:/]/.test(label)) return null;
+    const match = label.match(/^\$?\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?|[0-9]*\.[0-9]+)\s*([KMB])?$/i);
+    if (!match) return null;
+    return parseCompactNumber(match[1].replace(/,/g, ""), match[2]);
+  }
+
+  function buildTradeChartLevels(summary, token, priceScale) {
+    const entry = selectChartLevel(
+      [
+        { value: summary.entryMarketCapVwapUsd, kind: "mc" },
+        { value: summary.avgEntryNative * (DEFAULT_PRICES[token.chain] || 1) * MARKET_CAP_SUPPLY, kind: "mc" },
+        { value: summary.avgEntryNative * (DEFAULT_PRICES[token.chain] || 1), kind: "price" },
+        { value: summary.avgEntryNative, kind: "price" },
+      ],
+      priceScale,
+    );
+    const exit = selectChartLevel(
+      [
+        { value: summary.exitMarketCapVwapUsd, kind: "mc" },
+        { value: summary.avgExitNative * (DEFAULT_PRICES[token.chain] || 1) * MARKET_CAP_SUPPLY, kind: "mc" },
+        { value: summary.avgExitNative * (DEFAULT_PRICES[token.chain] || 1), kind: "price" },
+        { value: summary.avgExitNative, kind: "price" },
+      ],
+      priceScale,
+    );
+
+    return [
+      entry
+        ? {
+            side: "entry",
+            value: entry.value,
+            label: `Avg entry ${formatChartLevelLabel(entry, priceScale)}`,
+          }
+        : null,
+      exit
+        ? {
+            side: "exit",
+            value: exit.value,
+            label: `Avg exit ${formatChartLevelLabel(exit, priceScale)}`,
+          }
+        : null,
+    ].filter(Boolean);
+  }
+
+  function selectChartLevel(candidates, priceScale) {
+    const finite = candidates
+      .map((candidate) => ({
+        value: Number(candidate?.value),
+        kind: candidate?.kind === "mc" ? "mc" : "price",
+      }))
+      .filter((candidate) => Number.isFinite(candidate.value) && candidate.value > 0);
+    if (finite.length === 0) return null;
+
+    const min = Math.min(priceScale.topValue, priceScale.bottomValue);
+    const max = Math.max(priceScale.topValue, priceScale.bottomValue);
+    const inRange = finite.filter((candidate) => candidate.value >= min && candidate.value <= max);
+    if (inRange.length > 0) return inRange[0];
+
+    const midpoint = (min + max) / 2;
+    return finite
+      .map((candidate) => ({
+        ...candidate,
+        distance: Math.abs(candidate.value - midpoint) / Math.max(Math.abs(midpoint), 1e-12),
+      }))
+      .sort((a, b) => a.distance - b.distance)[0] || null;
+  }
+
+  function priceToY(value, priceScale) {
+    const ratio = (value - priceScale.topValue) / (priceScale.bottomValue - priceScale.topValue);
+    return priceScale.topY + ratio * (priceScale.bottomY - priceScale.topY);
+  }
+
+  function formatChartLevelLabel(level, priceScale) {
+    const value = Number(level?.value);
+    const kind = level?.kind === "mc" ? "MC" : "price";
+    const maxScaleValue = Math.max(Math.abs(priceScale.topValue), Math.abs(priceScale.bottomValue));
+    if (kind === "MC") return `MC ${formatters.usd(value)}`;
+    if (maxScaleValue >= 0.01) return `price $${value.toFixed(4)}`;
+    return `price ${value.toPrecision(4)}`;
   }
 
   function renderFullLog() {
@@ -1546,7 +1932,7 @@
     return {
       schemaVersion: 2,
       exportedAt: new Date().toISOString(),
-      source: "wilytrader-padre-extension",
+      source: `wilytrader-${activeToken?.platform || "supported"}-extension`,
       privacy: "local-only; no backend sync; optional localhost Snipalot bridge",
       reason,
       event: eventExecution
@@ -1554,6 +1940,7 @@
             type: "execution",
             captureScreenshot: Boolean(captureScreenshot),
             executionId: eventExecution.id,
+            platform: eventExecution.platform,
             side: eventExecution.side,
             timestamp: eventExecution.timestamp,
             tokenName: eventExecution.tokenName,
@@ -1579,18 +1966,31 @@
   }
 
   async function saveFallbackTradeArtifacts(reason, eventExecution, captureScreenshot) {
-    const payload = buildExportPayload(`${reason}-chrome-download-fallback`, eventExecution, captureScreenshot);
+    if (!captureScreenshot) return;
+    const event = eventExecution
+      ? {
+          type: "execution",
+          captureScreenshot: true,
+          executionId: eventExecution.id,
+          platform: eventExecution.platform,
+          side: eventExecution.side,
+          timestamp: eventExecution.timestamp,
+          tokenName: eventExecution.tokenName,
+          tokenAddress: eventExecution.tokenAddress,
+        }
+      : null;
     const response = await sendRuntimeMessage({
       type: "WILYTRADER_SAVE_FALLBACK",
-      payload,
-      event: payload.event,
-      captureScreenshot,
-      captureRect: captureScreenshot ? detectBestChartCaptureRect() : null,
+      event,
+      sessionStartedAt: state.sessionStartedAt,
+      saveLedger: false,
+      captureScreenshot: true,
+      captureRect: detectBestChartCaptureRect(),
     });
     if (response?.ok) {
-      setStatus(captureScreenshot ? "Saved fallback log/screenshot to Chrome Downloads." : "Saved fallback log to Chrome Downloads.");
+      setStatus("Saved fallback screenshot to Chrome Downloads.");
     } else {
-      setStatus("Fallback save failed. Use ledger export if needed.");
+      setStatus("Fallback screenshot failed. Use ledger export if needed.");
     }
   }
 
@@ -1688,7 +2088,7 @@
     const anchor = document.createElement("a");
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     anchor.href = url;
-    anchor.download = `wilytrader-padre-ledger-${stamp}.json`;
+    anchor.download = `wilytrader-${activeToken?.platform || "supported"}-ledger-${stamp}.json`;
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
@@ -1824,7 +2224,7 @@
     return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   }
 
-  if (window.location.hostname.includes("trade.padre.gg")) {
+  if (getPlatformAdapter(window.location.hostname)) {
     runTask(initialize());
   }
 })();

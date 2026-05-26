@@ -1,16 +1,20 @@
 {
   "manifest_version": 3,
   "name": "WilyTrader",
-  "version": "0.1.19",
-  "description": "Local-only paper trading overlay for Padre.gg with execution-ledger export.",
+  "version": "0.2.1",
+  "description": "Local-only paper trading overlay for Padre.gg and Axiom with execution-ledger export.",
   "permissions": ["storage", "downloads"],
-  "host_permissions": ["http://127.0.0.1:17365/*", "<all_urls>"],
+  "host_permissions": [
+    "http://127.0.0.1:17365/*",
+    "https://trade.padre.gg/*",
+    "https://axiom.trade/*"
+  ],
   "background": {
     "service_worker": "src/background.js"
   },
   "content_scripts": [
     {
-      "matches": ["https://trade.padre.gg/*"],
+      "matches": ["https://trade.padre.gg/*", "https://axiom.trade/*"],
       "css": ["src/styles.css"],
       "js": ["src/content.js"],
       "run_at": "document_idle"
