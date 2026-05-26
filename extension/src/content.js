@@ -2,7 +2,7 @@
   "use strict";
 
   const STORAGE_KEY = "wilytrader_state_v2";
-  const SCHEMA_VERSION = 9;
+  const SCHEMA_VERSION = 10;
   const LEGACY_DEFAULT_BUY_AMOUNTS = [0.1, 0.2, 0.5, 1];
   const PADRE_FOUR_DEFAULT_BUY_AMOUNTS = [0.1, 0.25, 0.5, 1];
   const PADRE_EIGHT_DEFAULT_BUY_AMOUNTS = [0.1, 0.25, 0.5, 1, 3, 0.005, 5, 7];
@@ -85,7 +85,7 @@
       sellBribeFeeNative: AGGRESSIVE_MEME_FEES.bribeFeeNative,
       buySlippagePct: 80,
       sellSlippagePct: 80,
-      useCustomDelay: false,
+      useCustomDelay: true,
       customDelayMs: 1000,
       panelPosition: null,
       bridgeEnabled: false,
@@ -332,6 +332,9 @@
     }
     if (Number(storedSettings.sellBribeFeeNative) === 0.003) {
       settings.sellBribeFeeNative = DEFAULT_STATE.settings.sellBribeFeeNative;
+    }
+    if (storedSettings.useCustomDelay === undefined || storedSettings.useCustomDelay === false) {
+      settings.useCustomDelay = DEFAULT_STATE.settings.useCustomDelay;
     }
   }
 
@@ -927,6 +930,7 @@
 
   async function buy(amountNative) {
     if (tradeInFlight) return setStatus("Execution already pending.");
+    if (!Number.isFinite(amountNative) || amountNative <= 0) return setStatus("Enter a valid buy amount.");
     tradeInFlight = true;
     try {
     updateActiveToken();
@@ -997,6 +1001,7 @@
 
   async function sell(percent) {
     if (tradeInFlight) return setStatus("Execution already pending.");
+    if (!Number.isFinite(percent) || percent <= 0) return setStatus("Enter a valid sell percentage.");
     tradeInFlight = true;
     try {
     updateActiveToken();
@@ -1009,7 +1014,7 @@
     if (!delayedToken) return;
 
     const chain = delayedToken.chain;
-    const sellRatio = Math.min(1, Math.max(0, percent / 100));
+    const sellRatio = normalizeSellRatio(percent);
     const tokenAmount = position.tokenAmount * sellRatio;
     const costBasis = position.costNative * sellRatio;
     const maxSlippagePct = Number(state.settings.sellSlippagePct || 0);
@@ -1026,7 +1031,7 @@
 
     const remainingTokenAmount = position.tokenAmount - tokenAmount;
     let after = null;
-    if (remainingTokenAmount <= 0.000000001 || percent >= 100) {
+    if (shouldClosePositionAfterSell(position.tokenAmount, remainingTokenAmount, sellRatio)) {
       delete state.positions[token.key];
     } else {
       const updated = {
@@ -1071,6 +1076,16 @@
     } finally {
       tradeInFlight = false;
     }
+  }
+
+  function normalizeSellRatio(percent) {
+    return Math.min(1, Math.max(0, percent / 100));
+  }
+
+  function shouldClosePositionAfterSell(originalTokenAmount, remainingTokenAmount, sellRatio) {
+    if (sellRatio >= 1) return true;
+    const relativeDustThreshold = Math.max(Number(originalTokenAmount || 0) * 1e-9, Number.EPSILON);
+    return remainingTokenAmount <= relativeDustThreshold;
   }
 
   function createEmptyPosition(token) {

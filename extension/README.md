@@ -2,13 +2,18 @@
 
 Local-only Padre.gg paper-trading overlay with execution-ledger JSON export and optional Snipalot localhost sync.
 
-## Install
+## Install In Chrome
 
-1. Open `chrome://extensions`.
-2. Enable **Developer mode**.
+This extension is loaded directly from source. It is not approved by, packaged for, or installed from the Chrome Web Store.
+
+1. Open Chrome and go to `chrome://extensions`.
+2. Turn on **Developer mode** in the top-right corner.
 3. Click **Load unpacked**.
-4. Select `E:\Apps\wilytrader\extension`.
-5. Open a Padre token page such as `https://trade.padre.gg/trade/solana/...`.
+4. Select the `extension/` folder from this repository.
+5. Confirm that **WilyTrader** appears in the extensions list.
+6. Open a Padre token page such as `https://trade.padre.gg/trade/solana/...`.
+
+Chrome may show developer-mode warnings for unpacked extensions. That is normal for a local, non-Web-Store extension. Keep Developer mode enabled, and click the extension's reload button on `chrome://extensions` after changing local files.
 
 ## Behavior
 
@@ -16,7 +21,8 @@ Local-only Padre.gg paper-trading overlay with execution-ledger JSON export and 
 - Uses only `chrome.storage.local`.
 - Does not connect to wallets.
 - Does not read seed phrases, private keys, wallet providers, or transactions.
-- Does not call any backend.
+- Does not call any internet backend.
+- Keeps Snipalot localhost sync off by default.
 
 ## Ledger Export
 
@@ -40,11 +46,11 @@ The sell controls default to a Padre-style 8-button grid. The buy controls use s
 - Delay is active. With custom delay off, priority plus bribe maps to a randomized faster/slower execution delay; with custom delay on, the configured millisecond delay is used directly.
 - Defaults use an aggressive meme-trading paper model: base gas `0.000005`, priority `0.007`, and bribe `0.003` native per side.
 
-During a Snipalot Trade recording, the extension also tries to POST the latest ledger to:
+When Snipalot sync is enabled in WilyTrader settings, the extension tries to POST the latest ledger to:
 
 `http://127.0.0.1:17365/v1/wilytrader/ledger`
 
-If Snipalot is not recording, the sync fails closed and the overlay remains local-only.
+If Snipalot is not recording, the sync fails closed and the overlay remains local-only. Snipalot sync is disabled by default.
 
 The export file is named like:
 
