@@ -2,8 +2,9 @@
   "use strict";
 
   const STORAGE_KEY = "wilytrader_state_v2";
-  const SCHEMA_VERSION = 4;
+  const SCHEMA_VERSION = 5;
   const LEGACY_DEFAULT_BUY_AMOUNTS = [0.1, 0.2, 0.5, 1];
+  const PADRE_EIGHT_DEFAULT_BUY_AMOUNTS = [0.1, 0.25, 0.5, 1, 3, 0.005, 5, 7];
   const LEGACY_DEFAULT_SELL_PERCENTS = [10, 25, 50, 100];
   const PADRE_DEFAULT_FEES = {
     gasFeeNative: 0.001,
@@ -21,6 +22,21 @@
       <path d="M5.99919 11.0574C4.55365 11.0574 3.10812 11.0574 1.66258 11.0574C1.60983 11.0574 1.55708 11.0585 1.50434 11.0553C1.24165 11.0392 1.03304 10.8451 1.02935 10.6146C1.02565 10.3844 1.22741 10.1847 1.49062 10.1597C1.53414 10.1554 1.57845 10.157 1.62223 10.157C4.54416 10.157 7.46609 10.157 10.388 10.1578C10.4619 10.1578 10.5384 10.1612 10.6096 10.1792C10.8514 10.2398 10.9938 10.4223 10.9785 10.6405C10.9643 10.8456 10.7789 11.0242 10.5465 11.0521C10.4859 11.0595 10.4236 11.0574 10.3622 11.0574C8.90794 11.0574 7.45343 11.0574 5.99919 11.0574Z"></path>
       <path d="M2.90148 0.922858C3.53181 0.920748 4.03581 1.41895 4.03819 2.04637C4.04056 2.67459 3.54157 3.18018 2.91441 3.18598C2.29515 3.19152 1.77928 2.68198 1.77348 2.05903C1.76794 1.43794 2.27695 0.924968 2.90148 0.922858Z"></path>
     </svg>`;
+  const ROCKET_ICON = `
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="M13.6 4.2C15.7 2.1 18.8 1.6 21 2.2C21.6 4.4 21.1 7.5 19 9.6L15.7 12.9L17 18L14.7 20.3L12.1 15.9L8.1 11.9L3.7 9.3L6 7L11.1 8.3L13.6 4.2Z"></path>
+      <path d="M7.7 14.7C6.1 14.9 4.7 15.7 3.7 16.8C2.7 17.8 2.1 19.1 2 21C3.9 20.9 5.2 20.3 6.2 19.3C7.3 18.3 8.1 16.9 8.3 15.3L7.7 14.7Z"></path>
+      <path d="M16.8 5.9C17.5 5.2 18.6 5.2 19.3 5.9C20 6.6 20 7.7 19.3 8.4C18.6 9.1 17.5 9.1 16.8 8.4C16.1 7.7 16.1 6.6 16.8 5.9Z"></path>
+    </svg>`;
+  const BRIBE_ICON = `
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="M3 15.2H7.8C8.9 15.2 9.8 16.1 9.8 17.2V20H3V15.2Z"></path>
+      <path d="M9.8 17.3L13.2 18.1C14 18.3 14.8 18.2 15.5 17.8L21 14.6C21.7 14.2 22 13.3 21.6 12.6C21.2 11.9 20.3 11.6 19.6 12L15.1 14.5H11.9"></path>
+      <path d="M9.8 15.8H14.1C14.9 15.8 15.5 15.2 15.5 14.4C15.5 13.6 14.9 13 14.1 13H11.4C10.8 13 10.2 12.8 9.7 12.5L8.8 12C8.2 11.7 7.5 11.5 6.8 11.5H3"></path>
+      <path d="M16 4.2C17.8 4.2 19.2 5.6 19.2 7.4C19.2 9.2 17.8 10.6 16 10.6C14.2 10.6 12.8 9.2 12.8 7.4C12.8 5.6 14.2 4.2 16 4.2Z"></path>
+      <path d="M16 5.7V9.1"></path>
+      <path d="M14.9 6.5H16.5C17 6.5 17.3 6.8 17.3 7.2C17.3 7.6 17 7.9 16.5 7.9H15.5C15.1 7.9 14.8 8.2 14.8 8.6C14.8 9 15.1 9.3 15.6 9.3H17.2"></path>
+    </svg>`;
   const LEGACY_STORAGE_KEYS = [
     "wilytrader_state_v1",
     ["wily", "mem", "trader_state_v2"].join(""),
@@ -37,7 +53,7 @@
     executions: [],
     notes: [],
     settings: {
-      buyAmounts: [0.1, 0.25, 0.5, 1, 3, 0.005, 5, 7],
+      buyAmounts: [0.1, 0.25, 0.5, 1, 3, 0.005],
       sellPercents: [5, 15, 33, 55, 20, 40, 86, 100],
       platformFeePct: 2,
       buyGasFeeNative: AGGRESSIVE_MEME_FEES.gasFeeNative,
@@ -213,7 +229,7 @@
   }
 
   function migrateSettingsToCurrentDefaults(settings, storedSettings) {
-    if (arraysEqual(storedSettings.buyAmounts, LEGACY_DEFAULT_BUY_AMOUNTS)) {
+    if (arraysEqual(storedSettings.buyAmounts, LEGACY_DEFAULT_BUY_AMOUNTS) || arraysEqual(storedSettings.buyAmounts, PADRE_EIGHT_DEFAULT_BUY_AMOUNTS)) {
       settings.buyAmounts = DEFAULT_STATE.settings.buyAmounts;
     }
     if (arraysEqual(storedSettings.sellPercents, LEGACY_DEFAULT_SELL_PERCENTS)) {
@@ -412,24 +428,20 @@
               <div class="wt-trade-title wt-buy-title">Buy</div>
               <div class="wt-chain-pill" data-buy-chain>SOL</div>
             </div>
-            <div class="wt-button-row" data-buy-buttons></div>
+            <div class="wt-button-row wt-buy-grid" data-buy-buttons></div>
             <div class="wt-fee-strip" aria-label="Buy execution settings">
               <label class="wt-inline-setting wt-icon-setting" title="Slippage %" aria-label="Buy slippage percent">
-                <span class="wt-slippage-icon">${SLIPPAGE_ICON}</span>
+                <span class="wt-fee-icon">${SLIPPAGE_ICON}</span>
                 <input data-quick-setting="buySlippagePct" type="number" min="0" step="0.1" />
               </label>
-              <label class="wt-inline-setting">
-                <span>Prio</span>
+              <label class="wt-inline-setting wt-icon-setting" title="Priority fee" aria-label="Buy priority fee">
+                <span class="wt-fee-icon">${ROCKET_ICON}</span>
                 <input data-quick-setting="buyPriorityFeeNative" type="number" min="0" step="0.0001" />
               </label>
-              <label class="wt-inline-setting">
-                <span>Bribe</span>
+              <label class="wt-inline-setting wt-icon-setting" title="Bribe fee" aria-label="Buy bribe fee">
+                <span class="wt-fee-icon">${BRIBE_ICON}</span>
                 <input data-quick-setting="buyBribeFeeNative" type="number" min="0" step="0.0001" />
               </label>
-            </div>
-            <div class="wt-custom-row">
-              <input class="wt-input" data-custom-buy type="number" min="0" step="0.01" placeholder="Custom" />
-              <button class="wt-button" data-action="custom-buy">Buy</button>
             </div>
           </div>
           <div class="wt-section">
@@ -440,15 +452,15 @@
             <div class="wt-button-row" data-sell-buttons></div>
             <div class="wt-fee-strip" aria-label="Sell execution settings">
               <label class="wt-inline-setting wt-icon-setting" title="Slippage %" aria-label="Sell slippage percent">
-                <span class="wt-slippage-icon">${SLIPPAGE_ICON}</span>
+                <span class="wt-fee-icon">${SLIPPAGE_ICON}</span>
                 <input data-quick-setting="sellSlippagePct" type="number" min="0" step="0.1" />
               </label>
-              <label class="wt-inline-setting">
-                <span>Prio</span>
+              <label class="wt-inline-setting wt-icon-setting" title="Priority fee" aria-label="Sell priority fee">
+                <span class="wt-fee-icon">${ROCKET_ICON}</span>
                 <input data-quick-setting="sellPriorityFeeNative" type="number" min="0" step="0.0001" />
               </label>
-              <label class="wt-inline-setting">
-                <span>Bribe</span>
+              <label class="wt-inline-setting wt-icon-setting" title="Bribe fee" aria-label="Sell bribe fee">
+                <span class="wt-fee-icon">${BRIBE_ICON}</span>
                 <input data-quick-setting="sellBribeFeeNative" type="number" min="0" step="0.0001" />
               </label>
             </div>
@@ -479,8 +491,8 @@
           </header>
           <div class="wt-modal-body">
             <div class="wt-setting-group">
-              <label class="wt-label" for="wt-buy-amounts">Buy buttons (native)</label>
-              <input id="wt-buy-amounts" class="wt-input" data-setting="buyAmounts" placeholder="0.1, 0.25, 0.5, 1, 3, 0.005, 5, 7" />
+              <label class="wt-label" for="wt-buy-amounts">Buy presets (6 max)</label>
+              <input id="wt-buy-amounts" class="wt-input" data-setting="buyAmounts" placeholder="0.1, 0.25, 0.5, 1, 3, 0.005" />
             </div>
             <div class="wt-setting-group">
               <label class="wt-label" for="wt-sell-percents">Sell buttons (%)</label>
@@ -681,8 +693,8 @@
   }
 
   async function saveSettingsFromModal() {
-    const nextBuyAmounts = parsePositiveNumberList(root.querySelector("[data-setting='buyAmounts']")?.value, "buy buttons");
-    const parsedSellPercents = parsePositiveNumberList(root.querySelector("[data-setting='sellPercents']")?.value, "sell buttons");
+    const nextBuyAmounts = parsePositiveNumberList(root.querySelector("[data-setting='buyAmounts']")?.value, "buy presets", 6);
+    const parsedSellPercents = parsePositiveNumberList(root.querySelector("[data-setting='sellPercents']")?.value, "sell buttons", 8);
     if (!nextBuyAmounts || !parsedSellPercents) return;
     const nextSellPercents = parsedSellPercents.map((value) => Math.min(100, value));
 
@@ -729,7 +741,7 @@
     setStatus("Settings reset.");
   }
 
-  function parsePositiveNumberList(value, label) {
+  function parsePositiveNumberList(value, label, maxItems = 8) {
     const numbers = String(value || "")
       .split(",")
       .map((part) => Number(part.trim()))
@@ -738,7 +750,7 @@
       setStatus(`Enter at least one ${label} value.`);
       return null;
     }
-    return numbers.slice(0, 8);
+    return numbers.slice(0, maxItems);
   }
 
   async function addNote() {
@@ -1191,13 +1203,26 @@
     });
 
     buyButtonsEl.innerHTML = "";
-    state.settings.buyAmounts.forEach((amount) => {
+    state.settings.buyAmounts.slice(0, 6).forEach((amount) => {
       const button = document.createElement("button");
       button.className = "wt-trade-button wt-buy-button";
       button.dataset.buyAmount = String(amount);
       button.textContent = String(amount);
       buyButtonsEl.appendChild(button);
     });
+    const customInput = document.createElement("input");
+    customInput.className = "wt-input wt-custom-buy-input";
+    customInput.dataset.customBuy = "";
+    customInput.type = "number";
+    customInput.min = "0";
+    customInput.step = "0.01";
+    customInput.placeholder = "Custom";
+    buyButtonsEl.appendChild(customInput);
+    const customButton = document.createElement("button");
+    customButton.className = "wt-trade-button wt-buy-button wt-custom-buy-button";
+    customButton.dataset.action = "custom-buy";
+    customButton.textContent = "Buy";
+    buyButtonsEl.appendChild(customButton);
 
     sellButtonsEl.innerHTML = "";
     state.settings.sellPercents.forEach((percent) => {

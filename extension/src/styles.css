@@ -149,7 +149,7 @@
 .wt-custom-row {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
+  gap: 7px;
 }
 
 .wt-custom-row {
@@ -187,13 +187,34 @@
 }
 
 .wt-trade-button {
-  aspect-ratio: 1.38 / 1;
-  min-height: 62px;
+  aspect-ratio: 1.55 / 1;
+  min-height: 32px;
   border-radius: 999px;
   background: #111318;
-  font-size: 18px;
+  font-size: 13px;
   font-weight: 800;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+}
+
+.wt-custom-buy-input {
+  min-height: 32px;
+  padding: 0 6px;
+  border-radius: 999px;
+  color: #31e6ba;
+  border-color: rgba(36, 225, 180, 0.34);
+  background: #111318;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.wt-custom-buy-input::placeholder {
+  color: rgba(49, 230, 186, 0.62);
+}
+
+.wt-custom-buy-button {
+  font-size: 12px;
+  text-transform: uppercase;
 }
 
 .wt-buy-button {
@@ -243,7 +264,7 @@
   grid-template-columns: 16px minmax(0, 1fr);
 }
 
-.wt-slippage-icon {
+.wt-fee-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -251,11 +272,15 @@
   height: 14px;
 }
 
-.wt-slippage-icon svg {
+.wt-fee-icon svg {
   display: block;
   width: 14px;
   height: 14px;
   fill: currentColor;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .wt-inline-setting input {
