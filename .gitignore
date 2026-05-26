@@ -1,0 +1,12 @@
+# Local investigation/reference material. Do not publish third-party snapshots.
+analysis/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Temporary output
+.tmp/
+tmp/
