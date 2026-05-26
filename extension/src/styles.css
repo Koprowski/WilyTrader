@@ -220,7 +220,7 @@
 
 .wt-fee-strip {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
   min-height: 30px;
 }
@@ -237,6 +237,25 @@
   background: #151821;
   color: #aeb1bd;
   font-size: 10px;
+}
+
+.wt-icon-setting {
+  grid-template-columns: 16px minmax(0, 1fr);
+}
+
+.wt-slippage-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+}
+
+.wt-slippage-icon svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
 }
 
 .wt-inline-setting input {

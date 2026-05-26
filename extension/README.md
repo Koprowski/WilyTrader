@@ -33,10 +33,10 @@ Use **Save JSON** or the header download button in the overlay. The export inclu
 
 Use the **Paper Balance** control in the overlay to add local fake SOL/BNB for more test trades.
 
-The buy/sell controls default to Padre-style 8-button grids. The inline **Max Slip**, **Gas**, **Prio**, and **Bribe** fields are active execution settings:
+The buy/sell controls default to Padre-style 8-button grids. The inline slippage icon, **Prio**, and **Bribe** fields are active execution settings:
 
 - Slippage changes the simulated execution price and the delayed-execution movement cap.
-- Gas, priority, platform, and bribe fees are debited from buys, removed from sell proceeds, and exported in each execution.
+- Gas is fixed at `0.000005` native. Gas, priority, platform, and bribe fees are debited from buys, removed from sell proceeds, and exported in each execution.
 - Delay is active. With custom delay off, priority plus bribe maps to a randomized faster/slower execution delay; with custom delay on, the configured millisecond delay is used directly.
 - Defaults use an aggressive meme-trading paper model: base gas `0.000005`, priority `0.007`, and bribe `0.003` native per side.
 
