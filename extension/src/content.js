@@ -2,9 +2,19 @@
   "use strict";
 
   const STORAGE_KEY = "wilytrader_state_v2";
-  const SCHEMA_VERSION = 3;
+  const SCHEMA_VERSION = 4;
   const LEGACY_DEFAULT_BUY_AMOUNTS = [0.1, 0.2, 0.5, 1];
   const LEGACY_DEFAULT_SELL_PERCENTS = [10, 25, 50, 100];
+  const PADRE_DEFAULT_FEES = {
+    gasFeeNative: 0.001,
+    priorityFeeNative: 0.01,
+    bribeFeeNative: 0,
+  };
+  const AGGRESSIVE_MEME_FEES = {
+    gasFeeNative: 0.000005,
+    priorityFeeNative: 0.007,
+    bribeFeeNative: 0.003,
+  };
   const LEGACY_STORAGE_KEYS = [
     "wilytrader_state_v1",
     ["wily", "mem", "trader_state_v2"].join(""),
@@ -24,12 +34,12 @@
       buyAmounts: [0.1, 0.25, 0.5, 1, 3, 0.005, 5, 7],
       sellPercents: [5, 15, 33, 55, 20, 40, 86, 100],
       platformFeePct: 2,
-      buyGasFeeNative: 0.001,
-      sellGasFeeNative: 0.001,
-      buyPriorityFeeNative: 0.01,
-      sellPriorityFeeNative: 0.01,
-      buyBribeFeeNative: 0,
-      sellBribeFeeNative: 0,
+      buyGasFeeNative: AGGRESSIVE_MEME_FEES.gasFeeNative,
+      sellGasFeeNative: AGGRESSIVE_MEME_FEES.gasFeeNative,
+      buyPriorityFeeNative: AGGRESSIVE_MEME_FEES.priorityFeeNative,
+      sellPriorityFeeNative: AGGRESSIVE_MEME_FEES.priorityFeeNative,
+      buyBribeFeeNative: AGGRESSIVE_MEME_FEES.bribeFeeNative,
+      sellBribeFeeNative: AGGRESSIVE_MEME_FEES.bribeFeeNative,
       buySlippagePct: 80,
       sellSlippagePct: 80,
       useCustomDelay: false,
@@ -209,11 +219,31 @@
     if (Number(storedSettings.sellSlippagePct) === 30 || storedSettings.sellSlippagePct === undefined) {
       settings.sellSlippagePct = DEFAULT_STATE.settings.sellSlippagePct;
     }
-    if (Number(storedSettings.buyPriorityFeeNative) === 0.001 || storedSettings.buyPriorityFeeNative === undefined) {
+    if (Number(storedSettings.buyGasFeeNative) === PADRE_DEFAULT_FEES.gasFeeNative || storedSettings.buyGasFeeNative === undefined) {
+      settings.buyGasFeeNative = DEFAULT_STATE.settings.buyGasFeeNative;
+    }
+    if (Number(storedSettings.sellGasFeeNative) === PADRE_DEFAULT_FEES.gasFeeNative || storedSettings.sellGasFeeNative === undefined) {
+      settings.sellGasFeeNative = DEFAULT_STATE.settings.sellGasFeeNative;
+    }
+    if (
+      Number(storedSettings.buyPriorityFeeNative) === 0.001 ||
+      Number(storedSettings.buyPriorityFeeNative) === PADRE_DEFAULT_FEES.priorityFeeNative ||
+      storedSettings.buyPriorityFeeNative === undefined
+    ) {
       settings.buyPriorityFeeNative = DEFAULT_STATE.settings.buyPriorityFeeNative;
     }
-    if (Number(storedSettings.sellPriorityFeeNative) === 0.001 || storedSettings.sellPriorityFeeNative === undefined) {
+    if (
+      Number(storedSettings.sellPriorityFeeNative) === 0.001 ||
+      Number(storedSettings.sellPriorityFeeNative) === PADRE_DEFAULT_FEES.priorityFeeNative ||
+      storedSettings.sellPriorityFeeNative === undefined
+    ) {
       settings.sellPriorityFeeNative = DEFAULT_STATE.settings.sellPriorityFeeNative;
+    }
+    if (Number(storedSettings.buyBribeFeeNative) === PADRE_DEFAULT_FEES.bribeFeeNative || storedSettings.buyBribeFeeNative === undefined) {
+      settings.buyBribeFeeNative = DEFAULT_STATE.settings.buyBribeFeeNative;
+    }
+    if (Number(storedSettings.sellBribeFeeNative) === PADRE_DEFAULT_FEES.bribeFeeNative || storedSettings.sellBribeFeeNative === undefined) {
+      settings.sellBribeFeeNative = DEFAULT_STATE.settings.sellBribeFeeNative;
     }
   }
 
@@ -390,6 +420,10 @@
                 <span>Prio</span>
                 <input data-quick-setting="buyPriorityFeeNative" type="number" min="0" step="0.0001" />
               </label>
+              <label class="wt-inline-setting">
+                <span>Bribe</span>
+                <input data-quick-setting="buyBribeFeeNative" type="number" min="0" step="0.0001" />
+              </label>
             </div>
             <div class="wt-custom-row">
               <input class="wt-input" data-custom-buy type="number" min="0" step="0.01" placeholder="Custom" />
@@ -414,6 +448,10 @@
               <label class="wt-inline-setting">
                 <span>Prio</span>
                 <input data-quick-setting="sellPriorityFeeNative" type="number" min="0" step="0.0001" />
+              </label>
+              <label class="wt-inline-setting">
+                <span>Bribe</span>
+                <input data-quick-setting="sellBribeFeeNative" type="number" min="0" step="0.0001" />
               </label>
             </div>
           </div>
@@ -907,8 +945,9 @@
 
   async function waitForSimulatedExecution(side, token) {
     const delayMs = calculateExecutionDelay(side);
-    const fee = side === "buy" ? state.settings.buyPriorityFeeNative : state.settings.sellPriorityFeeNative;
-    setStatus(`${side === "buy" ? "Buy" : "Sell"} pending (${delayMs}ms delay, priority ${fee}).`);
+    const priorityFee = Number(side === "buy" ? state.settings.buyPriorityFeeNative : state.settings.sellPriorityFeeNative) || 0;
+    const bribeFee = Number(side === "buy" ? state.settings.buyBribeFeeNative : state.settings.sellBribeFeeNative) || 0;
+    setStatus(`${side === "buy" ? "Buy" : "Sell"} pending (${delayMs}ms delay, prio ${priorityFee}, bribe ${bribeFee}).`);
     if (delayMs > 0) await new Promise((resolve) => window.setTimeout(resolve, delayMs));
     updateActiveToken();
     const delayedToken = activeToken;
@@ -928,11 +967,18 @@
   function calculateExecutionDelay(side) {
     if (state.settings.useCustomDelay) return Math.max(0, Math.round(Number(state.settings.customDelayMs || 0)));
     const priorityFee = Number(side === "buy" ? state.settings.buyPriorityFeeNative : state.settings.sellPriorityFeeNative) || 0;
-    const min = 350;
-    const max = 850;
-    const normalized = Math.min(1, Math.max(0, (priorityFee - 0.001) / 0.099));
+    const bribeFee = Number(side === "buy" ? state.settings.buyBribeFeeNative : state.settings.sellBribeFeeNative) || 0;
+    const urgencyFee = priorityFee + bribeFee;
+    const min = 220;
+    const max = 1600;
+    const lowCompetitiveFee = 0.0001;
+    const highCompetitiveFee = 0.01;
+    const normalized = Math.min(
+      1,
+      Math.max(0, Math.log1p(urgencyFee / lowCompetitiveFee) / Math.log1p(highCompetitiveFee / lowCompetitiveFee)),
+    );
     const delay = min + (1 - normalized) * (max - min);
-    const jitter = 120 * (Math.random() - 0.5);
+    const jitter = 180 * (Math.random() - 0.5);
     return Math.max(0, Math.round(delay + jitter));
   }
 
