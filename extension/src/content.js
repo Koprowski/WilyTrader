@@ -2,6 +2,9 @@
   "use strict";
 
   const STORAGE_KEY = "wilytrader_state_v2";
+  const SCHEMA_VERSION = 3;
+  const LEGACY_DEFAULT_BUY_AMOUNTS = [0.1, 0.2, 0.5, 1];
+  const LEGACY_DEFAULT_SELL_PERCENTS = [10, 25, 50, 100];
   const LEGACY_STORAGE_KEYS = [
     "wilytrader_state_v1",
     ["wily", "mem", "trader_state_v2"].join(""),
@@ -11,22 +14,24 @@
   const MARKET_CAP_SUPPLY = 1_000_000_000;
   const DEFAULT_PRICES = { SOL: 190, BNB: 600 };
   const DEFAULT_STATE = {
-    schemaVersion: 2,
+    schemaVersion: SCHEMA_VERSION,
     balances: { SOL: 3, BNB: 1 },
     positions: {},
     closedPositions: [],
     executions: [],
     notes: [],
     settings: {
-      buyAmounts: [0.1, 0.2, 0.5, 1],
-      sellPercents: [10, 25, 50, 100],
+      buyAmounts: [0.1, 0.25, 0.5, 1, 3, 0.005, 5, 7],
+      sellPercents: [5, 15, 33, 55, 20, 40, 86, 100],
       platformFeePct: 2,
-      buyPriorityFeeNative: 0.001,
-      sellPriorityFeeNative: 0.001,
+      buyGasFeeNative: 0.001,
+      sellGasFeeNative: 0.001,
+      buyPriorityFeeNative: 0.01,
+      sellPriorityFeeNative: 0.01,
       buyBribeFeeNative: 0,
       sellBribeFeeNative: 0,
-      buySlippagePct: 30,
-      sellSlippagePct: 30,
+      buySlippagePct: 80,
+      sellSlippagePct: 80,
       useCustomDelay: false,
       customDelayMs: 1000,
       panelPosition: null,
@@ -163,7 +168,7 @@
     const merged = {
       ...DEFAULT_STATE,
       ...(stored || {}),
-      schemaVersion: 2,
+      schemaVersion: SCHEMA_VERSION,
       balances: { ...DEFAULT_STATE.balances, ...(stored?.balances || {}) },
       positions: { ...(stored?.positions || {}) },
       closedPositions: Array.isArray(stored?.closedPositions) ? stored.closedPositions : [],
@@ -171,6 +176,9 @@
       notes: Array.isArray(stored?.notes) ? stored.notes : [],
       settings: { ...DEFAULT_STATE.settings, ...(stored?.settings || {}) },
     };
+    if ((stored?.schemaVersion || 0) < SCHEMA_VERSION) {
+      migrateSettingsToCurrentDefaults(merged.settings, stored?.settings || {});
+    }
     if (!Array.isArray(merged.settings.buyAmounts) || merged.settings.buyAmounts.length === 0) {
       merged.settings.buyAmounts = DEFAULT_STATE.settings.buyAmounts;
     }
@@ -186,6 +194,31 @@
       merged.settings.sellPriorityFeeNative = Number(stored.settings.feeNative) || DEFAULT_STATE.settings.sellPriorityFeeNative;
     }
     return merged;
+  }
+
+  function migrateSettingsToCurrentDefaults(settings, storedSettings) {
+    if (arraysEqual(storedSettings.buyAmounts, LEGACY_DEFAULT_BUY_AMOUNTS)) {
+      settings.buyAmounts = DEFAULT_STATE.settings.buyAmounts;
+    }
+    if (arraysEqual(storedSettings.sellPercents, LEGACY_DEFAULT_SELL_PERCENTS)) {
+      settings.sellPercents = DEFAULT_STATE.settings.sellPercents;
+    }
+    if (Number(storedSettings.buySlippagePct) === 30 || storedSettings.buySlippagePct === undefined) {
+      settings.buySlippagePct = DEFAULT_STATE.settings.buySlippagePct;
+    }
+    if (Number(storedSettings.sellSlippagePct) === 30 || storedSettings.sellSlippagePct === undefined) {
+      settings.sellSlippagePct = DEFAULT_STATE.settings.sellSlippagePct;
+    }
+    if (Number(storedSettings.buyPriorityFeeNative) === 0.001 || storedSettings.buyPriorityFeeNative === undefined) {
+      settings.buyPriorityFeeNative = DEFAULT_STATE.settings.buyPriorityFeeNative;
+    }
+    if (Number(storedSettings.sellPriorityFeeNative) === 0.001 || storedSettings.sellPriorityFeeNative === undefined) {
+      settings.sellPriorityFeeNative = DEFAULT_STATE.settings.sellPriorityFeeNative;
+    }
+  }
+
+  function arraysEqual(a, b) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((value, index) => Number(value) === Number(b[index]));
   }
 
   function migrateLegacyTrades(trades) {
@@ -339,16 +372,50 @@
             </div>
           </div>
           <div class="wt-section">
-            <div class="wt-label">Buy</div>
+            <div class="wt-trade-header">
+              <div class="wt-trade-title wt-buy-title">Buy</div>
+              <div class="wt-chain-pill" data-buy-chain>SOL</div>
+            </div>
             <div class="wt-button-row" data-buy-buttons></div>
+            <div class="wt-fee-strip" aria-label="Buy execution settings">
+              <label class="wt-inline-setting">
+                <span>Max Slip</span>
+                <input data-quick-setting="buySlippagePct" type="number" min="0" step="0.1" />
+              </label>
+              <label class="wt-inline-setting">
+                <span>Gas</span>
+                <input data-quick-setting="buyGasFeeNative" type="number" min="0" step="0.0001" />
+              </label>
+              <label class="wt-inline-setting">
+                <span>Prio</span>
+                <input data-quick-setting="buyPriorityFeeNative" type="number" min="0" step="0.0001" />
+              </label>
+            </div>
             <div class="wt-custom-row">
               <input class="wt-input" data-custom-buy type="number" min="0" step="0.01" placeholder="Custom" />
               <button class="wt-button" data-action="custom-buy">Buy</button>
             </div>
           </div>
           <div class="wt-section">
-            <div class="wt-label">Sell</div>
+            <div class="wt-trade-header">
+              <div class="wt-trade-title wt-sell-title">Sell</div>
+              <div class="wt-muted" data-sell-assets>0 Asset</div>
+            </div>
             <div class="wt-button-row" data-sell-buttons></div>
+            <div class="wt-fee-strip" aria-label="Sell execution settings">
+              <label class="wt-inline-setting">
+                <span>Max Slip</span>
+                <input data-quick-setting="sellSlippagePct" type="number" min="0" step="0.1" />
+              </label>
+              <label class="wt-inline-setting">
+                <span>Gas</span>
+                <input data-quick-setting="sellGasFeeNative" type="number" min="0" step="0.0001" />
+              </label>
+              <label class="wt-inline-setting">
+                <span>Prio</span>
+                <input data-quick-setting="sellPriorityFeeNative" type="number" min="0" step="0.0001" />
+              </label>
+            </div>
           </div>
           <div class="wt-section">
             <div class="wt-label">Note</div>
@@ -377,13 +444,21 @@
           <div class="wt-modal-body">
             <div class="wt-setting-group">
               <label class="wt-label" for="wt-buy-amounts">Buy buttons (native)</label>
-              <input id="wt-buy-amounts" class="wt-input" data-setting="buyAmounts" placeholder="0.1, 0.2, 0.5, 1" />
+              <input id="wt-buy-amounts" class="wt-input" data-setting="buyAmounts" placeholder="0.1, 0.25, 0.5, 1, 3, 0.005, 5, 7" />
             </div>
             <div class="wt-setting-group">
               <label class="wt-label" for="wt-sell-percents">Sell buttons (%)</label>
-              <input id="wt-sell-percents" class="wt-input" data-setting="sellPercents" placeholder="10, 25, 50, 100" />
+              <input id="wt-sell-percents" class="wt-input" data-setting="sellPercents" placeholder="5, 15, 33, 55, 20, 40, 86, 100" />
             </div>
             <div class="wt-settings-grid">
+              <div class="wt-setting-group">
+                <label class="wt-label" for="wt-buy-gas">Buy gas fee</label>
+                <input id="wt-buy-gas" class="wt-input" data-setting="buyGasFeeNative" type="number" min="0" step="0.0001" />
+              </div>
+              <div class="wt-setting-group">
+                <label class="wt-label" for="wt-sell-gas">Sell gas fee</label>
+                <input id="wt-sell-gas" class="wt-input" data-setting="sellGasFeeNative" type="number" min="0" step="0.0001" />
+              </div>
               <div class="wt-setting-group">
                 <label class="wt-label" for="wt-buy-priority">Buy priority fee</label>
                 <input id="wt-buy-priority" class="wt-input" data-setting="buyPriorityFeeNative" type="number" min="0" step="0.0001" />
@@ -401,11 +476,11 @@
                 <input id="wt-sell-bribe" class="wt-input" data-setting="sellBribeFeeNative" type="number" min="0" step="0.0001" />
               </div>
               <div class="wt-setting-group">
-                <label class="wt-label" for="wt-buy-slippage">Buy slippage %</label>
+                <label class="wt-label" for="wt-buy-slippage">Buy max slippage %</label>
                 <input id="wt-buy-slippage" class="wt-input" data-setting="buySlippagePct" type="number" min="0" step="0.1" />
               </div>
               <div class="wt-setting-group">
-                <label class="wt-label" for="wt-sell-slippage">Sell slippage %</label>
+                <label class="wt-label" for="wt-sell-slippage">Sell max slippage %</label>
                 <input id="wt-sell-slippage" class="wt-input" data-setting="sellSlippagePct" type="number" min="0" step="0.1" />
               </div>
               <div class="wt-setting-group">
@@ -450,6 +525,7 @@
     `;
     document.documentElement.appendChild(root);
     root.addEventListener("click", handleClick);
+    root.addEventListener("change", handleChange);
     const panel = root.querySelector(`.${selectors.panel}`);
     applyPanelPosition(panel);
     makeDraggable(root.querySelector(".wt-header"), panel);
@@ -508,6 +584,26 @@
     }
   }
 
+  function handleChange(event) {
+    const target = event.target;
+    if (!target?.matches?.("[data-quick-setting]")) return;
+    void saveQuickSetting(target.dataset.quickSetting, target.value);
+  }
+
+  async function saveQuickSetting(key, rawValue) {
+    if (!Object.hasOwn(state.settings, key)) return;
+    const value = Number(rawValue);
+    if (!Number.isFinite(value) || value < 0) {
+      setStatus(`Enter a valid ${key}.`);
+      render();
+      return;
+    }
+    state.settings[key] = key === "customDelayMs" ? Math.round(value) : value;
+    await persistAndSync("quick-settings");
+    render();
+    setStatus("Execution settings saved.");
+  }
+
   async function addPaperBalance(amount) {
     updateActiveToken();
     const chain = activeToken?.chain || "SOL";
@@ -523,6 +619,8 @@
     root.querySelector("[data-setting='buyAmounts']").value = state.settings.buyAmounts.join(", ");
     root.querySelector("[data-setting='sellPercents']").value = state.settings.sellPercents.join(", ");
     [
+      "buyGasFeeNative",
+      "sellGasFeeNative",
       "buyPriorityFeeNative",
       "sellPriorityFeeNative",
       "buyBribeFeeNative",
@@ -563,6 +661,8 @@
     const nextSellPercents = parsedSellPercents.map((value) => Math.min(100, value));
 
     const numericKeys = [
+      "buyGasFeeNative",
+      "sellGasFeeNative",
       "buyPriorityFeeNative",
       "sellPriorityFeeNative",
       "buyBribeFeeNative",
@@ -838,13 +938,15 @@
 
   function calculateFees(side, baseNative, executionDelayMs = 0) {
     const platformFeeNative = baseNative * (Number(state.settings.platformFeePct || 0) / 100);
+    const gasFeeNative = Number(side === "buy" ? state.settings.buyGasFeeNative : state.settings.sellGasFeeNative) || 0;
     const priorityFeeNative = Number(side === "buy" ? state.settings.buyPriorityFeeNative : state.settings.sellPriorityFeeNative) || 0;
     const bribeFeeNative = Number(side === "buy" ? state.settings.buyBribeFeeNative : state.settings.sellBribeFeeNative) || 0;
     return {
       platformFeeNative,
+      gasFeeNative,
       priorityFeeNative,
       bribeFeeNative,
-      totalFeeNative: platformFeeNative + priorityFeeNative + bribeFeeNative,
+      totalFeeNative: platformFeeNative + gasFeeNative + priorityFeeNative + bribeFeeNative,
       executionDelayMs,
     };
   }
@@ -876,6 +978,7 @@
       netUsd: round(fields.netNative * usdPrice),
       feeNative: round(fields.fees?.totalFeeNative),
       platformFeeNative: round(fields.fees?.platformFeeNative),
+      gasFeeNative: round(fields.fees?.gasFeeNative),
       priorityFeeNative: round(fields.fees?.priorityFeeNative),
       bribeFeeNative: round(fields.fees?.bribeFeeNative),
       platformFeePct: Number(state.settings.platformFeePct || 0),
@@ -1023,6 +1126,8 @@
     const positionEl = root.querySelector(`#${selectors.position}`);
     const buyButtonsEl = root.querySelector("[data-buy-buttons]");
     const sellButtonsEl = root.querySelector("[data-sell-buttons]");
+    const buyChainEl = root.querySelector("[data-buy-chain]");
+    const sellAssetsEl = root.querySelector("[data-sell-assets]");
     const logEl = root.querySelector(`#${selectors.log}`);
 
     const token = activeToken;
@@ -1041,20 +1146,31 @@
     positionEl.textContent = summary
       ? `${formatters.native(summary.investedNative, token.chain)} cost - ${formatters.pct(calculateOpenPnlPct(position, token))}`
       : "None";
+    if (buyChainEl) buyChainEl.textContent = token.chain;
+    if (sellAssetsEl) {
+      sellAssetsEl.textContent = position
+        ? `${round(position.tokenAmount, 4)} Asset - ${formatters.usd((position.tokenAmount || 0) * (token.unitPriceUsd || 0))}`
+        : "0 Asset - $0";
+    }
+
+    root.querySelectorAll("[data-quick-setting]").forEach((input) => {
+      const key = input.dataset.quickSetting;
+      if (document.activeElement !== input) input.value = String(state.settings[key] ?? "");
+    });
 
     buyButtonsEl.innerHTML = "";
     state.settings.buyAmounts.forEach((amount) => {
       const button = document.createElement("button");
-      button.className = "wt-button";
+      button.className = "wt-trade-button wt-buy-button";
       button.dataset.buyAmount = String(amount);
-      button.textContent = `${amount} ${token.chain}`;
+      button.textContent = String(amount);
       buyButtonsEl.appendChild(button);
     });
 
     sellButtonsEl.innerHTML = "";
     state.settings.sellPercents.forEach((percent) => {
       const button = document.createElement("button");
-      button.className = "wt-button";
+      button.className = "wt-trade-button wt-sell-button";
       button.dataset.sellPct = String(percent);
       button.textContent = `${percent}%`;
       sellButtonsEl.appendChild(button);

@@ -33,6 +33,12 @@ Use **Save JSON** or the header download button in the overlay. The export inclu
 
 Use the **Paper Balance** control in the overlay to add local fake SOL/BNB for more test trades.
 
+The buy/sell controls default to Padre-style 8-button grids. The inline **Slip %**, **Gas**, and **Prio** fields are active execution settings:
+
+- Slippage changes the simulated execution price and the delayed-execution movement cap.
+- Gas, priority, platform, and bribe fees are debited from buys, removed from sell proceeds, and exported in each execution.
+- Delay is active. With custom delay off, priority fee maps to a randomized faster/slower execution delay; with custom delay on, the configured millisecond delay is used directly.
+
 During a Snipalot Trade recording, the extension also tries to POST the latest ledger to:
 
 `http://127.0.0.1:17365/v1/wilytrader/ledger`
