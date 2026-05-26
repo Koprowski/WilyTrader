@@ -2,10 +2,12 @@
   "use strict";
 
   const STORAGE_KEY = "wilytrader_state_v2";
-  const SCHEMA_VERSION = 5;
+  const SCHEMA_VERSION = 6;
   const LEGACY_DEFAULT_BUY_AMOUNTS = [0.1, 0.2, 0.5, 1];
   const PADRE_EIGHT_DEFAULT_BUY_AMOUNTS = [0.1, 0.25, 0.5, 1, 3, 0.005, 5, 7];
+  const SIX_SLOT_DEFAULT_BUY_AMOUNTS = [0.1, 0.25, 0.5, 1, 3, 0.005];
   const LEGACY_DEFAULT_SELL_PERCENTS = [10, 25, 50, 100];
+  const PADRE_DEFAULT_SELL_PERCENTS = [5, 15, 33, 55, 20, 40, 86, 100];
   const PADRE_DEFAULT_FEES = {
     gasFeeNative: 0.001,
     priorityFeeNative: 0.01,
@@ -30,12 +32,9 @@
     </svg>`;
   const BRIBE_ICON = `
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-      <path d="M3 15.2H7.8C8.9 15.2 9.8 16.1 9.8 17.2V20H3V15.2Z"></path>
-      <path d="M9.8 17.3L13.2 18.1C14 18.3 14.8 18.2 15.5 17.8L21 14.6C21.7 14.2 22 13.3 21.6 12.6C21.2 11.9 20.3 11.6 19.6 12L15.1 14.5H11.9"></path>
-      <path d="M9.8 15.8H14.1C14.9 15.8 15.5 15.2 15.5 14.4C15.5 13.6 14.9 13 14.1 13H11.4C10.8 13 10.2 12.8 9.7 12.5L8.8 12C8.2 11.7 7.5 11.5 6.8 11.5H3"></path>
-      <path d="M16 4.2C17.8 4.2 19.2 5.6 19.2 7.4C19.2 9.2 17.8 10.6 16 10.6C14.2 10.6 12.8 9.2 12.8 7.4C12.8 5.6 14.2 4.2 16 4.2Z"></path>
-      <path d="M16 5.7V9.1"></path>
-      <path d="M14.9 6.5H16.5C17 6.5 17.3 6.8 17.3 7.2C17.3 7.6 17 7.9 16.5 7.9H15.5C15.1 7.9 14.8 8.2 14.8 8.6C14.8 9 15.1 9.3 15.6 9.3H17.2"></path>
+      <path d="M3 15.2C3 14.5 3.5 14 4.2 14H8.2C9.5 14 10.7 14.5 11.6 15.3L12.1 15.8H15.4C16.1 15.8 16.7 16.4 16.7 17.1C16.7 17.8 16.1 18.4 15.4 18.4H11.7C11.3 18.4 11 18.7 11 19.1C11 19.5 11.3 19.8 11.7 19.8H16.1C16.7 19.8 17.3 19.6 17.8 19.2L21.1 16.8C21.8 16.3 22 15.4 21.5 14.8C21.1 14.2 20.2 14 19.6 14.5L17.2 16.2C16.9 15.1 15.9 14.4 14.8 14.4H12.7L12.3 14C11.1 12.9 9.6 12.3 8 12.3H4.2C3.5 12.3 3 12.8 3 13.5V15.2Z"></path>
+      <path d="M4 16.1H8.2C9.1 16.1 9.9 16.5 10.5 17.1L11 17.6V21H4C3.4 21 3 20.6 3 20V17.1C3 16.5 3.4 16.1 4 16.1Z"></path>
+      <path d="M12.2 3.1H21C21.6 3.1 22 3.5 22 4.1V10.3C22 10.9 21.6 11.3 21 11.3H12.2C11.6 11.3 11.2 10.9 11.2 10.3V4.1C11.2 3.5 11.6 3.1 12.2 3.1ZM16.6 9.5C17.9 9.5 19 8.5 19 7.2C19 5.9 17.9 4.9 16.6 4.9C15.3 4.9 14.2 5.9 14.2 7.2C14.2 8.5 15.3 9.5 16.6 9.5Z"></path>
     </svg>`;
   const LEGACY_STORAGE_KEYS = [
     "wilytrader_state_v1",
@@ -53,8 +52,8 @@
     executions: [],
     notes: [],
     settings: {
-      buyAmounts: [0.1, 0.25, 0.5, 1, 3, 0.005],
-      sellPercents: [5, 15, 33, 55, 20, 40, 86, 100],
+      buyAmounts: [0.1, 0.25, 0.5, 1, 2, 5],
+      sellPercents: [10, 20, 25, 33, 50, 67, 75, 100],
       platformFeePct: 2,
       buyGasFeeNative: AGGRESSIVE_MEME_FEES.gasFeeNative,
       sellGasFeeNative: AGGRESSIVE_MEME_FEES.gasFeeNative,
@@ -84,6 +83,7 @@
     log: "wt-log",
     settingsModal: "wt-settings-modal",
     logModal: "wt-log-modal",
+    addModal: "wt-add-modal",
   };
 
   let state = null;
@@ -229,10 +229,14 @@
   }
 
   function migrateSettingsToCurrentDefaults(settings, storedSettings) {
-    if (arraysEqual(storedSettings.buyAmounts, LEGACY_DEFAULT_BUY_AMOUNTS) || arraysEqual(storedSettings.buyAmounts, PADRE_EIGHT_DEFAULT_BUY_AMOUNTS)) {
+    if (
+      arraysEqual(storedSettings.buyAmounts, LEGACY_DEFAULT_BUY_AMOUNTS) ||
+      arraysEqual(storedSettings.buyAmounts, PADRE_EIGHT_DEFAULT_BUY_AMOUNTS) ||
+      arraysEqual(storedSettings.buyAmounts, SIX_SLOT_DEFAULT_BUY_AMOUNTS)
+    ) {
       settings.buyAmounts = DEFAULT_STATE.settings.buyAmounts;
     }
-    if (arraysEqual(storedSettings.sellPercents, LEGACY_DEFAULT_SELL_PERCENTS)) {
+    if (arraysEqual(storedSettings.sellPercents, LEGACY_DEFAULT_SELL_PERCENTS) || arraysEqual(storedSettings.sellPercents, PADRE_DEFAULT_SELL_PERCENTS)) {
       settings.sellPercents = DEFAULT_STATE.settings.sellPercents;
     }
     if (Number(storedSettings.buySlippagePct) === 30 || storedSettings.buySlippagePct === undefined) {
@@ -396,6 +400,7 @@
             <div id="${selectors.status}" class="wt-muted">Local ledger</div>
           </div>
           <div class="wt-header-controls">
+            <button class="wt-icon-btn" data-action="open-add" title="Add funds or position" aria-label="Add funds or position">+</button>
             <button class="wt-icon-btn" data-action="settings" title="Settings" aria-label="Settings">&#9881;</button>
             <button class="wt-icon-btn" data-action="export" title="Download JSON" aria-label="Download JSON">DL</button>
           </div>
@@ -417,13 +422,6 @@
             </div>
           </div>
           <div class="wt-section">
-            <div class="wt-label">Paper Balance</div>
-            <div class="wt-custom-row">
-              <input class="wt-input" data-deposit type="number" min="0" step="0.01" placeholder="Add amount" />
-              <button class="wt-button" data-action="deposit">Add</button>
-            </div>
-          </div>
-          <div class="wt-section">
             <div class="wt-trade-header">
               <div class="wt-trade-title wt-buy-title">Buy</div>
               <div class="wt-chain-pill" data-buy-chain>SOL</div>
@@ -433,6 +431,7 @@
               <label class="wt-inline-setting wt-icon-setting" title="Slippage %" aria-label="Buy slippage percent">
                 <span class="wt-fee-icon">${SLIPPAGE_ICON}</span>
                 <input data-quick-setting="buySlippagePct" type="number" min="0" step="0.1" />
+                <span class="wt-percent-suffix">%</span>
               </label>
               <label class="wt-inline-setting wt-icon-setting" title="Priority fee" aria-label="Buy priority fee">
                 <span class="wt-fee-icon">${ROCKET_ICON}</span>
@@ -454,6 +453,7 @@
               <label class="wt-inline-setting wt-icon-setting" title="Slippage %" aria-label="Sell slippage percent">
                 <span class="wt-fee-icon">${SLIPPAGE_ICON}</span>
                 <input data-quick-setting="sellSlippagePct" type="number" min="0" step="0.1" />
+                <span class="wt-percent-suffix">%</span>
               </label>
               <label class="wt-inline-setting wt-icon-setting" title="Priority fee" aria-label="Sell priority fee">
                 <span class="wt-fee-icon">${ROCKET_ICON}</span>
@@ -492,11 +492,11 @@
           <div class="wt-modal-body">
             <div class="wt-setting-group">
               <label class="wt-label" for="wt-buy-amounts">Buy presets (6 max)</label>
-              <input id="wt-buy-amounts" class="wt-input" data-setting="buyAmounts" placeholder="0.1, 0.25, 0.5, 1, 3, 0.005" />
+              <input id="wt-buy-amounts" class="wt-input" data-setting="buyAmounts" placeholder="0.1, 0.25, 0.5, 1, 2, 5" />
             </div>
             <div class="wt-setting-group">
               <label class="wt-label" for="wt-sell-percents">Sell buttons (%)</label>
-              <input id="wt-sell-percents" class="wt-input" data-setting="sellPercents" placeholder="5, 15, 33, 55, 20, 40, 86, 100" />
+              <input id="wt-sell-percents" class="wt-input" data-setting="sellPercents" placeholder="10, 20, 25, 33, 50, 67, 75, 100" />
             </div>
             <div class="wt-settings-grid">
               <div class="wt-setting-group">
@@ -543,6 +543,30 @@
             <div class="wt-button-row">
               <button class="wt-button" data-action="reset-settings">Defaults</button>
               <button class="wt-button" data-action="save-settings">Save</button>
+            </div>
+          </div>
+        </section>
+      </div>
+      <div id="${selectors.addModal}" class="wt-modal" aria-hidden="true">
+        <section class="wt-modal-panel" aria-label="WilyTrader add funds or position">
+          <header class="wt-modal-header">
+            <div class="wt-title">Add</div>
+            <button class="wt-icon-btn" data-action="close-modal" title="Close" aria-label="Close">x</button>
+          </header>
+          <div class="wt-modal-body">
+            <div class="wt-setting-group">
+              <label class="wt-label" for="wt-add-funds">Add paper balance</label>
+              <div class="wt-custom-row">
+                <input id="wt-add-funds" class="wt-input" data-deposit type="number" min="0" step="0.01" placeholder="Amount" />
+                <button class="wt-button" data-action="deposit">Add</button>
+              </div>
+            </div>
+            <div class="wt-setting-group">
+              <label class="wt-label" for="wt-add-position">Add current-token position</label>
+              <div class="wt-custom-row">
+                <input id="wt-add-position" class="wt-input" data-add-position type="number" min="0" step="0.01" placeholder="Cost" />
+                <button class="wt-button" data-action="add-position">Add</button>
+              </div>
             </div>
           </div>
         </section>
@@ -599,6 +623,17 @@
       } else {
         setStatus("Enter a valid deposit amount.");
       }
+    } else if (action === "add-position") {
+      const input = root.querySelector("[data-add-position]");
+      const amount = Number(input.value);
+      if (Number.isFinite(amount) && amount > 0) {
+        input.value = "";
+        void addManualPosition(amount);
+      } else {
+        setStatus("Enter a valid position cost.");
+      }
+    } else if (action === "open-add") {
+      openAddModal();
     } else if (action === "settings") {
       openSettingsModal();
     } else if (action === "close-modal") {
@@ -649,8 +684,68 @@
     const chain = activeToken?.chain || "SOL";
     state.balances[chain] = (state.balances[chain] || 0) + amount;
     await persistAndSync("balance");
+    closeModals();
     render();
     setStatus(`Added ${formatters.native(amount, chain)}.`);
+  }
+
+  async function addManualPosition(amountNative) {
+    updateActiveToken();
+    const token = activeToken;
+    if (!token.key) return setStatus("Open a Padre token page first.");
+    if (!token.unitPriceNative) return setStatus("Price unavailable. Wait for Padre market cap to load.");
+
+    const chain = token.chain;
+    const tokenAmount = amountNative / token.unitPriceNative;
+    const existing = state.positions[token.key] || createEmptyPosition(token);
+    const before = snapshotPosition(existing);
+    const newCost = existing.costNative + amountNative;
+    const newTokenAmount = existing.tokenAmount + tokenAmount;
+    const updated = {
+      ...existing,
+      tokenName: token.name,
+      lastUrl: token.url,
+      tokenAmount: newTokenAmount,
+      costNative: newCost,
+      avgEntryNative: newCost / newTokenAmount,
+      avgEntryUsd: (newCost / newTokenAmount) * (DEFAULT_PRICES[chain] || 1),
+      buyCount: (existing.buyCount || 0) + 1,
+      updatedAt: new Date().toISOString(),
+    };
+
+    state.positions[token.key] = updated;
+    recordExecution({
+      side: "buy",
+      chain,
+      token,
+      positionId: updated.positionId,
+      requestedAmountNative: amountNative,
+      grossNative: amountNative,
+      netNative: 0,
+      fees: { platformFeeNative: 0, gasFeeNative: 0, priorityFeeNative: 0, bribeFeeNative: 0, totalFeeNative: 0, executionDelayMs: 0 },
+      slippagePct: 0,
+      tokenAmount,
+      executionPriceNative: token.unitPriceNative,
+      pnlNative: 0,
+      positionBefore: before,
+      positionAfter: snapshotPosition(updated),
+      costBasisNative: 0,
+    });
+    await persistAndSync("manual-position");
+    closeModals();
+    render();
+    setStatus(`Added ${formatters.native(amountNative, chain)} paper position.`);
+  }
+
+  function openAddModal() {
+    const modal = root.querySelector(`#${selectors.addModal}`);
+    if (!modal) return;
+    const fundsInput = root.querySelector("[data-deposit]");
+    const positionInput = root.querySelector("[data-add-position]");
+    if (fundsInput) fundsInput.value = "";
+    if (positionInput) positionInput.value = "";
+    modal.classList.add("wt-modal-open");
+    modal.setAttribute("aria-hidden", "false");
   }
 
   function openSettingsModal() {

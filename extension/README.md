@@ -31,9 +31,9 @@ Use **Save JSON** or the header download button in the overlay. The export inclu
 - Settings used for simulation.
 - Optional notes entered in the overlay.
 
-Use the **Paper Balance** control in the overlay to add local fake SOL/BNB for more test trades.
+Use the header **+** control to add local fake SOL/BNB or seed a current-token paper position.
 
-The sell controls default to a Padre-style 8-button grid. The buy controls use six preset buttons plus a custom amount input and Buy button. The inline slippage, rocket, and hand-coin icons are active execution settings:
+The sell controls default to a Padre-style 8-button grid. The buy controls use six preset buttons plus a custom amount input and Buy button. Use the header plus button to add paper funds or seed a current-token paper position. The inline slippage, rocket, and money-hand icons are active execution settings:
 
 - Slippage changes the simulated execution price and the delayed-execution movement cap.
 - Gas is fixed at `0.000005` native. Gas, priority, platform, and bribe fees are debited from buys, removed from sell proceeds, and exported in each execution.

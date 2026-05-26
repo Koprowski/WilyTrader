@@ -261,7 +261,7 @@
 }
 
 .wt-icon-setting {
-  grid-template-columns: 16px minmax(0, 1fr);
+  grid-template-columns: 16px minmax(0, 1fr) auto;
 }
 
 .wt-fee-icon {
@@ -277,10 +277,13 @@
   width: 14px;
   height: 14px;
   fill: currentColor;
-  stroke: currentColor;
-  stroke-width: 1.7;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+  stroke: none;
+}
+
+.wt-percent-suffix {
+  color: #aeb1bd;
+  font-size: 10px;
+  font-weight: 800;
 }
 
 .wt-inline-setting input {
