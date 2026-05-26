@@ -435,6 +435,12 @@
   height: 16px;
 }
 
+.wt-settings-note {
+  color: #8e98a5;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .wt-log-full {
   display: flex;
   flex-direction: column;

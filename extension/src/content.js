@@ -88,7 +88,8 @@
       useCustomDelay: false,
       customDelayMs: 1000,
       panelPosition: null,
-      bridgeEnabled: true,
+      bridgeEnabled: false,
+      autoScreenshotOnTrade: true,
     },
   };
 
@@ -115,6 +116,7 @@
   let bridgeState = { active: false, lastMessage: "Bridge idle" };
   let tradeInFlight = false;
   let extensionContextValid = true;
+  let lastSyncedExecutionId = null;
 
   const formatters = {
     native(value, chain) {
@@ -585,8 +587,13 @@
             </label>
             <label class="wt-check-row">
               <input type="checkbox" data-setting="bridgeEnabled" />
-              <span>Sync to Snipalot localhost bridge</span>
+              <span>Auto-save logs to active Snipalot trade session folder</span>
             </label>
+            <label class="wt-check-row">
+              <input type="checkbox" data-setting="autoScreenshotOnTrade" />
+              <span>Save screenshot on each buy/sell</span>
+            </label>
+            <div class="wt-settings-note">Saved by Snipalot into the active trade session folder. To capture only the chart, select the chart area when starting the Snipalot trade recording.</div>
             <div class="wt-button-row">
               <button class="wt-button" data-action="reset-settings">Defaults</button>
               <button class="wt-button" data-action="save-settings">Save</button>
@@ -800,6 +807,7 @@
     });
     root.querySelector("[data-setting='useCustomDelay']").checked = Boolean(state.settings.useCustomDelay);
     root.querySelector("[data-setting='bridgeEnabled']").checked = Boolean(state.settings.bridgeEnabled);
+    root.querySelector("[data-setting='autoScreenshotOnTrade']").checked = Boolean(state.settings.autoScreenshotOnTrade);
     modal.classList.add("wt-modal-open");
     modal.setAttribute("aria-hidden", "false");
   }
@@ -841,6 +849,7 @@
       sellPercents: nextSellPercents,
       useCustomDelay: Boolean(root.querySelector("[data-setting='useCustomDelay']")?.checked),
       bridgeEnabled: Boolean(root.querySelector("[data-setting='bridgeEnabled']")?.checked),
+      autoScreenshotOnTrade: Boolean(root.querySelector("[data-setting='autoScreenshotOnTrade']")?.checked),
     };
 
     for (const key of numericKeys) {
@@ -862,6 +871,7 @@
       ...DEFAULT_STATE.settings,
       panelPosition: state.settings.panelPosition || null,
       bridgeEnabled: state.settings.bridgeEnabled,
+      autoScreenshotOnTrade: state.settings.autoScreenshotOnTrade,
     };
     await persistAndSync("settings-reset");
     openSettingsModal();
@@ -1298,7 +1308,14 @@
 
   async function persistAndSync(reason) {
     await persist();
-    runTask(syncBridge(reason));
+    const latestExecution = state.executions[state.executions.length - 1] || null;
+    const shouldCaptureScreenshot =
+      Boolean(state.settings.autoScreenshotOnTrade) &&
+      (reason === "buy" || reason === "sell") &&
+      latestExecution?.id &&
+      latestExecution.id !== lastSyncedExecutionId;
+    if (latestExecution?.id) lastSyncedExecutionId = latestExecution.id;
+    runTask(syncBridge(reason, shouldCaptureScreenshot ? latestExecution : null));
   }
 
   function render() {
@@ -1496,7 +1513,7 @@
     button.setAttribute("aria-label", minimized ? "Maximize" : "Minimize");
   }
 
-  function buildExportPayload(reason = "manual") {
+  function buildExportPayload(reason = "manual", eventExecution = null) {
     const positions = getPositionSummaries();
     return {
       schemaVersion: 2,
@@ -1504,6 +1521,17 @@
       source: "wilytrader-padre-extension",
       privacy: "local-only; no backend sync; optional localhost Snipalot bridge",
       reason,
+      event: eventExecution
+        ? {
+            type: "execution",
+            captureScreenshot: true,
+            executionId: eventExecution.id,
+            side: eventExecution.side,
+            timestamp: eventExecution.timestamp,
+            tokenName: eventExecution.tokenName,
+            tokenAddress: eventExecution.tokenAddress,
+          }
+        : null,
       session: {
         pageUrl: window.location.href,
         pageTitle: document.title,
@@ -1522,14 +1550,14 @@
     };
   }
 
-  async function syncBridge(reason) {
+  async function syncBridge(reason, eventExecution = null) {
     if (!extensionContextValid) return;
     if (!state?.settings?.bridgeEnabled) return;
     try {
       const response = await fetch(`${BRIDGE_BASE_URL}/ledger`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildExportPayload(reason)),
+        body: JSON.stringify(buildExportPayload(reason, eventExecution)),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json().catch(() => ({}));
