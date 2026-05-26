@@ -44,6 +44,18 @@
       <path d="M8 12H16"></path>
       <path d="M8 16H13"></path>
     </svg>`;
+  const CIRCLE_UP_ICON = `
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="M12 21C16.9706 21 21 16.9706 21 12C21 7.02944 16.9706 3 12 3C7.02944 3 3 7.02944 3 12C3 16.9706 7.02944 21 12 21Z"></path>
+      <path d="M12 16V8"></path>
+      <path d="M8.5 11.5L12 8L15.5 11.5"></path>
+    </svg>`;
+  const CIRCLE_DOWN_ICON = `
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="M12 21C16.9706 21 21 16.9706 21 12C21 7.02944 16.9706 3 12 3C7.02944 3 3 7.02944 3 12C3 16.9706 7.02944 21 12 21Z"></path>
+      <path d="M12 8V16"></path>
+      <path d="M8.5 12.5L12 16L15.5 12.5"></path>
+    </svg>`;
   const LEGACY_STORAGE_KEYS = [
     "wilytrader_state_v1",
     ["wily", "mem", "trader_state_v2"].join(""),
@@ -456,6 +468,8 @@
           </div>
           <div class="wt-header-controls">
             <button class="wt-icon-btn" data-action="open-add" title="Add funds or position" aria-label="Add funds or position">+</button>
+            <button class="wt-icon-btn wt-collapsed-action" data-action="buy-default" title="Buy default" aria-label="Buy default">${CIRCLE_UP_ICON}</button>
+            <button class="wt-icon-btn wt-collapsed-action" data-action="sell-all" title="Sell 100%" aria-label="Sell 100%">${CIRCLE_DOWN_ICON}</button>
             <button class="wt-icon-btn" data-action="view-log" title="Ledger" aria-label="Ledger">${LEDGER_ICON}</button>
             <button class="wt-icon-btn" data-action="settings" title="Settings" aria-label="Settings">&#9881;</button>
           </div>
@@ -683,6 +697,11 @@
       }
     } else if (action === "open-add") {
       openAddModal();
+    } else if (action === "buy-default") {
+      const amount = normalizeBuyAmounts(state.settings.buyAmounts)[0];
+      runTask(buy(amount));
+    } else if (action === "sell-all") {
+      runTask(sell(100));
     } else if (action === "settings") {
       openSettingsModal();
     } else if (action === "close-modal") {

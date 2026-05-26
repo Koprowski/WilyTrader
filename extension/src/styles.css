@@ -72,6 +72,14 @@
   display: none;
 }
 
+.wt-collapsed-action {
+  display: none;
+}
+
+.wt-minimized .wt-collapsed-action {
+  display: inline-flex;
+}
+
 .wt-minimized {
   border: 1.6px solid #1f5f93;
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.66), 0 0 0 1px rgba(31, 95, 147, 0.4);
