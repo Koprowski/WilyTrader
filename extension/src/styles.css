@@ -22,9 +22,9 @@
   max-height: min(760px, calc(100vh - 24px));
   overflow: hidden;
   background: #101216;
-  border: 1px solid #252936;
+  border: 1.6px solid #1f5f93;
   border-radius: 8px;
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.66), 0 0 0 1px rgba(54, 63, 88, 0.36);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.66), 0 0 0 1px rgba(31, 95, 147, 0.4);
 }
 
 .wt-header {
@@ -73,8 +73,8 @@
 }
 
 .wt-minimized {
-  border: 3px solid #2f8cff;
-  box-shadow: 0 0 0 1px rgba(47, 140, 255, 0.35), 0 0 22px rgba(47, 140, 255, 0.46);
+  border: 2.4px solid #2b6f9f;
+  box-shadow: 0 0 0 1px rgba(43, 111, 159, 0.45), 0 0 22px rgba(43, 111, 159, 0.4);
 }
 
 .wt-section {
