@@ -37,6 +37,15 @@
       <path d="M4 16.1H8.2C9.1 16.1 9.9 16.5 10.5 17.1L11 17.6V21H4C3.4 21 3 20.6 3 20V17.1C3 16.5 3.4 16.1 4 16.1Z"></path>
       <path d="M12.2 3.1H21C21.6 3.1 22 3.5 22 4.1V10.3C22 10.9 21.6 11.3 21 11.3H12.2C11.6 11.3 11.2 10.9 11.2 10.3V4.1C11.2 3.5 11.6 3.1 12.2 3.1ZM16.6 9.5C17.9 9.5 19 8.5 19 7.2C19 5.9 17.9 4.9 16.6 4.9C15.3 4.9 14.2 5.9 14.2 7.2C14.2 8.5 15.3 9.5 16.6 9.5Z"></path>
     </svg>`;
+  const NOTE_ICON = `
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="M5 4H15.5L19 7.5V20H5V4Z"></path>
+      <path d="M15 4V8H19"></path>
+      <path d="M8 12H16"></path>
+      <path d="M8 15H13"></path>
+      <path d="M17.5 14.5V19.5"></path>
+      <path d="M15 17H20"></path>
+    </svg>`;
   const LEGACY_STORAGE_KEYS = [
     "wilytrader_state_v1",
     ["wily", "mem", "trader_state_v2"].join(""),
@@ -85,6 +94,7 @@
     settingsModal: "wt-settings-modal",
     logModal: "wt-log-modal",
     addModal: "wt-add-modal",
+    noteModal: "wt-note-modal",
   };
 
   let state = null;
@@ -412,25 +422,22 @@
           </div>
           <div class="wt-header-controls">
             <button class="wt-icon-btn" data-action="open-add" title="Add funds or position" aria-label="Add funds or position">+</button>
+            <button class="wt-icon-btn" data-action="open-note" title="Add note" aria-label="Add note">${NOTE_ICON}</button>
             <button class="wt-icon-btn" data-action="settings" title="Settings" aria-label="Settings">&#9881;</button>
             <button class="wt-icon-btn" data-action="export" title="Download JSON" aria-label="Download JSON">DL</button>
           </div>
         </header>
         <div class="wt-body">
           <div class="wt-section">
-            <div id="${selectors.token}" class="wt-token"></div>
+            <div class="wt-token-row">
+              <div id="${selectors.token}" class="wt-token"></div>
+              <div class="wt-mini-stats">
+                <span id="${selectors.balance}"></span>
+                <span id="${selectors.position}"></span>
+              </div>
+            </div>
             <div id="${selectors.price}" class="wt-muted"></div>
             <div id="${selectors.bridge}" class="wt-muted"></div>
-          </div>
-          <div class="wt-grid">
-            <div>
-              <div class="wt-label">Balance</div>
-              <div id="${selectors.balance}" class="wt-value"></div>
-            </div>
-            <div>
-              <div class="wt-label">Open Position</div>
-              <div id="${selectors.position}" class="wt-value"></div>
-            </div>
           </div>
           <div class="wt-section">
             <div class="wt-trade-header">
@@ -474,13 +481,6 @@
                 <span class="wt-fee-icon">${BRIBE_ICON}</span>
                 <input data-quick-setting="sellBribeFeeNative" type="number" min="0" step="0.0001" />
               </label>
-            </div>
-          </div>
-          <div class="wt-section">
-            <div class="wt-label">Note</div>
-            <div class="wt-custom-row">
-              <input class="wt-input" data-note type="text" placeholder="Optional rationale tag" />
-              <button class="wt-button" data-action="add-note">Add</button>
             </div>
           </div>
           <div class="wt-section">
@@ -582,6 +582,23 @@
           </div>
         </section>
       </div>
+      <div id="${selectors.noteModal}" class="wt-modal" aria-hidden="true">
+        <section class="wt-modal-panel" aria-label="WilyTrader add note">
+          <header class="wt-modal-header">
+            <div class="wt-title">Add Note</div>
+            <button class="wt-icon-btn" data-action="close-modal" title="Close" aria-label="Close">x</button>
+          </header>
+          <div class="wt-modal-body">
+            <div class="wt-setting-group">
+              <label class="wt-label" for="wt-note-input">Note</label>
+              <div class="wt-custom-row">
+                <input id="wt-note-input" class="wt-input" data-note type="text" placeholder="Optional rationale tag" />
+                <button class="wt-button" data-action="add-note">Add</button>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
       <div id="${selectors.logModal}" class="wt-modal" aria-hidden="true">
         <section class="wt-modal-panel" aria-label="WilyTrader execution log">
           <header class="wt-modal-header">
@@ -645,6 +662,8 @@
       }
     } else if (action === "open-add") {
       openAddModal();
+    } else if (action === "open-note") {
+      openNoteModal();
     } else if (action === "settings") {
       openSettingsModal();
     } else if (action === "close-modal") {
@@ -755,6 +774,15 @@
     const positionInput = root.querySelector("[data-add-position]");
     if (fundsInput) fundsInput.value = "";
     if (positionInput) positionInput.value = "";
+    modal.classList.add("wt-modal-open");
+    modal.setAttribute("aria-hidden", "false");
+  }
+
+  function openNoteModal() {
+    const modal = root.querySelector(`#${selectors.noteModal}`);
+    if (!modal) return;
+    const input = root.querySelector("[data-note]");
+    if (input) input.value = "";
     modal.classList.add("wt-modal-open");
     modal.setAttribute("aria-hidden", "false");
   }
@@ -876,6 +904,7 @@
       text,
     });
     await persistAndSync("note");
+    closeModals();
     render();
     setStatus("Note added.");
   }
@@ -1293,10 +1322,10 @@
       : "Waiting for Padre market-cap data";
     bridgeEl.textContent = state.settings.bridgeEnabled ? bridgeState.lastMessage : "Bridge disabled";
 
-    balanceEl.textContent = formatters.native(state.balances[token.chain] || 0, token.chain);
+    balanceEl.textContent = `Bal ${formatters.native(state.balances[token.chain] || 0, token.chain)}`;
     positionEl.textContent = summary
-      ? `${formatters.native(summary.investedNative, token.chain)} cost - ${formatters.pct(calculateOpenPnlPct(position, token))}`
-      : "None";
+      ? `Pos ${formatters.native(summary.investedNative, token.chain)} ${formatters.pct(calculateOpenPnlPct(position, token))}`
+      : "Pos none";
     if (buyChainEl) buyChainEl.textContent = token.chain;
     if (sellAssetsEl) {
       sellAssetsEl.textContent = position

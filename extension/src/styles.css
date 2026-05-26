@@ -18,7 +18,7 @@
   bottom: 18px;
   z-index: 2147483647;
   pointer-events: auto;
-  width: min(392px, calc(100vw - 24px));
+  width: min(340px, calc(100vw - 24px));
   max-height: min(760px, calc(100vh - 24px));
   overflow: hidden;
   background: #101216;
@@ -29,11 +29,11 @@
 
 .wt-header {
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr) auto;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px;
-  min-height: 48px;
-  padding: 8px;
+  gap: 6px;
+  min-height: 40px;
+  padding: 6px;
   background: #151821;
   border-bottom: 1px solid #272b38;
   cursor: move;
@@ -42,7 +42,7 @@
 .wt-header-controls {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
 }
 
 .wt-title {
@@ -62,10 +62,10 @@
 .wt-body {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 12px;
+  gap: 8px;
+  padding: 8px;
   overflow: auto;
-  max-height: calc(min(760px, 100vh - 24px) - 48px);
+  max-height: calc(min(760px, 100vh - 24px) - 40px);
 }
 
 .wt-minimized .wt-body {
@@ -75,7 +75,7 @@
 .wt-section {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
 }
 
 .wt-trade-header {
@@ -87,7 +87,7 @@
 
 .wt-trade-title {
   color: #f1f3f8;
-  font-size: 17px;
+  font-size: 15px;
   line-height: 1.2;
   font-weight: 750;
 }
@@ -101,9 +101,9 @@
 }
 
 .wt-chain-pill {
-  min-width: 66px;
-  height: 24px;
-  padding: 3px 10px;
+  min-width: 52px;
+  height: 22px;
+  padding: 2px 8px;
   border: 1px solid #252b3b;
   border-radius: 999px;
   background: #181b25;
@@ -116,40 +116,43 @@
 .wt-token {
   min-width: 0;
   color: #f1f3f8;
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.3;
   font-weight: 700;
   overflow-wrap: anywhere;
 }
 
-.wt-grid {
+.wt-token-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
   gap: 8px;
 }
 
-.wt-grid > div {
-  min-width: 0;
-  padding: 8px;
-  background: #151821;
-  border: 1px solid #252936;
-  border-radius: 6px;
+.wt-mini-stats {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  max-width: 128px;
+  color: #d8dce8;
+  font-size: 10px;
+  line-height: 1.2;
+  font-weight: 750;
+  white-space: nowrap;
 }
 
-.wt-value {
-  margin-top: 3px;
-  color: #f1f3f8;
-  font-size: 12px;
-  line-height: 1.25;
-  font-weight: 700;
-  overflow-wrap: anywhere;
+.wt-mini-stats span {
+  max-width: 128px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .wt-button-row,
 .wt-custom-row {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 7px;
+  gap: 5px;
 }
 
 .wt-custom-row {
@@ -164,7 +167,7 @@
 .wt-trade-button,
 .wt-icon-btn,
 .wt-input {
-  min-height: 30px;
+  min-height: 26px;
   border: 1px solid #2a2f3f;
   border-radius: 6px;
   background: #181b25;
@@ -188,23 +191,23 @@
 
 .wt-trade-button {
   aspect-ratio: 1.55 / 1;
-  min-height: 32px;
+  min-height: 27px;
   border-radius: 999px;
   background: #111318;
-  font-size: 13px;
+  font-size: 11px;
   font-weight: 800;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
 }
 
 .wt-custom-buy-input {
-  min-height: 32px;
+  min-height: 27px;
   padding: 0 6px;
   border-radius: 999px;
   color: #31e6ba;
   border-color: rgba(36, 225, 180, 0.34);
   background: #111318;
   text-align: center;
-  font-size: 12px;
+  font-size: 10px;
   font-weight: 750;
 }
 
@@ -213,7 +216,7 @@
 }
 
 .wt-custom-buy-button {
-  font-size: 12px;
+  font-size: 10px;
   text-transform: uppercase;
 }
 
@@ -242,17 +245,17 @@
 .wt-fee-strip {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-  min-height: 30px;
+  gap: 5px;
+  min-height: 26px;
 }
 
 .wt-inline-setting {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   min-width: 0;
-  padding: 4px 5px;
+  padding: 3px 5px;
   border: 1px solid #252936;
   border-radius: 6px;
   background: #151821;
@@ -289,7 +292,7 @@
 .wt-inline-setting input {
   width: 100%;
   min-width: 0;
-  height: 20px;
+  height: 18px;
   padding: 0;
   border: 0;
   outline: none;
@@ -302,11 +305,23 @@
 }
 
 .wt-icon-btn {
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   padding: 0;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 700;
+}
+
+.wt-icon-btn svg {
+  display: block;
+  width: 15px;
+  height: 15px;
+  margin: auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .wt-input {
