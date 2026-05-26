@@ -90,6 +90,7 @@
       panelPosition: null,
       bridgeEnabled: false,
       autoScreenshotOnTrade: true,
+      fallbackDownloadsEnabled: true,
     },
   };
 
@@ -593,7 +594,11 @@
               <input type="checkbox" data-setting="autoScreenshotOnTrade" />
               <span>Save screenshot on each buy/sell</span>
             </label>
-            <div class="wt-settings-note">Saved by Snipalot into the active trade session folder. To capture only the chart, select the chart area when starting the Snipalot trade recording.</div>
+            <label class="wt-check-row">
+              <input type="checkbox" data-setting="fallbackDownloadsEnabled" />
+              <span>If Snipalot is unavailable, save fallback files to Chrome Downloads</span>
+            </label>
+            <div class="wt-settings-note">Snipalot saves to the active trade session folder. The Chrome fallback saves under Downloads/WilyTrader and crops to the largest visible Padre chart when possible.</div>
             <div class="wt-button-row">
               <button class="wt-button" data-action="reset-settings">Defaults</button>
               <button class="wt-button" data-action="save-settings">Save</button>
@@ -808,6 +813,7 @@
     root.querySelector("[data-setting='useCustomDelay']").checked = Boolean(state.settings.useCustomDelay);
     root.querySelector("[data-setting='bridgeEnabled']").checked = Boolean(state.settings.bridgeEnabled);
     root.querySelector("[data-setting='autoScreenshotOnTrade']").checked = Boolean(state.settings.autoScreenshotOnTrade);
+    root.querySelector("[data-setting='fallbackDownloadsEnabled']").checked = Boolean(state.settings.fallbackDownloadsEnabled);
     modal.classList.add("wt-modal-open");
     modal.setAttribute("aria-hidden", "false");
   }
@@ -850,6 +856,7 @@
       useCustomDelay: Boolean(root.querySelector("[data-setting='useCustomDelay']")?.checked),
       bridgeEnabled: Boolean(root.querySelector("[data-setting='bridgeEnabled']")?.checked),
       autoScreenshotOnTrade: Boolean(root.querySelector("[data-setting='autoScreenshotOnTrade']")?.checked),
+      fallbackDownloadsEnabled: Boolean(root.querySelector("[data-setting='fallbackDownloadsEnabled']")?.checked),
     };
 
     for (const key of numericKeys) {
@@ -872,6 +879,7 @@
       panelPosition: state.settings.panelPosition || null,
       bridgeEnabled: state.settings.bridgeEnabled,
       autoScreenshotOnTrade: state.settings.autoScreenshotOnTrade,
+      fallbackDownloadsEnabled: state.settings.fallbackDownloadsEnabled,
     };
     await persistAndSync("settings-reset");
     openSettingsModal();
@@ -1309,13 +1317,13 @@
   async function persistAndSync(reason) {
     await persist();
     const latestExecution = state.executions[state.executions.length - 1] || null;
-    const shouldCaptureScreenshot =
-      Boolean(state.settings.autoScreenshotOnTrade) &&
+    const isNewTradeExecution =
       (reason === "buy" || reason === "sell") &&
       latestExecution?.id &&
       latestExecution.id !== lastSyncedExecutionId;
+    const shouldCaptureScreenshot = Boolean(state.settings.autoScreenshotOnTrade) && isNewTradeExecution;
     if (latestExecution?.id) lastSyncedExecutionId = latestExecution.id;
-    runTask(syncBridge(reason, shouldCaptureScreenshot ? latestExecution : null));
+    runTask(syncTradeArtifacts(reason, isNewTradeExecution ? latestExecution : null, shouldCaptureScreenshot));
   }
 
   function render() {
@@ -1513,7 +1521,7 @@
     button.setAttribute("aria-label", minimized ? "Maximize" : "Minimize");
   }
 
-  function buildExportPayload(reason = "manual", eventExecution = null) {
+  function buildExportPayload(reason = "manual", eventExecution = null, captureScreenshot = false) {
     const positions = getPositionSummaries();
     return {
       schemaVersion: 2,
@@ -1524,7 +1532,7 @@
       event: eventExecution
         ? {
             type: "execution",
-            captureScreenshot: true,
+            captureScreenshot: Boolean(captureScreenshot),
             executionId: eventExecution.id,
             side: eventExecution.side,
             timestamp: eventExecution.timestamp,
@@ -1550,14 +1558,91 @@
     };
   }
 
-  async function syncBridge(reason, eventExecution = null) {
-    if (!extensionContextValid) return;
-    if (!state?.settings?.bridgeEnabled) return;
+  async function saveFallbackTradeArtifacts(reason, eventExecution, captureScreenshot) {
+    const payload = buildExportPayload(`${reason}-chrome-download-fallback`, eventExecution, captureScreenshot);
+    const response = await sendRuntimeMessage({
+      type: "WILYTRADER_SAVE_FALLBACK",
+      payload,
+      event: payload.event,
+      captureScreenshot,
+      captureRect: captureScreenshot ? detectBestChartCaptureRect() : null,
+    });
+    if (response?.ok) {
+      setStatus(captureScreenshot ? "Saved fallback log/screenshot to Chrome Downloads." : "Saved fallback log to Chrome Downloads.");
+    } else {
+      setStatus("Fallback save failed. Use ledger export if needed.");
+    }
+  }
+
+  function sendRuntimeMessage(message) {
+    return new Promise((resolve) => {
+      if (!extensionContextValid) return resolve({ ok: false, error: "Extension context invalidated." });
+      try {
+        const runtime = chrome?.runtime;
+        if (!runtime?.sendMessage) return resolve({ ok: false, error: "Runtime messaging unavailable." });
+        runtime.sendMessage(message, (response) => {
+          const error = getChromeLastError();
+          if (error) {
+            handleExtensionContextError(error);
+            resolve({ ok: false, error: error.message });
+          } else {
+            resolve(response || { ok: false, error: "No background response." });
+          }
+        });
+      } catch (error) {
+        handleExtensionContextError(error);
+        resolve({ ok: false, error: error?.message || String(error) });
+      }
+    });
+  }
+
+  function detectBestChartCaptureRect() {
+    const ignoredRoot = root;
+    const candidates = Array.from(document.querySelectorAll("canvas, svg"))
+      .filter((element) => !ignoredRoot?.contains(element))
+      .map((element) => {
+        const rect = element.getBoundingClientRect();
+        const visibleWidth = Math.min(rect.right, window.innerWidth) - Math.max(rect.left, 0);
+        const visibleHeight = Math.min(rect.bottom, window.innerHeight) - Math.max(rect.top, 0);
+        return {
+          left: Math.max(0, rect.left),
+          top: Math.max(0, rect.top),
+          width: Math.max(0, visibleWidth),
+          height: Math.max(0, visibleHeight),
+          area: Math.max(0, visibleWidth) * Math.max(0, visibleHeight),
+          devicePixelRatio: window.devicePixelRatio || 1,
+        };
+      })
+      .filter((rect) => rect.area >= 40_000 && rect.width >= 240 && rect.height >= 160)
+      .sort((a, b) => b.area - a.area);
+
+    const best = candidates[0];
+    if (!best) return null;
+    return {
+      left: best.left,
+      top: best.top,
+      width: best.width,
+      height: best.height,
+      devicePixelRatio: best.devicePixelRatio,
+      source: "largest-visible-canvas-or-svg",
+    };
+  }
+
+  async function syncTradeArtifacts(reason, eventExecution = null, captureScreenshot = false) {
+    const bridgeSynced = await syncBridge(reason, eventExecution, captureScreenshot);
+    if (!bridgeSynced && eventExecution && state?.settings?.fallbackDownloadsEnabled) {
+      await saveFallbackTradeArtifacts(reason, eventExecution, captureScreenshot);
+    }
+  }
+
+  async function syncBridge(reason, eventExecution = null, captureScreenshot = false) {
+    if (!extensionContextValid) return false;
+    if (!state?.settings?.bridgeEnabled) return false;
     try {
       const response = await fetch(`${BRIDGE_BASE_URL}/ledger`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildExportPayload(reason, eventExecution)),
+        body: JSON.stringify(buildExportPayload(reason, eventExecution, captureScreenshot)),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json().catch(() => ({}));
@@ -1565,10 +1650,13 @@
         active: true,
         lastMessage: data.sessionDir ? "Snipalot bridge synced" : "Snipalot bridge active",
       };
+      return true;
     } catch {
       bridgeState = { active: false, lastMessage: "Snipalot bridge not connected" };
+      return false;
+    } finally {
+      render();
     }
-    render();
   }
 
   function exportJson() {
