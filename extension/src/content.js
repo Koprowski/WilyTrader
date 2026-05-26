@@ -574,6 +574,13 @@
               </div>
             </div>
             <div class="wt-setting-group">
+              <label class="wt-label" for="wt-set-funds">Set paper balance</label>
+              <div class="wt-custom-row">
+                <input id="wt-set-funds" class="wt-input" data-set-balance type="number" min="0" step="0.01" placeholder="New balance" />
+                <button class="wt-button" data-action="set-balance">Set</button>
+              </div>
+            </div>
+            <div class="wt-setting-group">
               <label class="wt-label" for="wt-add-position">Add current-token position</label>
               <div class="wt-custom-row">
                 <input id="wt-add-position" class="wt-input" data-add-position type="number" min="0" step="0.01" placeholder="Cost" />
@@ -653,6 +660,15 @@
       } else {
         setStatus("Enter a valid deposit amount.");
       }
+    } else if (action === "set-balance") {
+      const input = root.querySelector("[data-set-balance]");
+      const amount = Number(input.value);
+      if (Number.isFinite(amount) && amount >= 0) {
+        input.value = "";
+        void setPaperBalance(amount);
+      } else {
+        setStatus("Enter a valid balance amount.");
+      }
     } else if (action === "add-position") {
       const input = root.querySelector("[data-add-position]");
       const amount = Number(input.value);
@@ -721,6 +737,16 @@
     setStatus(`Added ${formatters.native(amount, chain)}.`);
   }
 
+  async function setPaperBalance(amount) {
+    updateActiveToken();
+    const chain = activeToken?.chain || "SOL";
+    state.balances[chain] = amount;
+    await persistAndSync("balance-set");
+    closeModals();
+    render();
+    setStatus(`Set balance to ${formatters.native(amount, chain)}.`);
+  }
+
   async function addManualPosition(amountNative) {
     updateActiveToken();
     const token = activeToken;
@@ -773,8 +799,10 @@
     const modal = root.querySelector(`#${selectors.addModal}`);
     if (!modal) return;
     const fundsInput = root.querySelector("[data-deposit]");
+    const setBalanceInput = root.querySelector("[data-set-balance]");
     const positionInput = root.querySelector("[data-add-position]");
     if (fundsInput) fundsInput.value = "";
+    if (setBalanceInput) setBalanceInput.value = "";
     if (positionInput) positionInput.value = "";
     modal.classList.add("wt-modal-open");
     modal.setAttribute("aria-hidden", "false");
