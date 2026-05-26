@@ -2,8 +2,9 @@
   "use strict";
 
   const STORAGE_KEY = "wilytrader_state_v2";
-  const SCHEMA_VERSION = 6;
+  const SCHEMA_VERSION = 7;
   const LEGACY_DEFAULT_BUY_AMOUNTS = [0.1, 0.2, 0.5, 1];
+  const PADRE_FOUR_DEFAULT_BUY_AMOUNTS = [0.1, 0.25, 0.5, 1];
   const PADRE_EIGHT_DEFAULT_BUY_AMOUNTS = [0.1, 0.25, 0.5, 1, 3, 0.005, 5, 7];
   const SIX_SLOT_DEFAULT_BUY_AMOUNTS = [0.1, 0.25, 0.5, 1, 3, 0.005];
   const LEGACY_DEFAULT_SELL_PERCENTS = [10, 25, 50, 100];
@@ -211,9 +212,7 @@
     if ((stored?.schemaVersion || 0) < SCHEMA_VERSION) {
       migrateSettingsToCurrentDefaults(merged.settings, stored?.settings || {});
     }
-    if (!Array.isArray(merged.settings.buyAmounts) || merged.settings.buyAmounts.length === 0) {
-      merged.settings.buyAmounts = DEFAULT_STATE.settings.buyAmounts;
-    }
+    merged.settings.buyAmounts = normalizeBuyAmounts(merged.settings.buyAmounts);
     if (!Array.isArray(merged.settings.sellPercents) || merged.settings.sellPercents.length === 0) {
       merged.settings.sellPercents = DEFAULT_STATE.settings.sellPercents;
     }
@@ -231,6 +230,7 @@
   function migrateSettingsToCurrentDefaults(settings, storedSettings) {
     if (
       arraysEqual(storedSettings.buyAmounts, LEGACY_DEFAULT_BUY_AMOUNTS) ||
+      arraysEqual(storedSettings.buyAmounts, PADRE_FOUR_DEFAULT_BUY_AMOUNTS) ||
       arraysEqual(storedSettings.buyAmounts, PADRE_EIGHT_DEFAULT_BUY_AMOUNTS) ||
       arraysEqual(storedSettings.buyAmounts, SIX_SLOT_DEFAULT_BUY_AMOUNTS)
     ) {
@@ -275,6 +275,17 @@
 
   function arraysEqual(a, b) {
     return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((value, index) => Number(value) === Number(b[index]));
+  }
+
+  function normalizeBuyAmounts(amounts) {
+    const values = Array.isArray(amounts)
+      ? amounts.map(Number).filter((value) => Number.isFinite(value) && value > 0).slice(0, 6)
+      : [];
+    const defaults = DEFAULT_STATE.settings.buyAmounts;
+    for (let index = values.length; index < 6; index += 1) {
+      values.push(defaults[index]);
+    }
+    return values;
   }
 
   function migrateLegacyTrades(trades) {
@@ -817,6 +828,7 @@
       next[key] = key === "customDelayMs" ? Math.round(value) : value;
     }
 
+    next.buyAmounts = normalizeBuyAmounts(next.buyAmounts);
     state.settings = next;
     await persistAndSync("settings");
     closeModals();
@@ -1298,7 +1310,9 @@
     });
 
     buyButtonsEl.innerHTML = "";
-    state.settings.buyAmounts.slice(0, 6).forEach((amount) => {
+    const buyPresets = normalizeBuyAmounts(state.settings.buyAmounts);
+    state.settings.buyAmounts = buyPresets;
+    buyPresets.forEach((amount) => {
       const button = document.createElement("button");
       button.className = "wt-trade-button wt-buy-button";
       button.dataset.buyAmount = String(amount);

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "WilyTrader",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Local-only paper trading overlay for Padre.gg with execution-ledger export.",
   "permissions": ["storage"],
   "host_permissions": ["http://127.0.0.1:17365/*"],
