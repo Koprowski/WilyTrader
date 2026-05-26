@@ -73,8 +73,8 @@
 }
 
 .wt-minimized {
-  border: 2.4px solid #2b6f9f;
-  box-shadow: 0 0 0 1px rgba(43, 111, 159, 0.45), 0 0 22px rgba(43, 111, 159, 0.4);
+  border: 1.6px solid #1f5f93;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.66), 0 0 0 1px rgba(31, 95, 147, 0.4);
 }
 
 .wt-section {
