@@ -84,17 +84,70 @@
 
   function storageGet(keys) {
     return new Promise((resolve) => {
-      chrome.storage.local.get(keys, (items) => resolve(items || {}));
+      const storage = getChromeStorage();
+      if (!storage) return resolve({});
+      try {
+        storage.get(keys, (items) => {
+          const error = getChromeLastError();
+          if (error) {
+            handleExtensionContextError(error);
+            resolve({});
+          } else {
+            resolve(items || {});
+          }
+        });
+      } catch (error) {
+        handleExtensionContextError(error);
+        resolve({});
+      }
     });
   }
 
   function storageSet(key, value) {
-    return new Promise((resolve, reject) => {
-      chrome.storage.local.set({ [key]: value }, () => {
-        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-        else resolve();
-      });
+    return new Promise((resolve) => {
+      const storage = getChromeStorage();
+      if (!storage) return resolve(false);
+      try {
+        storage.set({ [key]: value }, () => {
+          const error = getChromeLastError();
+          if (error) {
+            handleExtensionContextError(error);
+            resolve(false);
+          } else {
+            resolve(true);
+          }
+        });
+      } catch (error) {
+        handleExtensionContextError(error);
+        resolve(false);
+      }
     });
+  }
+
+  function getChromeStorage() {
+    try {
+      return chrome?.storage?.local || null;
+    } catch (error) {
+      handleExtensionContextError(error);
+      return null;
+    }
+  }
+
+  function getChromeLastError() {
+    try {
+      return chrome?.runtime?.lastError || null;
+    } catch (error) {
+      return error;
+    }
+  }
+
+  function handleExtensionContextError(error) {
+    const message = error?.message || String(error || "");
+    if (message.includes("Extension context invalidated")) {
+      setStatus("Extension reloaded. Refresh the Padre tab to reconnect WilyTrader.");
+      return;
+    }
+    console.error("[WilyTrader]", error);
   }
 
   async function loadState() {
@@ -1232,6 +1285,8 @@
   }
 
   if (window.location.hostname.includes("trade.padre.gg")) {
-    void initialize();
+    void initialize().catch((error) => {
+      console.error("[WilyTrader] Failed to initialize.", error);
+    });
   }
 })();
