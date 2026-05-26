@@ -436,8 +436,6 @@
                 <span id="${selectors.position}"></span>
               </div>
             </div>
-            <div id="${selectors.price}" class="wt-muted"></div>
-            <div id="${selectors.bridge}" class="wt-muted"></div>
           </div>
           <div class="wt-section">
             <div class="wt-trade-header">
@@ -483,15 +481,6 @@
               </label>
             </div>
           </div>
-          <div class="wt-section">
-            <div class="wt-button-row">
-              <button class="wt-button" data-action="view-log">View Log</button>
-              <button class="wt-button" data-action="bridge-sync">Sync</button>
-              <button class="wt-button" data-action="export">Save JSON</button>
-              <button class="wt-button wt-danger" data-action="clear">Clear</button>
-            </div>
-          </div>
-          <div id="${selectors.log}" class="wt-log"></div>
         </div>
       </section>
       <div id="${selectors.settingsModal}" class="wt-modal" aria-hidden="true">
@@ -1300,8 +1289,6 @@
     updateActiveToken();
 
     const tokenEl = root.querySelector(`#${selectors.token}`);
-    const priceEl = root.querySelector(`#${selectors.price}`);
-    const bridgeEl = root.querySelector(`#${selectors.bridge}`);
     const balanceEl = root.querySelector(`#${selectors.balance}`);
     const positionEl = root.querySelector(`#${selectors.position}`);
     const buyButtonsEl = root.querySelector("[data-buy-buttons]");
@@ -1317,11 +1304,6 @@
     tokenEl.textContent = token.address
       ? `${token.name} (${shortenAddress(token.address)})`
       : "Open a Padre token page";
-    priceEl.textContent = token.marketCap
-      ? `MC ${formatters.usd(token.marketCap)} - est. ${formatters.usd(token.unitPriceUsd)} per token`
-      : "Waiting for Padre market-cap data";
-    bridgeEl.textContent = state.settings.bridgeEnabled ? bridgeState.lastMessage : "Bridge disabled";
-
     balanceEl.textContent = `Bal ${formatters.native(state.balances[token.chain] || 0, token.chain)}`;
     positionEl.textContent = summary
       ? `Pos ${formatters.native(summary.investedNative, token.chain)} ${formatters.pct(calculateOpenPnlPct(position, token))}`
@@ -1371,11 +1353,9 @@
       sellButtonsEl.appendChild(button);
     });
 
-    logEl.innerHTML = "";
-    const recent = state.executions.slice(-5).reverse();
-    if (recent.length === 0) {
-      logEl.textContent = "No paper executions yet.";
-    } else {
+    if (logEl) {
+      logEl.innerHTML = "";
+      const recent = state.executions.slice(-1).reverse();
       recent.forEach((execution) => {
         const item = document.createElement("div");
         item.className = `wt-log-item wt-${execution.side}`;

@@ -18,7 +18,7 @@
   bottom: 18px;
   z-index: 2147483647;
   pointer-events: auto;
-  width: min(340px, calc(100vw - 24px));
+  width: min(320px, calc(100vw - 24px));
   max-height: min(760px, calc(100vh - 24px));
   overflow: hidden;
   background: #101216;
@@ -62,8 +62,8 @@
 .wt-body {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 8px;
+  gap: 6px;
+  padding: 6px;
   overflow: auto;
   max-height: calc(min(760px, 100vh - 24px) - 40px);
 }
@@ -75,19 +75,19 @@
 .wt-section {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 4px;
 }
 
 .wt-trade-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 24px;
+  min-height: 19px;
 }
 
 .wt-trade-title {
   color: #f1f3f8;
-  font-size: 15px;
+  font-size: 13px;
   line-height: 1.2;
   font-weight: 750;
 }
@@ -102,13 +102,13 @@
 
 .wt-chain-pill {
   min-width: 52px;
-  height: 22px;
+  height: 19px;
   padding: 2px 8px;
   border: 1px solid #252b3b;
   border-radius: 999px;
   background: #181b25;
   color: #e7e9f1;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
   text-align: center;
 }
@@ -116,7 +116,7 @@
 .wt-token {
   min-width: 0;
   color: #f1f3f8;
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.3;
   font-weight: 700;
   overflow-wrap: anywhere;
@@ -152,7 +152,7 @@
 .wt-custom-row {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 5px;
+  gap: 4px;
 }
 
 .wt-custom-row {
@@ -167,7 +167,7 @@
 .wt-trade-button,
 .wt-icon-btn,
 .wt-input {
-  min-height: 26px;
+  min-height: 23px;
   border: 1px solid #2a2f3f;
   border-radius: 6px;
   background: #181b25;
@@ -190,24 +190,24 @@
 }
 
 .wt-trade-button {
-  aspect-ratio: 1.55 / 1;
-  min-height: 27px;
+  aspect-ratio: 1.72 / 1;
+  min-height: 23px;
   border-radius: 999px;
   background: #111318;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 800;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
 }
 
 .wt-custom-buy-input {
-  min-height: 27px;
+  min-height: 23px;
   padding: 0 6px;
   border-radius: 999px;
   color: #31e6ba;
   border-color: rgba(36, 225, 180, 0.34);
   background: #111318;
   text-align: center;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 750;
 }
 
@@ -216,7 +216,7 @@
 }
 
 .wt-custom-buy-button {
-  font-size: 10px;
+  font-size: 9px;
   text-transform: uppercase;
 }
 
@@ -245,8 +245,8 @@
 .wt-fee-strip {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 5px;
-  min-height: 26px;
+  gap: 4px;
+  min-height: 23px;
 }
 
 .wt-inline-setting {
@@ -255,7 +255,7 @@
   align-items: center;
   gap: 3px;
   min-width: 0;
-  padding: 3px 5px;
+  padding: 2px 4px;
   border: 1px solid #252936;
   border-radius: 6px;
   background: #151821;
@@ -292,7 +292,7 @@
 .wt-inline-setting input {
   width: 100%;
   min-width: 0;
-  height: 18px;
+  height: 16px;
   padding: 0;
   border: 0;
   outline: none;
