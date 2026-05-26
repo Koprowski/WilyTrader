@@ -120,8 +120,13 @@
   let lastSyncedExecutionId = null;
 
   const formatters = {
-    native(value, chain) {
-      return `${Number(value || 0).toFixed(4)} ${chain}`;
+    native(value, chain, decimals = 4) {
+      return `${Number(value || 0).toFixed(decimals)} ${chain}`;
+    },
+    signedNative(value, chain, decimals = 4) {
+      const numeric = Number(value || 0);
+      const sign = numeric > 0 ? "+" : numeric < 0 ? "-" : "";
+      return `${sign}${Math.abs(numeric).toFixed(decimals)} ${chain}`;
     },
     compactNative(value, chain) {
       return `${Number(value || 0).toFixed(2)} ${chain}`;
@@ -638,8 +643,8 @@
           </header>
           <div class="wt-modal-body">
             <div class="wt-button-row">
-              <button class="wt-button" data-action="copy">Copy JSON</button>
-              <button class="wt-button" data-action="export">Save JSON</button>
+              <button class="wt-button" data-action="copy">Copy Session</button>
+              <button class="wt-button" data-action="export">Save Session</button>
               <button class="wt-button" data-action="new-session">New Session</button>
             </div>
             <div class="wt-ledger-summary" data-ledger-summary></div>
@@ -1440,10 +1445,10 @@
       ["Runtime", formatDuration(summary.elapsedMs)],
       ["Started", summary.startedAt ? new Date(summary.startedAt).toLocaleString() : "Current"],
       ["Executions", String(summary.executionCount)],
-      ["Realized", formatters.native(summary.realizedPnlNative, summary.chain)],
-      ["Active Open", formatters.native(summary.activeOpenPnlNative, summary.chain)],
+      ["Realized", formatters.native(summary.realizedPnlNative, summary.chain, 3)],
+      ["Active Open", formatters.native(summary.activeOpenPnlNative, summary.chain, 3)],
       ["Fees", formatters.native(summary.totalFeesNative, summary.chain)],
-      ["Total", formatters.native(summary.totalPnlNative, summary.chain)],
+      ["Total", formatters.native(summary.totalPnlNative, summary.chain, 3)],
     ];
     summaryEl.innerHTML = "";
     rows.forEach(([label, value]) => {
@@ -1460,7 +1465,7 @@
       state.sessions.slice(-5).reverse().forEach((session) => {
         const item = document.createElement("div");
         item.className = "wt-ledger-session";
-        item.textContent = `${new Date(session.endedAt).toLocaleString()} - ${session.executionCount} exec - ${formatters.native(session.totalPnlNative, session.chain)}`;
+        item.textContent = `${new Date(session.endedAt).toLocaleString()} - ${session.executionCount} trades: ${formatters.signedNative(session.totalPnlNative, session.chain, 2)}`;
         summaryEl.appendChild(item);
       });
     }
