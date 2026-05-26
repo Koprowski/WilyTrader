@@ -108,6 +108,9 @@
     native(value, chain) {
       return `${Number(value || 0).toFixed(4)} ${chain}`;
     },
+    compactNative(value, chain) {
+      return `${Number(value || 0).toFixed(2)} ${chain}`;
+    },
     usd(value) {
       if (!Number.isFinite(value)) return "$0";
       if (Math.abs(value) >= 1_000_000_000) return `$${(value / 1_000_000_000).toFixed(2)}B`;
@@ -1299,7 +1302,7 @@
     tokenEl.textContent = token.address
       ? `${token.name} (${shortenAddress(token.address)})`
       : "Open a Padre token page";
-    balanceEl.textContent = `Bal ${formatters.native(state.balances[token.chain] || 0, token.chain)}`;
+    balanceEl.textContent = `Bal ${formatters.compactNative(state.balances[token.chain] || 0, token.chain)}`;
     positionEl.textContent = summary
       ? `Pos ${formatters.native(summary.investedNative, token.chain)} ${formatters.pct(calculateOpenPnlPct(position, token))}`
       : "Pos none";
