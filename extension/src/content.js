@@ -2,7 +2,7 @@
   "use strict";
 
   const STORAGE_KEY = "wilytrader_state_v2";
-  const SCHEMA_VERSION = 7;
+  const SCHEMA_VERSION = 8;
   const LEGACY_DEFAULT_BUY_AMOUNTS = [0.1, 0.2, 0.5, 1];
   const PADRE_FOUR_DEFAULT_BUY_AMOUNTS = [0.1, 0.25, 0.5, 1];
   const PADRE_EIGHT_DEFAULT_BUY_AMOUNTS = [0.1, 0.25, 0.5, 1, 3, 0.005, 5, 7];
@@ -46,6 +46,13 @@
       <path d="M17.5 14.5V19.5"></path>
       <path d="M15 17H20"></path>
     </svg>`;
+  const LEDGER_ICON = `
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="M5 4H19V20H5V4Z"></path>
+      <path d="M8 8H16"></path>
+      <path d="M8 12H16"></path>
+      <path d="M8 16H13"></path>
+    </svg>`;
   const LEGACY_STORAGE_KEYS = [
     "wilytrader_state_v1",
     ["wily", "mem", "trader_state_v2"].join(""),
@@ -60,6 +67,8 @@
     positions: {},
     closedPositions: [],
     executions: [],
+    sessions: [],
+    sessionStartedAt: new Date().toISOString(),
     notes: [],
     settings: {
       buyAmounts: [0.1, 0.25, 0.5, 1, 2, 5],
@@ -216,6 +225,8 @@
       positions: { ...(stored?.positions || {}) },
       closedPositions: Array.isArray(stored?.closedPositions) ? stored.closedPositions : [],
       executions,
+      sessions: Array.isArray(stored?.sessions) ? stored.sessions : [],
+      sessionStartedAt: stored?.sessionStartedAt || new Date().toISOString(),
       notes: Array.isArray(stored?.notes) ? stored.notes : [],
       settings: { ...DEFAULT_STATE.settings, ...(stored?.settings || {}) },
     };
@@ -423,6 +434,7 @@
           <div class="wt-header-controls">
             <button class="wt-icon-btn" data-action="open-add" title="Add funds or position" aria-label="Add funds or position">+</button>
             <button class="wt-icon-btn" data-action="open-note" title="Add note" aria-label="Add note">${NOTE_ICON}</button>
+            <button class="wt-icon-btn" data-action="view-log" title="Ledger" aria-label="Ledger">${LEDGER_ICON}</button>
             <button class="wt-icon-btn" data-action="settings" title="Settings" aria-label="Settings">&#9881;</button>
             <button class="wt-icon-btn" data-action="export" title="Download JSON" aria-label="Download JSON">DL</button>
           </div>
@@ -599,6 +611,7 @@
               <button class="wt-button" data-action="copy">Copy JSON</button>
               <button class="wt-button" data-action="export">Save JSON</button>
             </div>
+            <div class="wt-ledger-summary" data-ledger-summary></div>
             <div class="wt-log-full" data-log-full></div>
           </div>
         </section>
@@ -912,8 +925,9 @@
 
     const chain = delayedToken.chain;
     const fees = calculateFees("buy", amountNative, delayedToken.executionDelayMs);
-    const slippagePct = Number(state.settings.buySlippagePct || 0);
-    const slippage = slippagePct / 100;
+    const maxSlippagePct = Number(state.settings.buySlippagePct || 0);
+    const realizedSlippagePct = calculateRealizedSlippagePct(maxSlippagePct);
+    const slippage = realizedSlippagePct / 100;
     const totalDebit = amountNative + fees.totalFeeNative;
     if ((state.balances[chain] || 0) < totalDebit) {
       return setStatus(`Insufficient ${chain} paper balance.`);
@@ -949,7 +963,8 @@
       grossNative: amountNative,
       netNative: -totalDebit,
       fees,
-      slippagePct,
+      slippagePct: realizedSlippagePct,
+      maxSlippagePct,
       tokenAmount,
       executionPriceNative: executionPrice,
       pnlNative: 0,
@@ -983,9 +998,10 @@
     const sellRatio = Math.min(1, Math.max(0, percent / 100));
     const tokenAmount = position.tokenAmount * sellRatio;
     const costBasis = position.costNative * sellRatio;
-    const slippagePct = Number(state.settings.sellSlippagePct || 0);
-    const slippage = slippagePct / 100;
-    const executionPrice = delayedToken.unitPriceNative * (1 - slippage);
+    const maxSlippagePct = Number(state.settings.sellSlippagePct || 0);
+    const realizedSlippagePct = calculateRealizedSlippagePct(maxSlippagePct);
+    const slippage = realizedSlippagePct / 100;
+    const executionPrice = delayedToken.unitPriceNative * Math.max(0.000001, 1 - slippage);
     const grossProceeds = tokenAmount * executionPrice;
     const fees = calculateFees("sell", grossProceeds, delayedToken.executionDelayMs);
     const netProceeds = Math.max(0, grossProceeds - fees.totalFeeNative);
@@ -1020,7 +1036,8 @@
       grossNative: grossProceeds,
       netNative: netProceeds,
       fees,
-      slippagePct,
+      slippagePct: realizedSlippagePct,
+      maxSlippagePct,
       tokenAmount,
       executionPriceNative: executionPrice,
       pnlNative,
@@ -1120,6 +1137,14 @@
     };
   }
 
+  function calculateRealizedSlippagePct(maxSlippagePct) {
+    const max = Math.max(0, Number(maxSlippagePct || 0));
+    if (max <= 0) return 0;
+    const cap = Math.min(max, Math.max(0.15, max * 0.06), 5);
+    const realized = cap * (0.25 + Math.random() * 0.75);
+    return round(realized, 4);
+  }
+
   function recordExecution(fields) {
     const usdPrice = DEFAULT_PRICES[fields.chain] || 1;
     const timestampMs = Date.now();
@@ -1152,6 +1177,7 @@
       bribeFeeNative: round(fields.fees?.bribeFeeNative),
       platformFeePct: Number(state.settings.platformFeePct || 0),
       slippagePct: fields.slippagePct,
+      maxSlippagePct: fields.maxSlippagePct ?? fields.slippagePct,
       executionDelayMs: fields.fees?.executionDelayMs ?? 0,
       tokenAmount: round(fields.tokenAmount, 12),
       costBasisNative: round(fields.costBasisNative),
@@ -1366,6 +1392,7 @@
   }
 
   function renderFullLog() {
+    renderLedgerSummary();
     const logEl = root.querySelector("[data-log-full]");
     if (!logEl) return;
     logEl.innerHTML = "";
@@ -1381,12 +1408,66 @@
         `${new Date(execution.timestamp).toLocaleTimeString()} ${execution.side.toUpperCase()} ${execution.tokenName}`,
         `${formatters.native(Math.abs(execution.grossNative || execution.netNative), execution.chain)}`,
         `fees ${formatters.native(execution.feeNative, execution.chain)}`,
-        `slip ${execution.slippagePct}%`,
+        `slip ${execution.slippagePct}% / max ${execution.maxSlippagePct ?? execution.slippagePct}%`,
         `delay ${execution.executionDelayMs || 0}ms`,
         `PnL ${formatters.native(execution.pnlNative, execution.chain)}`,
       ].join(" - ");
       logEl.appendChild(item);
     });
+  }
+
+  function renderLedgerSummary() {
+    const summaryEl = root.querySelector("[data-ledger-summary]");
+    if (!summaryEl) return;
+    const summary = buildCurrentSessionSummary();
+    const rows = [
+      ["Started", summary.startedAt ? new Date(summary.startedAt).toLocaleString() : "Current"],
+      ["Executions", String(summary.executionCount)],
+      ["Realized", formatters.native(summary.realizedPnlNative, summary.chain)],
+      ["Active Open", formatters.native(summary.activeOpenPnlNative, summary.chain)],
+      ["Fees", formatters.native(summary.totalFeesNative, summary.chain)],
+      ["Total", formatters.native(summary.totalPnlNative, summary.chain)],
+    ];
+    summaryEl.innerHTML = "";
+    rows.forEach(([label, value]) => {
+      const item = document.createElement("div");
+      item.className = "wt-ledger-stat";
+      item.innerHTML = `<span>${label}</span><strong>${value}</strong>`;
+      summaryEl.appendChild(item);
+    });
+    if (state.sessions.length > 0) {
+      const title = document.createElement("div");
+      title.className = "wt-ledger-heading";
+      title.textContent = "Previous Sessions";
+      summaryEl.appendChild(title);
+      state.sessions.slice(-5).reverse().forEach((session) => {
+        const item = document.createElement("div");
+        item.className = "wt-ledger-session";
+        item.textContent = `${new Date(session.endedAt).toLocaleString()} - ${session.executionCount} exec - ${formatters.native(session.totalPnlNative, session.chain)}`;
+        summaryEl.appendChild(item);
+      });
+    }
+  }
+
+  function buildCurrentSessionSummary() {
+    const chain = activeToken?.chain || state.executions[state.executions.length - 1]?.chain || "SOL";
+    const buys = state.executions.filter((execution) => execution.side === "buy");
+    const sells = state.executions.filter((execution) => execution.side === "sell");
+    const buyFeesNative = sum(buys, "feeNative");
+    const realizedPnlNative = sum(sells, "pnlNative") - buyFeesNative;
+    const totalFeesNative = sum(state.executions, "feeNative");
+    const activePosition = activeToken?.key ? state.positions[activeToken.key] : null;
+    const activeMarkNative = activePosition && activeToken?.unitPriceNative ? activePosition.tokenAmount * activeToken.unitPriceNative : 0;
+    const activeOpenPnlNative = activePosition ? activeMarkNative - activePosition.costNative : 0;
+    return {
+      chain,
+      startedAt: state.sessionStartedAt,
+      executionCount: state.executions.length,
+      realizedPnlNative: round(realizedPnlNative),
+      activeOpenPnlNative: round(activeOpenPnlNative),
+      totalFeesNative: round(totalFeesNative),
+      totalPnlNative: round(realizedPnlNative + activeOpenPnlNative),
+    };
   }
 
   function calculateOpenPnlPct(position, token) {
@@ -1432,6 +1513,8 @@
       closedPositions: positions.filter((position) => position.status === "closed"),
       positions,
       executions: state.executions,
+      currentSessionSummary: buildCurrentSessionSummary(),
+      previousSessions: state.sessions,
       notes: state.notes,
       settings: state.settings,
       mockapeCompatibleTrades: buildMockApeCompatibleTrades(),
@@ -1496,10 +1579,22 @@
 
   async function clearTradeLog() {
     if (!window.confirm("Clear paper ledger, notes, and open positions?")) return;
+    const sessionSummary = buildCurrentSessionSummary();
+    if (sessionSummary.executionCount > 0 || state.notes.length > 0) {
+      state.sessions.push({
+        ...sessionSummary,
+        id: createId("session"),
+        endedAt: new Date().toISOString(),
+        closedPositionCount: state.closedPositions.length,
+        noteCount: state.notes.length,
+      });
+      state.sessions = state.sessions.slice(-25);
+    }
     state.executions = [];
     state.closedPositions = [];
     state.positions = {};
     state.notes = [];
+    state.sessionStartedAt = new Date().toISOString();
     await persistAndSync("clear");
     render();
     setStatus("Paper ledger cleared.");
