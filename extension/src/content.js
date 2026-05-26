@@ -112,6 +112,7 @@
   let lastRouteKey = "";
   let bridgeState = { active: false, lastMessage: "Bridge idle" };
   let tradeInFlight = false;
+  let extensionContextValid = true;
 
   const formatters = {
     native(value, chain) {
@@ -201,10 +202,25 @@
   function handleExtensionContextError(error) {
     const message = error?.message || String(error || "");
     if (message.includes("Extension context invalidated")) {
+      extensionContextValid = false;
       setStatus("Extension reloaded. Refresh the Padre tab to reconnect WilyTrader.");
       return;
     }
     console.error("[WilyTrader]", error);
+  }
+
+  function isExtensionContextError(error) {
+    return (error?.message || String(error || "")).includes("Extension context invalidated");
+  }
+
+  function runTask(task) {
+    Promise.resolve(task).catch((error) => {
+      if (isExtensionContextError(error)) {
+        handleExtensionContextError(error);
+      } else {
+        console.error("[WilyTrader]", error);
+      }
+    });
   }
 
   async function loadState() {
@@ -321,7 +337,9 @@
   }
 
   async function persist() {
+    if (!extensionContextValid) return false;
     await storageSet(STORAGE_KEY, state);
+    return true;
   }
 
   function detectToken() {
@@ -620,9 +638,23 @@
     document.documentElement.appendChild(root);
     root.addEventListener("click", handleClick);
     root.addEventListener("change", handleChange);
+    window.addEventListener("unhandledrejection", handleUnhandledRejection);
+    window.addEventListener("error", handleWindowError);
     const panel = root.querySelector(`.${selectors.panel}`);
     applyPanelPosition(panel);
     makeDraggable(root.querySelector(".wt-header"), panel);
+  }
+
+  function handleUnhandledRejection(event) {
+    if (!isExtensionContextError(event.reason)) return;
+    event.preventDefault();
+    handleExtensionContextError(event.reason);
+  }
+
+  function handleWindowError(event) {
+    if (!isExtensionContextError(event.error || event.message)) return;
+    event.preventDefault();
+    handleExtensionContextError(event.error || event.message);
   }
 
   function handleClick(event) {
@@ -633,14 +665,14 @@
     const buyAmount = target.dataset.buyAmount;
     const sellPct = target.dataset.sellPct;
 
-    if (buyAmount) void buy(Number(buyAmount));
-    else if (sellPct) void sell(Number(sellPct));
+    if (buyAmount) runTask(buy(Number(buyAmount)));
+    else if (sellPct) runTask(sell(Number(sellPct)));
     else if (action === "custom-buy") {
       const input = root.querySelector("[data-custom-buy]");
       const amount = Number(input.value);
       if (Number.isFinite(amount) && amount > 0) {
         input.value = "";
-        void buy(amount);
+        runTask(buy(amount));
       } else {
         setStatus("Enter a valid buy amount.");
       }
@@ -649,7 +681,7 @@
       const amount = Number(input.value);
       if (Number.isFinite(amount) && amount > 0) {
         input.value = "";
-        void addPaperBalance(amount);
+        runTask(addPaperBalance(amount));
       } else {
         setStatus("Enter a valid deposit amount.");
       }
@@ -658,7 +690,7 @@
       const amount = Number(input.value);
       if (Number.isFinite(amount) && amount >= 0) {
         input.value = "";
-        void setPaperBalance(amount);
+        runTask(setPaperBalance(amount));
       } else {
         setStatus("Enter a valid balance amount.");
       }
@@ -671,21 +703,21 @@
     } else if (action === "close-modal") {
       closeModals();
     } else if (action === "save-settings") {
-      void saveSettingsFromModal();
+      runTask(saveSettingsFromModal());
     } else if (action === "reset-settings") {
-      void resetSettingsToDefaults();
+      runTask(resetSettingsToDefaults());
     } else if (action === "view-log") {
       openLogModal();
     } else if (action === "add-note") {
-      void addNote();
+      runTask(addNote());
     } else if (action === "bridge-sync") {
-      void syncBridge("manual");
+      runTask(syncBridge("manual"));
     } else if (action === "export") {
       exportJson();
     } else if (action === "copy") {
-      void copyJson();
+      runTask(copyJson());
     } else if (action === "clear") {
-      void clearTradeLog();
+      runTask(clearTradeLog());
     } else if (action === "toggle") {
       togglePanel();
     }
@@ -694,7 +726,7 @@
   function handleChange(event) {
     const target = event.target;
     if (!target?.matches?.("[data-quick-setting]")) return;
-    void saveQuickSetting(target.dataset.quickSetting, target.value);
+    runTask(saveQuickSetting(target.dataset.quickSetting, target.value));
   }
 
   async function saveQuickSetting(key, rawValue) {
@@ -1269,7 +1301,7 @@
 
   async function persistAndSync(reason) {
     await persist();
-    void syncBridge(reason);
+    runTask(syncBridge(reason));
   }
 
   function render() {
@@ -1484,6 +1516,7 @@
   }
 
   async function syncBridge(reason) {
+    if (!extensionContextValid) return;
     if (!state?.settings?.bridgeEnabled) return;
     try {
       const response = await fetch(`${BRIDGE_BASE_URL}/ledger`, {
@@ -1517,7 +1550,7 @@
     anchor.click();
     anchor.remove();
     URL.revokeObjectURL(url);
-    void syncBridge("download");
+    runTask(syncBridge("download"));
     setStatus("JSON export created.");
   }
 
@@ -1564,6 +1597,7 @@
 
   function bindRouteWatcher() {
     window.setInterval(() => {
+      if (!extensionContextValid) return;
       const routeKey = `${window.location.href}|${document.title}`;
       if (routeKey !== lastRouteKey) {
         lastRouteKey = routeKey;
@@ -1623,7 +1657,7 @@
       const top = Number.parseFloat(panel.style.top);
       if (Number.isFinite(left) && Number.isFinite(top)) {
         state.settings.panelPosition = { left, top };
-        void persist();
+        runTask(persist());
       }
     });
   }
@@ -1633,8 +1667,6 @@
   }
 
   if (window.location.hostname.includes("trade.padre.gg")) {
-    void initialize().catch((error) => {
-      console.error("[WilyTrader] Failed to initialize.", error);
-    });
+    runTask(initialize());
   }
 })();
