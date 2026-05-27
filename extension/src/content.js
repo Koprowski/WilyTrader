@@ -8,8 +8,6 @@
   const PANEL_VIEWPORT_MARGIN = 8;
   const TRACKER_BASE_WIDTH = 480;
   const TRACKER_BASE_HEIGHT = 76;
-  const TRACKER_SCALE_MIN = 0.5;
-  const TRACKER_SCALE_MAX = 2;
   const PULSE_AUTO_BUY_KEY = "wilytrader_axiom_pulse_auto_buy_v1";
   const PULSE_AUTO_BUY_TTL_MS = 2 * 60 * 1000;
   const LEGACY_DEFAULT_BUY_AMOUNTS = [0.1, 0.2, 0.5, 1];
@@ -691,9 +689,9 @@
           <div class="wt-tracker-face" data-tracker-drag>
             <div class="wt-tracker-metric">
               <strong id="${selectors.trackerPortfolio}">0.00 SOL</strong>
-              <span>Total Portfolio</span>
+              <span>Paper Balance</span>
             </div>
-            <button type="button" class="wt-tracker-brand" data-action="tracker-reset-session" title="Reset session P&L" aria-label="Reset session P&L">
+            <button type="button" class="wt-tracker-brand" data-action="tracker-menu" title="WilyTrader tracker actions" aria-label="WilyTrader tracker actions" aria-expanded="false">
               <span class="wt-sol-mark"></span>
               <span>WILY</span>
             </button>
@@ -703,6 +701,11 @@
             </div>
           </div>
           <div class="wt-tracker-rail" aria-hidden="true"><span id="${selectors.trackerBar}"></span></div>
+        </div>
+        <div class="wt-tracker-menu" data-tracker-menu hidden>
+          <button type="button" data-action="tracker-open-add-balance">Add Paper Balance</button>
+          <button type="button" data-action="tracker-open-set-balance">Set Paper Balance</button>
+          <button type="button" data-action="tracker-reset-session">Reset Trading Session</button>
         </div>
         <span class="wt-tracker-resize" data-tracker-resize aria-hidden="true"></span>
       </section>
@@ -921,6 +924,8 @@
     root.addEventListener("pointerdown", stopOverlayEvent, true);
     root.addEventListener("click", handleClick, true);
     root.addEventListener("change", handleChange);
+    document.removeEventListener("pointerdown", closeTrackerMenuOnOutsidePointer, true);
+    document.addEventListener("pointerdown", closeTrackerMenuOnOutsidePointer, true);
     window.addEventListener("unhandledrejection", handleUnhandledRejection);
     window.addEventListener("error", handleWindowError);
     window.addEventListener("message", handleAxiomChartBridgeEvent);
@@ -1058,7 +1063,16 @@
       runTask(addNote());
     } else if (action === "new-session") {
       runTask(startNewSession());
+    } else if (action === "tracker-menu") {
+      toggleTrackerMenu();
+    } else if (action === "tracker-open-add-balance") {
+      closeTrackerMenu();
+      openAddModal({ focus: "deposit" });
+    } else if (action === "tracker-open-set-balance") {
+      closeTrackerMenu();
+      openAddModal({ focus: "set-balance" });
     } else if (action === "tracker-reset-session") {
+      closeTrackerMenu();
       runTask(startNewSession({
         confirmMessage: "Reset session P&L and start a new session? Current trades and notes will be archived as a previous session summary.",
         statusMessage: "Session P&L reset.",
@@ -1513,7 +1527,7 @@
     setStatus(`Set balance to ${formatters.native(amount, chain)}.`);
   }
 
-  function openAddModal() {
+  function openAddModal(options = {}) {
     const modal = root.querySelector(`#${selectors.addModal}`);
     if (!modal) return;
     const fundsInput = root.querySelector("[data-deposit]");
@@ -1522,6 +1536,31 @@
     if (setBalanceInput) setBalanceInput.value = "";
     modal.classList.add("wt-modal-open");
     modal.setAttribute("aria-hidden", "false");
+    const focusTarget = options.focus === "set-balance" ? setBalanceInput : fundsInput;
+    window.setTimeout(() => focusTarget?.focus?.(), 0);
+  }
+
+  function toggleTrackerMenu() {
+    const menu = root?.querySelector("[data-tracker-menu]");
+    const button = root?.querySelector("[data-action='tracker-menu']");
+    if (!menu) return;
+    const willOpen = menu.hidden;
+    menu.hidden = !willOpen;
+    button?.setAttribute("aria-expanded", willOpen ? "true" : "false");
+  }
+
+  function closeTrackerMenu() {
+    const menu = root?.querySelector("[data-tracker-menu]");
+    const button = root?.querySelector("[data-action='tracker-menu']");
+    if (menu) menu.hidden = true;
+    button?.setAttribute("aria-expanded", "false");
+  }
+
+  function closeTrackerMenuOnOutsidePointer(event) {
+    const menu = root?.querySelector("[data-tracker-menu]");
+    if (!menu || menu.hidden) return;
+    if (root?.querySelector(`.${selectors.tracker}`)?.contains(event.target)) return;
+    closeTrackerMenu();
   }
 
   function openSettingsModal() {
@@ -2245,13 +2284,13 @@
     tracker.classList.toggle("wt-tracker-down", direction === "down");
     tracker.classList.toggle("wt-tracker-flat", direction === "flat");
     tracker.title = [
-      `Portfolio ${formatTrackerNative(metrics.portfolioNative, metrics.chain)}`,
+      `Paper balance ${formatTrackerNative(metrics.balanceNative, metrics.chain)}`,
       `Session PNL ${formatTrackerNative(metrics.sessionPnlNative, metrics.chain, true)} (${formatters.pct(metrics.sessionPnlPct)})`,
       `Realized ${formatTrackerNative(metrics.realizedPnlNative, metrics.chain, true)}`,
       `Marked open ${formatTrackerNative(metrics.markedOpenPnlNative, metrics.chain, true)}`,
     ].join("\n");
 
-    if (portfolioEl) portfolioEl.textContent = formatTrackerNative(metrics.portfolioNative, metrics.chain);
+    if (portfolioEl) portfolioEl.textContent = formatTrackerNative(metrics.balanceNative, metrics.chain);
     if (pnlEl) pnlEl.textContent = formatTrackerNative(metrics.sessionPnlNative, metrics.chain, true);
     if (pctEl) pctEl.textContent = formatters.pct(metrics.sessionPnlPct);
     if (barEl) barEl.style.width = "100%";
@@ -2286,6 +2325,7 @@
 
     return {
       chain,
+      balanceNative: round(balanceNative, 2),
       portfolioNative: round(portfolioNative, 2),
       realizedPnlNative: round(realizedPnlNative, 2),
       markedOpenPnlNative: round(markedOpenPnlNative, 2),
@@ -2900,11 +2940,10 @@
     const rect = tracker.getBoundingClientRect();
     const width = rect.width || tracker.offsetWidth || TRACKER_BASE_WIDTH;
     const height = rect.height || tracker.offsetHeight || TRACKER_BASE_HEIGHT;
-    const rawScale = Math.min(width / TRACKER_BASE_WIDTH, height / TRACKER_BASE_HEIGHT);
-    const scale = Math.max(TRACKER_SCALE_MIN, Math.min(TRACKER_SCALE_MAX, rawScale || 1));
-    tracker.style.setProperty("--wt-tracker-scale", String(Number(scale.toFixed(3))));
-    tracker.style.setProperty("--wt-tracker-layout-width", `${Math.max(TRACKER_BASE_WIDTH, width / scale).toFixed(1)}px`);
-    tracker.style.setProperty("--wt-tracker-layout-height", `${Math.max(TRACKER_BASE_HEIGHT, height / scale).toFixed(1)}px`);
+    const scaleX = Math.max(0.1, width / TRACKER_BASE_WIDTH);
+    const scaleY = Math.max(0.1, height / TRACKER_BASE_HEIGHT);
+    tracker.style.setProperty("--wt-tracker-scale-x", String(Number(scaleX.toFixed(3))));
+    tracker.style.setProperty("--wt-tracker-scale-y", String(Number(scaleY.toFixed(3))));
   }
 
   function clampElementPosition(element, left, top) {
@@ -3093,10 +3132,19 @@
     const sizeKey = options.sizeKey || "trackerSize";
     let resizing = null;
 
+    const removeResizeListeners = () => {
+      document.removeEventListener("pointermove", updateResize, true);
+      document.removeEventListener("pointerup", finishResize, true);
+      document.removeEventListener("pointercancel", finishResize, true);
+      document.removeEventListener("mouseup", finishResize, true);
+      window.removeEventListener("blur", finishResize);
+    };
+
     const finishResize = () => {
       if (!resizing) return;
       const { pointerId } = resizing;
       resizing = null;
+      removeResizeListeners();
       document.body.style.userSelect = "";
       try {
         if (handle.hasPointerCapture?.(pointerId)) handle.releasePointerCapture(pointerId);
@@ -3113,7 +3161,8 @@
     };
 
     const updateResize = (event) => {
-      if (!resizing || event.pointerId !== resizing.pointerId) return;
+      if (!resizing) return;
+      if (Number.isFinite(event.pointerId) && event.pointerId !== resizing.pointerId) return;
       if (event.buttons === 0) {
         finishResize();
         return;
@@ -3139,14 +3188,15 @@
         startHeight: element.offsetHeight,
       };
       handle.setPointerCapture?.(event.pointerId);
+      document.addEventListener("pointermove", updateResize, true);
+      document.addEventListener("pointerup", finishResize, true);
+      document.addEventListener("pointercancel", finishResize, true);
+      document.addEventListener("mouseup", finishResize, true);
+      window.addEventListener("blur", finishResize);
       document.body.style.userSelect = "none";
     });
 
-    handle.addEventListener("pointermove", updateResize);
-    handle.addEventListener("pointerup", finishResize);
-    handle.addEventListener("pointercancel", finishResize);
     handle.addEventListener("lostpointercapture", finishResize);
-    window.addEventListener("blur", finishResize);
   }
 
   function createId(prefix) {
