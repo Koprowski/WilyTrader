@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WileyTrader Axiom Chart Bridge
 // @namespace    https://github.com/Koprowski/WilyTrader
-// @version      0.3.7
+// @version      0.3.13
 // @description  Draw WileyTrader average entry/exit lines as native TradingView chart shapes on axiom.trade.
 // @match        https://axiom.trade/*
 // @run-at       document-idle

@@ -1279,6 +1279,7 @@
 
   function handleAxiomPulseQuickBuyEvent(event) {
     if (!isPrimaryPointerEvent(event)) return;
+    if (isWilyTraderUiTarget(event.target) || isWilyTraderModalOpen()) return;
     const quickBuyBox = findAxiomPulseQuickBuyBox(event.target);
     if (!quickBuyBox) return;
     event.preventDefault();
@@ -1298,6 +1299,10 @@
     event.stopImmediatePropagation();
     const quickBuyBox = findAxiomPulseQuickBuyBoxes()[Number(target.dataset.wtPulseQuickBuyIndex)];
     if (!quickBuyBox) return refreshAxiomPulseQuickBuyLayer();
+    if (isWilyTraderModalOpen() || isAxiomPulseQuickBuyBoxCovered(quickBuyBox)) {
+      refreshAxiomPulseQuickBuyLayer();
+      return;
+    }
     if (Date.now() < pulseQuickBuyQueuedUntil) return;
     primeTradeExecutionSound();
     queueAxiomPulseAutoBuy(quickBuyBox);
@@ -1389,7 +1394,7 @@
   function refreshAxiomPulseQuickBuyLayer() {
     const layer = ensureAxiomPulseQuickBuyLayer();
     if (!layer) return;
-    if (!isAxiomPulseRoute()) {
+    if (!isAxiomPulseRoute() || isWilyTraderModalOpen()) {
       layer.hidden = true;
       layer.innerHTML = "";
       return;
@@ -1401,6 +1406,7 @@
     boxes.forEach((box, index) => {
       const rect = box.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return;
+      if (isAxiomPulseQuickBuyBoxCovered(box)) return;
       const hitTarget = document.createElement("div");
       hitTarget.className = "wt-pulse-quick-buy-hit";
       hitTarget.dataset.wtPulseQuickBuyIndex = String(index);
@@ -1410,6 +1416,56 @@
       hitTarget.style.height = `${Math.min(window.innerHeight, rect.bottom) - Math.max(0, rect.top)}px`;
       layer.appendChild(hitTarget);
     });
+  }
+
+  function isWilyTraderUiTarget(target) {
+    return Boolean(target && root?.contains(target));
+  }
+
+  function isWilyTraderModalOpen() {
+    return Boolean(root?.querySelector(".wt-modal-open"));
+  }
+
+  function isAxiomPulseQuickBuyBoxCovered(box) {
+    const rect = box.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return true;
+    const left = Math.max(0, rect.left);
+    const right = Math.min(window.innerWidth, rect.right);
+    const top = Math.max(0, rect.top);
+    const bottom = Math.min(window.innerHeight, rect.bottom);
+    if (right <= left || bottom <= top) return true;
+
+    const points = [
+      [left + (right - left) / 2, top + (bottom - top) / 2],
+      [left + (right - left) / 2, bottom - Math.min(12, (bottom - top) / 4)],
+      [left + Math.min(12, (right - left) / 4), top + (bottom - top) / 2],
+      [right - Math.min(12, (right - left) / 4), top + (bottom - top) / 2],
+    ];
+    return points.some(([x, y]) => !isAxiomPulseQuickBuyPointClear(box, x, y));
+  }
+
+  function isAxiomPulseQuickBuyPointClear(box, x, y) {
+    const stack = document.elementsFromPoint(x, y);
+    for (const element of stack) {
+      if (!element || element === document.documentElement || element === document.body) continue;
+      if (root?.contains(element) || pulseQuickBuyLayer?.contains(element)) continue;
+      if (element === box || box.contains(element) || element.contains?.(box)) return true;
+      if (isAxiomPulseBlockingOverlayElement(element)) return false;
+    }
+    return false;
+  }
+
+  function isAxiomPulseBlockingOverlayElement(element) {
+    const text = `${element.id || ""} ${element.className || ""} ${element.getAttribute?.("role") || ""}`.toLowerCase();
+    if (element.tagName === "DIALOG" || element.getAttribute?.("aria-modal") === "true") return true;
+    if (/\b(modal|dialog|popover|drawer|sheet|overlay|portal|radix|floating)\b/.test(text)) return true;
+
+    const style = window.getComputedStyle(element);
+    if (style.pointerEvents === "none" || style.visibility === "hidden" || style.display === "none") return false;
+    if (style.position !== "fixed" && style.position !== "sticky") return false;
+    const rect = element.getBoundingClientRect();
+    const area = rect.width * rect.height;
+    return rect.width >= 180 && rect.height >= 90 && area >= 18000;
   }
 
   function isAxiomPulseQuickBuyBoxElement(element) {
@@ -1725,6 +1781,7 @@
     if (setBalanceInput) setBalanceInput.value = "";
     modal.classList.add("wt-modal-open");
     modal.setAttribute("aria-hidden", "false");
+    refreshAxiomPulseQuickBuyLayer();
     const focusTarget = options.focus === "set-balance" ? setBalanceInput : fundsInput;
     window.setTimeout(() => focusTarget?.focus?.(), 0);
   }
@@ -1779,6 +1836,7 @@
     root.querySelector("[data-setting='updateChecksEnabled']").checked = Boolean(state.settings.updateChecksEnabled);
     modal.classList.add("wt-modal-open");
     modal.setAttribute("aria-hidden", "false");
+    refreshAxiomPulseQuickBuyLayer();
   }
 
   function openLogModal() {
@@ -1787,6 +1845,7 @@
     if (!modal) return;
     modal.classList.add("wt-modal-open");
     modal.setAttribute("aria-hidden", "false");
+    refreshAxiomPulseQuickBuyLayer();
   }
 
   function closeModals() {
@@ -1794,6 +1853,7 @@
       modal.classList.remove("wt-modal-open");
       modal.setAttribute("aria-hidden", "true");
     });
+    refreshAxiomPulseQuickBuyLayer();
   }
 
   async function saveSettingsFromModal() {
