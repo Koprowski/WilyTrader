@@ -370,22 +370,75 @@
 
 .wt-tracker-resize {
   position: absolute;
-  right: 0;
-  bottom: 0;
+  z-index: 3;
   width: 18px;
   height: 18px;
+  opacity: 0;
+}
+
+.wt-pnl-tracker:hover .wt-tracker-resize,
+.wt-tracker-resize:hover {
+  opacity: 1;
+}
+
+.wt-tracker-resize-nw {
+  left: -2px;
+  top: -2px;
+  cursor: nwse-resize;
+}
+
+.wt-tracker-resize-ne {
+  right: -2px;
+  top: -2px;
+  cursor: nesw-resize;
+}
+
+.wt-tracker-resize-sw {
+  left: -2px;
+  bottom: -2px;
+  cursor: nesw-resize;
+}
+
+.wt-tracker-resize-se {
+  right: -2px;
+  bottom: -2px;
   cursor: nwse-resize;
 }
 
 .wt-tracker-resize::after {
   content: "";
   position: absolute;
-  right: 4px;
-  bottom: 4px;
   width: 8px;
   height: 8px;
-  border-right: 2px solid rgba(203, 211, 230, 0.72);
-  border-bottom: 2px solid rgba(203, 211, 230, 0.72);
+  border: 2px solid rgba(203, 211, 230, 0.72);
+}
+
+.wt-tracker-resize-nw::after {
+  left: 4px;
+  top: 4px;
+  border-right: 0;
+  border-bottom: 0;
+}
+
+.wt-tracker-resize-ne::after {
+  right: 4px;
+  top: 4px;
+  border-left: 0;
+  border-bottom: 0;
+}
+
+.wt-tracker-resize-sw::after {
+  left: 4px;
+  bottom: 4px;
+  border-right: 0;
+  border-top: 0;
+}
+
+.wt-tracker-resize-se::after {
+  right: 4px;
+  bottom: 4px;
+  border-left: 0;
+  border-top: 0;
 }
 
 .wt-header {

@@ -820,7 +820,10 @@
           <button type="button" data-action="tracker-open-set-balance">Set Paper Balance</button>
           <button type="button" data-action="tracker-reset-session">Reset Trading Session</button>
         </div>
-        <span class="wt-tracker-resize" data-tracker-resize aria-hidden="true"></span>
+        <div class="wt-tracker-resize wt-tracker-resize-nw" data-tracker-resize-corner="top-left" title="Scale tracker" aria-hidden="true"></div>
+        <div class="wt-tracker-resize wt-tracker-resize-ne" data-tracker-resize-corner="top-right" title="Scale tracker" aria-hidden="true"></div>
+        <div class="wt-tracker-resize wt-tracker-resize-sw" data-tracker-resize-corner="bottom-left" title="Scale tracker" aria-hidden="true"></div>
+        <div class="wt-tracker-resize wt-tracker-resize-se" data-tracker-resize-corner="bottom-right" title="Scale tracker" aria-hidden="true"></div>
       </section>
       <section class="${selectors.panel}" aria-label="WilyTrader paper trading panel">
         <header class="wt-header">
@@ -1052,7 +1055,7 @@
     makeDraggable(root.querySelector(".wt-header"), panel);
     makePanelScalable(panel);
     makeDraggable(root.querySelector("[data-tracker-drag]"), tracker, { positionKey: "trackerPosition" });
-    makeTrackerScalable(root.querySelector("[data-tracker-resize]"), tracker);
+    makeTrackerScalable(tracker);
   }
 
   function injectAxiomChartBridgeScript() {
@@ -3309,8 +3312,10 @@
     );
   }
 
-  function makeTrackerScalable(handle, tracker) {
-    if (!handle || !tracker) return;
+  function makeTrackerScalable(tracker) {
+    if (!tracker) return;
+    const handles = tracker.querySelectorAll("[data-tracker-resize-corner]");
+    if (!handles.length) return;
     let resizing = null;
 
     const removeResizeListeners = () => {
@@ -3323,7 +3328,7 @@
 
     const finishResize = () => {
       if (!resizing) return;
-      const { pointerId } = resizing;
+      const { pointerId, handle } = resizing;
       resizing = null;
       removeResizeListeners();
       document.body.style.userSelect = "";
@@ -3358,20 +3363,24 @@
       setTrackerScale(tracker, Math.max(TRACKER_SCALE_MIN, Math.min(maxScale, rawScale)));
     };
 
-    handle.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0 || resizing) return;
+    const startResize = (event) => {
+      const handle = event.target?.closest?.("[data-tracker-resize-corner]");
+      if (!handle || !tracker.contains(handle) || event.button !== 0 || resizing) return;
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();
       const rect = tracker.getBoundingClientRect();
-      const anchor = { x: rect.left, y: rect.top };
+      const anchor = getTrackerScaleAnchor(handle.dataset.trackerResizeCorner, rect);
+      if (!anchor) return;
+      tracker.style.transformOrigin = anchor.origin;
+      positionTrackerForScaleAnchor(tracker, anchor);
       resizing = {
         pointerId: event.pointerId,
         anchor,
+        handle,
         startScale: getTrackerScale(),
         startDistance: Math.hypot(event.clientX - anchor.x, event.clientY - anchor.y),
       };
-      pinTrackerToVisualRect(tracker, rect);
       handle.setPointerCapture?.(event.pointerId);
       document.addEventListener("pointermove", updateResize, true);
       document.addEventListener("pointerup", finishResize, true);
@@ -3379,9 +3388,12 @@
       document.addEventListener("mouseup", finishResize, true);
       window.addEventListener("blur", finishResize);
       document.body.style.userSelect = "none";
-    });
+    };
 
-    handle.addEventListener("lostpointercapture", finishResize);
+    tracker.addEventListener("pointerdown", startResize, true);
+    handles.forEach((handle) => {
+      handle.addEventListener("lostpointercapture", finishResize);
+    });
   }
 
   function getTrackerScale() {
@@ -3395,15 +3407,37 @@
   }
 
   function getTrackerAnchorMaxScale(anchor) {
-    const availableWidth = window.innerWidth - PANEL_VIEWPORT_MARGIN - anchor.x;
-    const availableHeight = window.innerHeight - PANEL_VIEWPORT_MARGIN - anchor.y;
+    const availableWidth = anchor.xDir > 0
+      ? window.innerWidth - PANEL_VIEWPORT_MARGIN - anchor.x
+      : anchor.x - PANEL_VIEWPORT_MARGIN;
+    const availableHeight = anchor.yDir > 0
+      ? window.innerHeight - PANEL_VIEWPORT_MARGIN - anchor.y
+      : anchor.y - PANEL_VIEWPORT_MARGIN;
     return Math.max(
       TRACKER_SCALE_MIN,
       Math.min(availableWidth / TRACKER_BASE_WIDTH, availableHeight / TRACKER_BASE_HEIGHT),
     );
   }
 
+  function getTrackerScaleAnchor(corner, rect) {
+    const anchors = {
+      "top-left": { x: rect.right, y: rect.bottom, origin: "bottom right", xDir: -1, yDir: -1 },
+      "top-right": { x: rect.left, y: rect.bottom, origin: "bottom left", xDir: 1, yDir: -1 },
+      "bottom-left": { x: rect.right, y: rect.top, origin: "top right", xDir: -1, yDir: 1 },
+      "bottom-right": { x: rect.left, y: rect.top, origin: "top left", xDir: 1, yDir: 1 },
+    };
+    return anchors[corner] || null;
+  }
+
+  function positionTrackerForScaleAnchor(tracker, anchor) {
+    tracker.style.right = "auto";
+    tracker.style.bottom = "auto";
+    tracker.style.left = `${anchor.xDir > 0 ? anchor.x : anchor.x - TRACKER_BASE_WIDTH}px`;
+    tracker.style.top = `${anchor.yDir > 0 ? anchor.y : anchor.y - TRACKER_BASE_HEIGHT}px`;
+  }
+
   function pinTrackerToVisualRect(tracker, rect = tracker.getBoundingClientRect()) {
+    tracker.style.transformOrigin = "top left";
     tracker.style.right = "auto";
     tracker.style.bottom = "auto";
     tracker.style.left = `${rect.left}px`;
