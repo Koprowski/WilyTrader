@@ -45,6 +45,8 @@ Use **Save JSON** or the header download button in the overlay. The export inclu
 - Current paper balances.
 - Current open paper positions.
 - Every buy/sell execution in `executions`.
+- Packaged cash-register sound playback on each recorded buy/sell execution.
+- Native Axiom chart markers for individual buy/sell executions, alongside average entry/exit lines.
 - Derived `openPositions`, `closedPositions`, and `positions` summaries.
 - Scale-in/out counts, VWAP entry/exit market caps, fees, slippage, and pre/post-fee P&L.
 - `mockapeCompatibleTrades` for Snipalot's current compact outcome join.

@@ -1,4 +1,5 @@
 export type PriceLineKind = "avg_entry" | "avg_exit";
+export type ExecutionMarkerSide = "buy" | "sell";
 
 export interface PriceLineStyle {
   color: string;
@@ -7,6 +8,15 @@ export interface PriceLineStyle {
   labelText?: string;
   labelBackground?: string;
   showPrice?: boolean;
+}
+
+export interface ExecutionMarkerStyle {
+  color: string;
+  text?: string;
+  shape?: string;
+  textColor?: string;
+  background?: string;
+  fontSize?: number;
 }
 
 export interface AxiomChartBridgeHealth {
@@ -25,6 +35,8 @@ export interface AxiomChartBridge {
   ready(): Promise<void>;
   upsertLine(positionId: string, kind: PriceLineKind, price: number, style: PriceLineStyle): Promise<void>;
   removeLine(positionId: string, kind: PriceLineKind): Promise<void>;
+  upsertMarker(positionId: string, markerId: string, side: ExecutionMarkerSide, time: number, price: number, style: ExecutionMarkerStyle): Promise<void>;
+  removeMarker(markerId: string): Promise<void>;
   clearAll(): Promise<void>;
   onSymbolChange(cb: (newSymbol: string) => void): () => void;
   onChartRebound(cb: () => void): () => void;
@@ -47,6 +59,17 @@ type StoredLine = {
   entityId?: unknown;
   source?: unknown;
   mode?: "public" | "internal";
+};
+
+type StoredMarker = {
+  positionId: string;
+  markerId: string;
+  side: ExecutionMarkerSide;
+  time: number;
+  price: number;
+  style: ExecutionMarkerStyle;
+  entityId?: unknown;
+  mode?: "public";
 };
 
 type BoundChart = {
@@ -75,6 +98,7 @@ const DEFAULT_EXIT_STYLE: PriceLineStyle = {
 
 export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}): AxiomChartBridge {
   const desiredLines = new Map<string, StoredLine>();
+  const desiredMarkers = new Map<string, StoredMarker>();
   const symbolListeners = new Set<(newSymbol: string) => void>();
   const reboundListeners = new Set<() => void>();
   let bound: BoundChart | null = null;
@@ -113,12 +137,44 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
     if (chart) removeStoredLine(chart, existing);
   }
 
+  async function upsertMarker(
+    positionId: string,
+    markerId: string,
+    side: ExecutionMarkerSide,
+    time: number,
+    price: number,
+    style: ExecutionMarkerStyle,
+  ): Promise<void> {
+    if (!positionId || !markerId || !Number.isFinite(time) || !Number.isFinite(price) || price <= 0) return;
+    desiredMarkers.set(markerId, {
+      ...(desiredMarkers.get(markerId) || {}),
+      positionId,
+      markerId,
+      side,
+      time,
+      price,
+      style: normalizeMarkerStyle(side, style),
+    });
+    scheduleFlush();
+  }
+
+  async function removeMarker(markerId: string): Promise<void> {
+    const existing = desiredMarkers.get(markerId);
+    desiredMarkers.delete(markerId);
+    if (!existing) return;
+    const chart = await tryEnsureBound();
+    if (chart) removeStoredMarker(chart, existing);
+  }
+
   async function clearAll(): Promise<void> {
     const lines = Array.from(desiredLines.values());
+    const markers = Array.from(desiredMarkers.values());
     desiredLines.clear();
+    desiredMarkers.clear();
     const chart = await tryEnsureBound();
     if (!chart) return;
     lines.forEach((line) => removeStoredLine(chart, line));
+    markers.forEach((marker) => removeStoredMarker(chart, marker));
   }
 
   function onSymbolChange(cb: (newSymbol: string) => void): () => void {
@@ -183,6 +239,10 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
       line.entityId = undefined;
       line.source = undefined;
       line.mode = undefined;
+    });
+    desiredMarkers.forEach((marker) => {
+      marker.entityId = undefined;
+      marker.mode = undefined;
     });
     reboundListeners.forEach((cb) => safeCall(() => cb()));
     window.postMessage({ source: "wiley-chart-bridge", event: "chartRebound" }, window.location.origin);
@@ -282,6 +342,14 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
         console.debug("[WileyChartBridge] Failed to upsert line.", error);
       }
     }
+    for (const [key, marker] of desiredMarkers.entries()) {
+      try {
+        const next = await upsertStoredMarker(chart, marker);
+        desiredMarkers.set(key, next);
+      } catch (error) {
+        console.debug("[WileyChartBridge] Failed to upsert marker.", error);
+      }
+    }
   }
 
   async function upsertStoredLine(boundChart: BoundChart, line: StoredLine): Promise<StoredLine> {
@@ -290,6 +358,9 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
       setEntityPoints(entity, line.price, boundChart);
       setEntityProperties(entity, line.style);
       return line;
+    }
+    if (line.source || line.entityId) {
+      removeStoredLine(boundChart, line);
     }
 
     if (boundChart.chart?.createShape) {
@@ -332,6 +403,35 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
     line.mode = undefined;
   }
 
+  async function upsertStoredMarker(boundChart: BoundChart, marker: StoredMarker): Promise<StoredMarker> {
+    const entity = marker.entityId ? safeCall(() => boundChart.chart.getShapeById?.(marker.entityId)) : null;
+    if (entity) {
+      safeCall(() => entity.setPoints?.([{ time: marker.time, price: marker.price }]));
+      safeCall(() => entity.setProperties?.(buildMarkerOverrides(marker)));
+      return marker;
+    }
+    if (!boundChart.chart?.createShape) {
+      throw new Error("No TradingView marker creation API found.");
+    }
+    const id = await boundChart.chart.createShape({ time: marker.time, price: marker.price }, {
+      shape: marker.style.shape || (marker.side === "buy" ? "arrow_up" : "arrow_down"),
+      lock: true,
+      disableSelection: false,
+      disableSave: true,
+      disableUndo: true,
+      overrides: buildMarkerOverrides(marker),
+    });
+    return { ...marker, entityId: id, mode: "public" };
+  }
+
+  function removeStoredMarker(boundChart: BoundChart, marker: StoredMarker) {
+    if (marker.entityId && boundChart.chart?.removeEntity) {
+      safeCall(() => boundChart.chart.removeEntity(marker.entityId));
+    }
+    marker.entityId = undefined;
+    marker.mode = undefined;
+  }
+
   function setEntityPoints(entity: any, price: number, boundChart: BoundChart) {
     safeCall(() => entity.setPoints?.([{ time: resolveRightmostTime(boundChart), price }]));
   }
@@ -369,6 +469,18 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
       vertLabelsAlign: "middle",
       lock: true,
       disableSave: true,
+    };
+  }
+
+  function buildMarkerOverrides(marker: StoredMarker) {
+    return {
+      color: marker.style.color,
+      linecolor: marker.style.color,
+      text: marker.style.text || "",
+      textcolor: marker.style.textColor || "#ffffff",
+      backgroundColor: marker.style.background || marker.style.color,
+      fontsize: marker.style.fontSize ?? 11,
+      bold: true,
     };
   }
 
@@ -443,6 +555,17 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
     return { ...defaults, ...style };
   }
 
+  function normalizeMarkerStyle(side: ExecutionMarkerSide, style: ExecutionMarkerStyle): ExecutionMarkerStyle {
+    const color = side === "buy" ? "#22c55e" : "#ef4444";
+    return {
+      color,
+      textColor: "#ffffff",
+      fontSize: 11,
+      ...style,
+      color: style.color || color,
+    };
+  }
+
   function lineKey(positionId: string, kind: PriceLineKind) {
     return `${positionId}:${kind}`;
   }
@@ -463,6 +586,8 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
     ready,
     upsertLine,
     removeLine,
+    upsertMarker,
+    removeMarker,
     clearAll,
     onSymbolChange,
     onChartRebound,

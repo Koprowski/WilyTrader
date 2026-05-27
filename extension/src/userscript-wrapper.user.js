@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WileyTrader Axiom Chart Bridge
 // @namespace    https://github.com/Koprowski/WilyTrader
-// @version      0.3.4
+// @version      0.3.7
 // @description  Draw WileyTrader average entry/exit lines as native TradingView chart shapes on axiom.trade.
 // @match        https://axiom.trade/*
 // @run-at       document-idle
@@ -31,6 +31,7 @@
 
   function createAxiomChartBridge(opts = {}) {
     const desiredLines = new Map();
+    const desiredMarkers = new Map();
     const symbolListeners = new Set();
     const reboundListeners = new Set();
     let bound = null;
@@ -69,12 +70,37 @@
       if (chart) removeStoredLine(chart, existing);
     }
 
+    async function upsertMarker(positionId, markerId, side, time, price, style) {
+      if (!positionId || !markerId || !Number.isFinite(time) || !Number.isFinite(price) || price <= 0) return;
+      desiredMarkers.set(markerId, {
+        ...(desiredMarkers.get(markerId) || {}),
+        positionId,
+        markerId,
+        side,
+        time,
+        price,
+        style: normalizeMarkerStyle(side, style || {}),
+      });
+      scheduleFlush();
+    }
+
+    async function removeMarker(markerId) {
+      const existing = desiredMarkers.get(markerId);
+      desiredMarkers.delete(markerId);
+      if (!existing) return;
+      const chart = await tryEnsureBound();
+      if (chart) removeStoredMarker(chart, existing);
+    }
+
     async function clearAll() {
       const lines = Array.from(desiredLines.values());
+      const markers = Array.from(desiredMarkers.values());
       desiredLines.clear();
+      desiredMarkers.clear();
       const chart = await tryEnsureBound();
       if (!chart) return;
       lines.forEach((line) => removeStoredLine(chart, line));
+      markers.forEach((marker) => removeStoredMarker(chart, marker));
     }
 
     function onSymbolChange(cb) {
@@ -138,6 +164,10 @@
         line.entityId = undefined;
         line.source = undefined;
         line.mode = undefined;
+      });
+      desiredMarkers.forEach((marker) => {
+        marker.entityId = undefined;
+        marker.mode = undefined;
       });
       reboundListeners.forEach((cb) => safeCall(() => cb()));
       window.postMessage({ source: "wiley-chart-bridge", event: "chartRebound" }, window.location.origin);
@@ -237,6 +267,14 @@
           console.debug("[WileyChartBridge] Failed to upsert line.", error);
         }
       }
+      for (const [key, marker] of desiredMarkers.entries()) {
+        try {
+          const next = await upsertStoredMarker(chart, marker);
+          desiredMarkers.set(key, next);
+        } catch (error) {
+          console.debug("[WileyChartBridge] Failed to upsert marker.", error);
+        }
+      }
     }
 
     async function upsertStoredLine(boundChart, line) {
@@ -245,6 +283,9 @@
         setEntityPoints(entity, line.price, boundChart);
         setEntityProperties(entity, line.style);
         return line;
+      }
+      if (line.source || line.entityId) {
+        removeStoredLine(boundChart, line);
       }
       if (boundChart.chart?.createShape) {
         const id = await createPublicShape(boundChart, line);
@@ -285,6 +326,35 @@
       line.mode = undefined;
     }
 
+    async function upsertStoredMarker(boundChart, marker) {
+      const entity = marker.entityId ? safeCall(() => boundChart.chart.getShapeById?.(marker.entityId)) : null;
+      if (entity) {
+        safeCall(() => entity.setPoints?.([{ time: marker.time, price: marker.price }]));
+        safeCall(() => entity.setProperties?.(buildMarkerOverrides(marker)));
+        return marker;
+      }
+      if (!boundChart.chart?.createShape) {
+        throw new Error("No TradingView marker creation API found.");
+      }
+      const id = await boundChart.chart.createShape({ time: marker.time, price: marker.price }, {
+        shape: marker.style.shape || (marker.side === "buy" ? "arrow_up" : "arrow_down"),
+        lock: true,
+        disableSelection: false,
+        disableSave: true,
+        disableUndo: true,
+        overrides: buildMarkerOverrides(marker),
+      });
+      return { ...marker, entityId: id, mode: "public" };
+    }
+
+    function removeStoredMarker(boundChart, marker) {
+      if (marker.entityId && boundChart.chart?.removeEntity) {
+        safeCall(() => boundChart.chart.removeEntity(marker.entityId));
+      }
+      marker.entityId = undefined;
+      marker.mode = undefined;
+    }
+
     function setEntityPoints(entity, price, boundChart) {
       safeCall(() => entity.setPoints?.([{ time: resolveRightmostTime(boundChart), price }]));
     }
@@ -322,6 +392,18 @@
         vertLabelsAlign: "middle",
         lock: true,
         disableSave: true,
+      };
+    }
+
+    function buildMarkerOverrides(marker) {
+      return {
+        color: marker.style.color,
+        linecolor: marker.style.color,
+        text: marker.style.text || "",
+        textcolor: marker.style.textColor || "#ffffff",
+        backgroundColor: marker.style.background || marker.style.color,
+        fontsize: marker.style.fontSize ?? 11,
+        bold: true,
       };
     }
 
@@ -395,10 +477,23 @@
       return { ...defaults, ...style };
     }
 
+    function normalizeMarkerStyle(side, style) {
+      const color = side === "buy" ? "#22c55e" : "#ef4444";
+      return {
+        color,
+        textColor: "#ffffff",
+        fontSize: 11,
+        ...style,
+        color: style.color || color,
+      };
+    }
+
     return {
       ready,
       upsertLine,
       removeLine,
+      upsertMarker,
+      removeMarker,
       clearAll,
       onSymbolChange,
       onChartRebound,
@@ -433,6 +528,10 @@
       void bridge.upsertLine(data.positionId, data.kind, Number(data.price), data.style || {});
     } else if (data.op === "remove") {
       void bridge.removeLine(data.positionId, data.kind);
+    } else if (data.op === "upsertMarker") {
+      void bridge.upsertMarker(data.positionId, data.markerId, data.side, Number(data.time), Number(data.price), data.style || {});
+    } else if (data.op === "removeMarker") {
+      void bridge.removeMarker(data.markerId);
     } else if (data.op === "clearAll") {
       void bridge.clearAll();
     } else if (data.op === "selfTest") {

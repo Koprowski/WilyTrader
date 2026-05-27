@@ -8,6 +8,7 @@
   const PANEL_VIEWPORT_MARGIN = 8;
   const TRACKER_BASE_WIDTH = 480;
   const TRACKER_BASE_HEIGHT = 76;
+  const TRACKER_SCALE_MIN = 0.25;
   const PULSE_AUTO_BUY_KEY = "wilytrader_axiom_pulse_auto_buy_v1";
   const PULSE_AUTO_BUY_TTL_MS = 2 * 60 * 1000;
   const LEGACY_DEFAULT_BUY_AMOUNTS = [0.1, 0.2, 0.5, 1];
@@ -70,6 +71,8 @@
     ["wily", "mem", "trader_state_v1"].join(""),
   ];
   const BRIDGE_BASE_URL = "http://127.0.0.1:17365/v1/wilytrader";
+  const TRADE_SOUND_PATH = "assets/cash-register-sound.mp3";
+  const TRADE_SOUND_GAIN = 0.85;
   const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
   const MARKET_CAP_SUPPLY = 1_000_000_000;
   const DEFAULT_PRICES = { SOL: 190, BNB: 600 };
@@ -118,6 +121,7 @@
       trackerEnabled: true,
       trackerPosition: null,
       trackerSize: null,
+      trackerScale: 1,
       bridgeEnabled: false,
       autoScreenshotOnTrade: true,
       fallbackDownloadsEnabled: true,
@@ -156,12 +160,16 @@
   let tradeInFlight = false;
   let extensionContextValid = true;
   let lastSyncedExecutionId = null;
+  let lastAxiomChartArtifactKey = null;
   let pulseQuickBuyBound = false;
   let pendingPulseAutoBuyInFlight = false;
   let pulseQuickBuyQueuedUntil = 0;
   let pulseQuickBuyLayer = null;
   let pulseQuickBuyLayerRefreshId = null;
   let updateCheckTimerId = null;
+  let tradeSoundContext = null;
+  let tradeSoundBufferPromise = null;
+  let tradeSoundErrorLogged = false;
   let updateState = {
     checking: false,
     checkedAt: null,
@@ -202,6 +210,7 @@
     injectPanel();
     updateActiveToken();
     render();
+    preloadTradeExecutionSound();
     schedulePendingPulseAutoBuyCheck();
     bindRouteWatcher();
     startUpdateChecks();
@@ -289,6 +298,108 @@
         console.error("[WilyTrader]", error);
       }
     });
+  }
+
+  function preloadTradeExecutionSound() {
+    void loadTradeSoundBuffer().catch(logTradeSoundError);
+  }
+
+  function primeTradeExecutionSound() {
+    void unlockTradeSound().catch(logTradeSoundError);
+  }
+
+  async function unlockTradeSound() {
+    const context = getTradeSoundContext();
+    if (!context) return;
+    if (context.state === "suspended") await context.resume();
+    await loadTradeSoundBuffer();
+  }
+
+  function playTradeExecutionSound() {
+    const context = getTradeSoundContext();
+    if (!context) {
+      playTradeSoundWithAudioElement();
+      return;
+    }
+
+    loadTradeSoundBuffer()
+      .then((buffer) => {
+        const startSound = () => {
+          const source = context.createBufferSource();
+          const gain = context.createGain();
+          source.buffer = buffer;
+          gain.gain.value = TRADE_SOUND_GAIN;
+          source.connect(gain);
+          gain.connect(context.destination);
+          source.start(0);
+        };
+        if (context.state !== "suspended") {
+          startSound();
+          return;
+        }
+        context.resume().then(startSound).catch((error) => {
+          logTradeSoundError(error);
+          playTradeSoundWithAudioElement();
+        });
+      })
+      .catch((error) => {
+        logTradeSoundError(error);
+        playTradeSoundWithAudioElement();
+      });
+  }
+
+  function loadTradeSoundBuffer() {
+    if (tradeSoundBufferPromise) return tradeSoundBufferPromise;
+    const context = getTradeSoundContext();
+    const url = getTradeSoundUrl();
+    if (!context || !url) {
+      tradeSoundBufferPromise = Promise.reject(new Error("Trade execution sound is unavailable."));
+      return tradeSoundBufferPromise;
+    }
+
+    tradeSoundBufferPromise = fetch(url)
+      .then((response) => {
+        if (!response.ok) throw new Error(`Trade execution sound failed to load (${response.status}).`);
+        return response.arrayBuffer();
+      })
+      .then((arrayBuffer) => context.decodeAudioData(arrayBuffer));
+    return tradeSoundBufferPromise;
+  }
+
+  function playTradeSoundWithAudioElement() {
+    const url = getTradeSoundUrl();
+    if (!url) return;
+    try {
+      const audio = new Audio(url);
+      audio.volume = TRADE_SOUND_GAIN;
+      audio.preload = "auto";
+      const playResult = audio.play();
+      if (playResult?.catch) playResult.catch(logTradeSoundError);
+    } catch (error) {
+      logTradeSoundError(error);
+    }
+  }
+
+  function getTradeSoundContext() {
+    const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextConstructor) return null;
+    if (!tradeSoundContext) tradeSoundContext = new AudioContextConstructor();
+    return tradeSoundContext;
+  }
+
+  function getTradeSoundUrl() {
+    try {
+      return chrome?.runtime?.getURL?.(TRADE_SOUND_PATH) || "";
+    } catch (error) {
+      if (isExtensionContextError(error)) handleExtensionContextError(error);
+      return "";
+    }
+  }
+
+  function logTradeSoundError(error) {
+    if (tradeSoundErrorLogged) return;
+    tradeSoundErrorLogged = true;
+    console.debug("[WilyTrader] Trade execution sound skipped.", error);
   }
 
   async function loadState() {
@@ -507,6 +618,7 @@
     if (tracker) tracker.hidden = !trackerVisible;
     if (!panelVisible) {
       closeModals();
+      lastAxiomChartArtifactKey = null;
       postAxiomChartBridgeMessage({ op: "clearAll" });
     }
     return panelVisible;
@@ -1010,6 +1122,9 @@
     const sellPct = target.dataset.sellPct;
     const hasBuyAmount = Object.hasOwn(target.dataset, "buyAmount");
     const hasSellPct = Object.hasOwn(target.dataset, "sellPct");
+    if (hasBuyAmount || hasSellPct || action === "custom-buy" || action === "buy-default" || action === "sell-all") {
+      primeTradeExecutionSound();
+    }
 
     if (hasBuyAmount) runTask(buy(Number(buyAmount)));
     else if (hasSellPct) runTask(sell(Number(sellPct)));
@@ -1099,6 +1214,7 @@
     event.stopPropagation();
     event.stopImmediatePropagation();
     if (Date.now() < pulseQuickBuyQueuedUntil) return;
+    primeTradeExecutionSound();
     queueAxiomPulseAutoBuy(quickBuyBox);
   }
 
@@ -1112,6 +1228,7 @@
     const quickBuyBox = findAxiomPulseQuickBuyBoxes()[Number(target.dataset.wtPulseQuickBuyIndex)];
     if (!quickBuyBox) return refreshAxiomPulseQuickBuyLayer();
     if (Date.now() < pulseQuickBuyQueuedUntil) return;
+    primeTradeExecutionSound();
     queueAxiomPulseAutoBuy(quickBuyBox);
   }
 
@@ -1767,6 +1884,7 @@
         positionAfter: snapshotPosition(updated),
         costBasisNative: 0,
       });
+      playTradeExecutionSound();
 
       await persistAndSync("buy");
       setStatus(`Bought ${formatters.native(amountNative, chain)} @ ${formatMarketCapFill(execution)}.`);
@@ -1842,6 +1960,7 @@
       positionAfter: after,
       costBasisNative: costBasis,
     });
+    playTradeExecutionSound();
 
     if (!after) {
       const summary = buildPositionSummary(position.positionId, "closed");
@@ -2195,17 +2314,17 @@
     const token = activeToken;
     const position = token.key ? state.positions[token.key] : null;
     const summary = position ? buildPositionSummary(position.positionId, "open") : findLatestTokenPositionSummary(token);
-    const openPnlPct = position ? calculateOpenPnlPct(position, token) : 0;
+    const positionPnl = position ? calculateMarkedPositionMetrics(position, token) : null;
 
     tokenEl.textContent = token.address
       ? `${token.name} (${shortenAddress(token.address)})`
       : "Open a supported token page";
     balanceEl.textContent = `Bal ${formatters.compactNative(state.balances[token.chain] || 0, token.chain)}`;
-    positionEl.classList.toggle("wt-pnl-up", Boolean(position) && openPnlPct > 0);
-    positionEl.classList.toggle("wt-pnl-down", Boolean(position) && openPnlPct < 0);
-    positionEl.classList.toggle("wt-pnl-flat", Boolean(position) && openPnlPct === 0);
+    positionEl.classList.toggle("wt-pnl-up", Boolean(positionPnl) && positionPnl.totalPnlNative > 0);
+    positionEl.classList.toggle("wt-pnl-down", Boolean(positionPnl) && positionPnl.totalPnlNative < 0);
+    positionEl.classList.toggle("wt-pnl-flat", Boolean(positionPnl) && positionPnl.totalPnlNative === 0);
     positionEl.textContent = position
-      ? `Pos ${formatters.native(position.costNative, token.chain)} ${formatters.pct(openPnlPct)}`
+      ? `Pos ${formatters.native(position.costNative, token.chain)} ${formatters.pct(positionPnl.totalPnlPct)}`
       : "Pos none";
     if (buyChainEl) buyChainEl.textContent = token.chain;
     if (sellAssetsEl) {
@@ -2341,6 +2460,28 @@
     return `${sign}${Math.abs(numeric).toFixed(2)} ${chain}`;
   }
 
+  function calculateMarkedPositionMetrics(position, token) {
+    const positionExecutions = state.executions.filter((execution) => execution.positionId === position.positionId);
+    const buys = positionExecutions.filter((execution) => execution.side === "buy");
+    const sells = positionExecutions.filter((execution) => execution.side === "sell");
+    const buyFeesNative = sum(buys, "feeNative");
+    const realizedPnlNative = sum(sells, "pnlNative") - buyFeesNative;
+    const markNative = token?.unitPriceNative
+      ? Number(position.tokenAmount || 0) * Number(token.unitPriceNative || 0)
+      : Number(position.costNative || 0);
+    const markedOpenPnlNative = markNative - Number(position.costNative || 0);
+    const totalPnlNative = realizedPnlNative + markedOpenPnlNative;
+    const basisNative = sumFirst(buys, ["solInvestedNative", "grossNative"]) + buyFeesNative;
+    const totalPnlPct = basisNative > 0 ? (totalPnlNative / basisNative) * 100 : 0;
+
+    return {
+      realizedPnlNative: round(realizedPnlNative),
+      markedOpenPnlNative: round(markedOpenPnlNative),
+      totalPnlNative: round(totalPnlNative),
+      totalPnlPct: round(totalPnlPct, 4),
+    };
+  }
+
   function findLatestTokenPositionSummary(token) {
     if (!token?.key) return null;
     const closed = state.closedPositions
@@ -2373,8 +2514,13 @@
   function syncAxiomNativeChartLines(summary, token) {
     if (token?.platform !== "axiom") return;
     if (!summary?.id) {
+      lastAxiomChartArtifactKey = null;
       postAxiomChartBridgeMessage({ op: "clearAll" });
       return;
+    }
+    if (lastAxiomChartArtifactKey !== summary.id) {
+      lastAxiomChartArtifactKey = summary.id;
+      postAxiomChartBridgeMessage({ op: "clearAll" });
     }
 
     const entryPrice = getAxiomChartPrice(summary, "entry", token);
@@ -2404,6 +2550,27 @@
         kind: "avg_exit",
       });
     }
+    syncAxiomExecutionMarkers(summary, token);
+  }
+
+  function syncAxiomExecutionMarkers(summary, token) {
+    const executionIds = new Set(summary.executionIds || []);
+    state.executions
+      .filter((execution) => executionIds.has(execution.id))
+      .forEach((execution) => {
+        const price = getAxiomExecutionMarkerPrice(execution, token);
+        const time = Math.floor((Number(execution.timestampMs) || Date.parse(execution.timestamp || "") || Date.now()) / 1000);
+        if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(time)) return;
+        postAxiomChartBridgeMessage({
+          op: "upsertMarker",
+          positionId: summary.id,
+          markerId: execution.id,
+          side: execution.side,
+          time,
+          price,
+          style: buildAxiomExecutionMarkerStyle(execution, price),
+        });
+      });
   }
 
   function getAxiomChartPrice(summary, side, token) {
@@ -2416,6 +2583,15 @@
     return Number.isFinite(estimatedMarketCap) && estimatedMarketCap > 0 ? estimatedMarketCap : 0;
   }
 
+  function getAxiomExecutionMarkerPrice(execution, token) {
+    const marketCap = Number(execution.executionMarketCapUsd || execution.marketCapUsd || execution.sourceMarketCapUsd || 0);
+    if (marketCap > 0) return marketCap;
+    const unitNative = Number(execution.unitPriceNative || 0);
+    const chainUsd = DEFAULT_PRICES[token.chain] || 1;
+    const estimatedMarketCap = unitNative * chainUsd * MARKET_CAP_SUPPLY;
+    return Number.isFinite(estimatedMarketCap) && estimatedMarketCap > 0 ? estimatedMarketCap : 0;
+  }
+
   function buildAxiomChartLineStyle(kind, price) {
     const isEntry = kind === "avg_entry";
     return {
@@ -2425,6 +2601,18 @@
       labelText: `${isEntry ? "AVG ENTRY" : "AVG EXIT"} ${formatters.usd(price)}`,
       labelBackground: isEntry ? "rgba(34, 197, 94, 0.86)" : "rgba(239, 68, 68, 0.86)",
       showPrice: true,
+    };
+  }
+
+  function buildAxiomExecutionMarkerStyle(execution, price) {
+    const isBuy = execution.side === "buy";
+    return {
+      color: isBuy ? "#22c55e" : "#ef4444",
+      shape: "flag",
+      text: `${isBuy ? "BUY" : "SELL"} ${formatters.usd(price)}`,
+      background: isBuy ? "rgba(34, 197, 94, 0.9)" : "rgba(239, 68, 68, 0.9)",
+      textColor: "#ffffff",
+      fontSize: 10,
     };
   }
 
@@ -2579,12 +2767,6 @@
     const minutes = Math.floor((totalSeconds % 3600) / 60);
     const seconds = totalSeconds % 60;
     return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-  }
-
-  function calculateOpenPnlPct(position, token) {
-    if (!position || !token.unitPriceNative || !position.costNative) return 0;
-    const mark = position.tokenAmount * token.unitPriceNative;
-    return ((mark - position.costNative) / position.costNative) * 100;
   }
 
   function setStatus(message) {
@@ -2885,7 +3067,7 @@
   function bindRouteWatcher() {
     window.setInterval(() => {
       if (!extensionContextValid) return;
-      const routeKey = `${window.location.href}|${document.title}`;
+      const routeKey = `${window.location.href}|${document.title}|${round(detectMarketCap() || 0, 2)}`;
       if (routeKey !== lastRouteKey) {
         lastRouteKey = routeKey;
         injectAxiomChartBridgeScript();
