@@ -17,7 +17,7 @@ Chrome may show developer-mode warnings for unpacked extensions. That is normal 
 
 ## Update Notices
 
-WilyTrader can check the public GitHub manifest for the latest extension version. When the installed unpacked extension is behind, the panel shows an update notice with an **Open Extensions** button so the user can reload after pulling or downloading the updated files. This does not install anything automatically.
+WilyTrader can check public GitHub tag metadata for the latest extension version. When the installed unpacked extension is behind, the panel shows an update notice with an **Open Extensions** button so the user can reload after pulling or downloading the updated files. This does not install anything automatically.
 
 ## Behavior
 
@@ -26,7 +26,7 @@ WilyTrader can check the public GitHub manifest for the latest extension version
 - Uses only `chrome.storage.local`.
 - Does not connect to wallets.
 - Does not read seed phrases, private keys, wallet providers, or transactions.
-- Does not call any trading backend. With update checks enabled, it fetches the public GitHub manifest to compare extension versions.
+- Does not call any trading backend. With update checks enabled, it fetches public GitHub tag metadata to compare extension versions.
 - Keeps Snipalot localhost sync off by default.
 
 ## Ledger Export

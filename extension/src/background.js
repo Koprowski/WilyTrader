@@ -1,4 +1,4 @@
-const UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Koprowski/WilyTrader/main/extension/manifest.json";
+const UPDATE_TAGS_URL = "https://api.github.com/repos/Koprowski/WilyTrader/tags?per_page=10";
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message?.type) return false;
@@ -29,12 +29,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function checkForUpdate() {
   const installedVersion = chrome.runtime.getManifest().version;
-  const url = `${UPDATE_MANIFEST_URL}?t=${Date.now()}`;
-  const response = await fetch(url, { cache: "no-store" });
+  const url = `${UPDATE_TAGS_URL}&t=${Date.now()}`;
+  const response = await fetch(url, {
+    cache: "no-store",
+    headers: { Accept: "application/vnd.github+json" },
+  });
   if (!response.ok) throw new Error(`Update check failed: HTTP ${response.status}`);
-  const manifest = await response.json();
-  const latestVersion = String(manifest?.version || "");
-  if (!latestVersion) throw new Error("Update manifest did not include a version.");
+  const tags = await response.json();
+  const latestVersion = latestVersionFromTags(tags);
+  if (!latestVersion) throw new Error("Update metadata did not include a version tag.");
   return {
     ok: true,
     installedVersion,
@@ -42,6 +45,15 @@ async function checkForUpdate() {
     updateAvailable: compareVersions(installedVersion, latestVersion) < 0,
     checkedAt: new Date().toISOString(),
   };
+}
+
+function latestVersionFromTags(tags) {
+  if (!Array.isArray(tags)) return "";
+  return tags
+    .map((tag) => String(tag?.name || "").replace(/^v/i, ""))
+    .filter((version) => /^\d+\.\d+\.\d+$/.test(version))
+    .sort(compareVersions)
+    .pop() || "";
 }
 
 function compareVersions(current, latest) {
