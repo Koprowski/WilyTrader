@@ -124,15 +124,12 @@
   left: max(12px, calc(50vw - 240px));
   z-index: 2147483647;
   pointer-events: auto;
-  width: min(480px, calc(100vw - 24px));
+  width: 480px;
   height: 76px;
-  min-width: min(180px, calc(100vw - 16px));
-  min-height: 44px;
-  max-width: calc(100vw - 16px);
-  max-height: calc(100vh - 16px);
-  --wt-tracker-scale-x: 1;
-  --wt-tracker-scale-y: 1;
+  --wt-tracker-scale: 1;
   overflow: visible;
+  transform: scale(var(--wt-tracker-scale, 1));
+  transform-origin: top left;
   background: linear-gradient(135deg, rgba(10, 13, 20, 0.96), rgba(20, 24, 36, 0.95));
   border: 1px solid rgba(91, 104, 136, 0.72);
   border-radius: 8px;
@@ -146,12 +143,10 @@
 
 .wt-tracker-scale {
   position: relative;
-  width: 480px;
-  height: 76px;
+  width: 100%;
+  height: 100%;
   overflow: hidden;
   border-radius: 8px;
-  transform: scale(var(--wt-tracker-scale-x, 1), var(--wt-tracker-scale-y, 1));
-  transform-origin: top left;
 }
 
 .wt-tracker-settings {
