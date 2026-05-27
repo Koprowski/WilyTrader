@@ -1936,7 +1936,7 @@
         logEl.appendChild(item);
       });
     }
-    syncAxiomNativeChartLines(summary, token, position);
+    syncAxiomNativeChartLines(summary, token);
   }
 
   function findLatestTokenPositionSummary(token) {
@@ -1968,9 +1968,9 @@
     }
   }
 
-  function syncAxiomNativeChartLines(summary, token, position) {
+  function syncAxiomNativeChartLines(summary, token) {
     if (token?.platform !== "axiom") return;
-    if (!position || !summary?.id) {
+    if (!summary?.id) {
       postAxiomChartBridgeMessage({ op: "clearAll" });
       return;
     }
