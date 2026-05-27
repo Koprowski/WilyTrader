@@ -629,12 +629,8 @@
   }
 
   function injectPanel() {
-    if (document.getElementById(selectors.root)) {
-      root = document.getElementById(selectors.root);
-      injectAxiomChartBridgeScript();
-      bindAxiomPulseQuickBuy();
-      return;
-    }
+    const existingRoot = document.getElementById(selectors.root);
+    if (existingRoot) existingRoot.remove();
 
     root = document.createElement("div");
     root.id = selectors.root;
@@ -1816,6 +1812,12 @@
     const sellAssetsEl = root.querySelector("[data-sell-assets]");
     const logEl = root.querySelector(`#${selectors.log}`);
 
+    if (!tokenEl || !balanceEl || !positionEl || !buyButtonsEl || !sellButtonsEl) {
+      injectPanel();
+      render();
+      return;
+    }
+
     renderUpdateNotice();
 
     const token = activeToken;
@@ -1893,6 +1895,20 @@
       });
     }
     syncAxiomNativeChartLines(summary, token, position);
+  }
+
+  function findLatestTokenPositionSummary(token) {
+    if (!token?.key) return null;
+    const closed = state.closedPositions
+      .filter((position) => position.tokenAddress === token.address && position.chain === token.chain)
+      .sort((a, b) => Date.parse(b.finalExitAt || b.firstEntryAt || "") - Date.parse(a.finalExitAt || a.firstEntryAt || ""));
+    if (closed[0]) return closed[0];
+
+    const relatedExecution = state.executions
+      .slice()
+      .reverse()
+      .find((execution) => execution.tokenAddress === token.address && execution.chain === token.chain);
+    return relatedExecution ? buildPositionSummary(relatedExecution.positionId) : null;
   }
 
   function renderUpdateNotice() {
