@@ -6,6 +6,10 @@
   const PANEL_SCALE_MIN = 0.7;
   const PANEL_SCALE_MAX = 1.5;
   const PANEL_VIEWPORT_MARGIN = 8;
+  const TRACKER_BASE_WIDTH = 480;
+  const TRACKER_BASE_HEIGHT = 76;
+  const TRACKER_SCALE_MIN = 0.5;
+  const TRACKER_SCALE_MAX = 2;
   const PULSE_AUTO_BUY_KEY = "wilytrader_axiom_pulse_auto_buy_v1";
   const PULSE_AUTO_BUY_TTL_MS = 2 * 60 * 1000;
   const LEGACY_DEFAULT_BUY_AMOUNTS = [0.1, 0.2, 0.5, 1];
@@ -683,21 +687,23 @@
     root.id = selectors.root;
     root.innerHTML = `
       <section class="${selectors.tracker}" data-pnl-tracker aria-label="WilyTrader portfolio tracker">
-        <div class="wt-tracker-face" data-tracker-drag>
-          <div class="wt-tracker-metric">
-            <strong id="${selectors.trackerPortfolio}">0.00 SOL</strong>
-            <span>Portfolio</span>
+        <div class="wt-tracker-scale">
+          <div class="wt-tracker-face" data-tracker-drag>
+            <div class="wt-tracker-metric">
+              <strong id="${selectors.trackerPortfolio}">0.00 SOL</strong>
+              <span>Total Portfolio</span>
+            </div>
+            <button type="button" class="wt-tracker-brand" data-action="tracker-reset-session" title="Reset session P&L" aria-label="Reset session P&L">
+              <span class="wt-sol-mark"></span>
+              <span>WILY</span>
+            </button>
+            <div class="wt-tracker-metric wt-tracker-pnl-metric">
+              <strong id="${selectors.trackerPnl}">+0.00 SOL</strong>
+              <span>Session PNL <em id="${selectors.trackerPct}">+0.00%</em></span>
+            </div>
           </div>
-          <div class="wt-tracker-brand" aria-hidden="true">
-            <span class="wt-sol-mark"></span>
-            <span>WILY</span>
-          </div>
-          <div class="wt-tracker-metric wt-tracker-pnl-metric">
-            <strong id="${selectors.trackerPnl}">+0.00 SOL</strong>
-            <span>PNL <em id="${selectors.trackerPct}">+0.00%</em></span>
-          </div>
+          <div class="wt-tracker-rail" aria-hidden="true"><span id="${selectors.trackerBar}"></span></div>
         </div>
-        <div class="wt-tracker-rail" aria-hidden="true"><span id="${selectors.trackerBar}"></span></div>
         <span class="wt-tracker-resize" data-tracker-resize aria-hidden="true"></span>
       </section>
       <section class="${selectors.panel}" aria-label="WilyTrader paper trading panel">
@@ -1052,6 +1058,11 @@
       runTask(addNote());
     } else if (action === "new-session") {
       runTask(startNewSession());
+    } else if (action === "tracker-reset-session") {
+      runTask(startNewSession({
+        confirmMessage: "Reset session P&L and start a new session? Current trades and notes will be archived as a previous session summary.",
+        statusMessage: "Session P&L reset.",
+      }));
     } else if (action === "bridge-sync") {
       runTask(syncBridge("manual"));
     } else if (action === "export") {
@@ -2222,6 +2233,7 @@
     const tracker = root?.querySelector(`.${selectors.tracker}`);
     if (!tracker || tracker.hidden) return;
 
+    updateTrackerScale(tracker);
     const metrics = buildFloatingTrackerMetrics();
     const portfolioEl = root.querySelector(`#${selectors.trackerPortfolio}`);
     const pnlEl = root.querySelector(`#${selectors.trackerPnl}`);
@@ -2790,8 +2802,9 @@
     }
   }
 
-  async function startNewSession() {
-    if (!window.confirm("End this session and start a new one? Current trades and notes will be archived as a previous session summary.")) return;
+  async function startNewSession(options = {}) {
+    const confirmMessage = options.confirmMessage || "End this session and start a new one? Current trades and notes will be archived as a previous session summary.";
+    if (!window.confirm(confirmMessage)) return;
     const sessionSummary = buildCurrentSessionSummary();
     if (sessionSummary.executionCount > 0 || state.notes.length > 0) {
       state.sessions.push({
@@ -2811,7 +2824,7 @@
     await persistAndSync("new-session");
     renderFullLog();
     render();
-    setStatus("New session started.");
+    setStatus(options.statusMessage || "New session started.");
   }
 
   async function clearTradeLog() {
@@ -2871,10 +2884,27 @@
   }
 
   function applyTrackerSize(tracker) {
-    if (!tracker || !state?.settings?.trackerSize) return;
+    if (!tracker) return;
+    if (!state?.settings?.trackerSize) {
+      updateTrackerScale(tracker);
+      return;
+    }
     const { width, height } = state.settings.trackerSize;
     if (Number.isFinite(width)) tracker.style.width = `${Math.max(280, Math.min(window.innerWidth - 16, width))}px`;
     if (Number.isFinite(height)) tracker.style.height = `${Math.max(76, Math.min(window.innerHeight - 16, height))}px`;
+    updateTrackerScale(tracker);
+  }
+
+  function updateTrackerScale(tracker) {
+    if (!tracker) return;
+    const rect = tracker.getBoundingClientRect();
+    const width = rect.width || tracker.offsetWidth || TRACKER_BASE_WIDTH;
+    const height = rect.height || tracker.offsetHeight || TRACKER_BASE_HEIGHT;
+    const rawScale = Math.min(width / TRACKER_BASE_WIDTH, height / TRACKER_BASE_HEIGHT);
+    const scale = Math.max(TRACKER_SCALE_MIN, Math.min(TRACKER_SCALE_MAX, rawScale || 1));
+    tracker.style.setProperty("--wt-tracker-scale", String(Number(scale.toFixed(3))));
+    tracker.style.setProperty("--wt-tracker-layout-width", `${Math.max(TRACKER_BASE_WIDTH, width / scale).toFixed(1)}px`);
+    tracker.style.setProperty("--wt-tracker-layout-height", `${Math.max(TRACKER_BASE_HEIGHT, height / scale).toFixed(1)}px`);
   }
 
   function clampElementPosition(element, left, top) {
@@ -2948,42 +2978,16 @@
     const handles = panel.querySelectorAll("[data-resize-corner]");
     let resizing = null;
 
-    handles.forEach((handle) => {
-      handle.addEventListener("mousedown", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        event.stopImmediatePropagation();
-
-        const rect = panel.getBoundingClientRect();
-        const anchor = getPanelScaleAnchor(handle.dataset.resizeCorner, rect);
-        if (!anchor) return;
-
-        panel.style.transformOrigin = anchor.origin;
-        positionPanelForScaleAnchor(panel, anchor, panel.offsetWidth, panel.offsetHeight);
-        resizing = {
-          anchor,
-          baseWidth: panel.offsetWidth,
-          baseHeight: panel.offsetHeight,
-          startScale: getPanelScale(),
-          startDistance: Math.hypot(event.clientX - anchor.x, event.clientY - anchor.y),
-        };
-        document.body.style.userSelect = "none";
-      });
-    });
-
-    document.addEventListener("mousemove", (event) => {
+    const finishResize = () => {
       if (!resizing) return;
-      const distance = Math.hypot(event.clientX - resizing.anchor.x, event.clientY - resizing.anchor.y);
-      const rawScale = resizing.startScale * (distance / Math.max(1, resizing.startDistance));
-      const maxScale = getPanelAnchorMaxScale(resizing.anchor, resizing.baseWidth, resizing.baseHeight);
-      const nextScale = Math.max(PANEL_SCALE_MIN, Math.min(maxScale, rawScale));
-      setPanelScale(panel, nextScale);
-    });
-
-    document.addEventListener("mouseup", () => {
-      if (!resizing) return;
+      const { pointerId, handle } = resizing;
       resizing = null;
       document.body.style.userSelect = "";
+      try {
+        if (handle.hasPointerCapture?.(pointerId)) handle.releasePointerCapture(pointerId);
+      } catch {
+        // Pointer capture may already be released by the browser.
+      }
       const rect = panel.getBoundingClientRect();
       const scale = normalizePanelScale(getPanelScale());
       state.settings.panelScale = scale;
@@ -2991,7 +2995,57 @@
       pinPanelToVisualRect(panel, rect);
       state.settings.panelPosition = { left: rect.left, top: rect.top };
       runTask(persist());
+    };
+
+    const updateResize = (event) => {
+      if (!resizing || event.pointerId !== resizing.pointerId) return;
+      if (event.buttons === 0) {
+        finishResize();
+        return;
+      }
+      event.preventDefault();
+      const distance = Math.hypot(event.clientX - resizing.anchor.x, event.clientY - resizing.anchor.y);
+      const rawScale = resizing.startScale * (distance / Math.max(1, resizing.startDistance));
+      const maxScale = getPanelAnchorMaxScale(resizing.anchor, resizing.baseWidth, resizing.baseHeight);
+      const nextScale = Math.max(PANEL_SCALE_MIN, Math.min(maxScale, rawScale));
+      setPanelScale(panel, nextScale);
+    };
+
+    const startResize = (event) => {
+      const handle = event.target?.closest?.("[data-resize-corner]");
+      if (!handle || !panel.contains(handle) || event.button !== 0 || resizing) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+
+      const rect = panel.getBoundingClientRect();
+      const anchor = getPanelScaleAnchor(handle.dataset.resizeCorner, rect);
+      if (!anchor) return;
+
+      panel.style.transformOrigin = anchor.origin;
+      positionPanelForScaleAnchor(panel, anchor, panel.offsetWidth, panel.offsetHeight);
+      resizing = {
+        anchor,
+        baseWidth: panel.offsetWidth,
+        baseHeight: panel.offsetHeight,
+        handle,
+        pointerId: event.pointerId,
+        startScale: getPanelScale(),
+        startDistance: Math.hypot(event.clientX - anchor.x, event.clientY - anchor.y),
+      };
+      handle.setPointerCapture?.(event.pointerId);
+      document.body.style.userSelect = "none";
+    };
+
+    root.addEventListener("pointerdown", startResize, true);
+    handles.forEach((handle) => {
+      handle.addEventListener("pointermove", updateResize);
+      handle.addEventListener("pointerup", finishResize);
+      handle.addEventListener("pointercancel", finishResize);
+      handle.addEventListener("lostpointercapture", finishResize);
     });
+
+    window.addEventListener("blur", finishResize);
   }
 
   function getPanelScale() {
@@ -3059,6 +3113,7 @@
       const height = Math.max(76, Math.min(window.innerHeight - 16, startHeight + event.clientY - startY));
       element.style.width = `${width}px`;
       element.style.height = `${height}px`;
+      updateTrackerScale(element);
     });
 
     document.addEventListener("mouseup", () => {
@@ -3069,6 +3124,7 @@
       const height = Number.parseFloat(element.style.height);
       if (Number.isFinite(width) && Number.isFinite(height)) {
         state.settings[sizeKey] = { width, height };
+        updateTrackerScale(element);
         runTask(persist());
       }
     });
