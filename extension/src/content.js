@@ -1008,18 +1008,26 @@
     }
 
     quickBuyBox.classList.add("wt-axiom-pulse-quick-buy-active");
-    runTask(
-      buy(getDefaultBuyAmount(), token, {
+    const pulseBuy = buy(getDefaultBuyAmount(), token, {
         resolveLatestToken: () => {
           const refreshed = detectAxiomPulseQuickBuyToken(quickBuyBox);
           return refreshed?.unitPriceNative ? refreshed : token;
         },
-      }).finally(() => {
+      })
+      .then((execution) => {
+        if (execution?.url) {
+          window.setTimeout(() => {
+            window.location.assign(execution.url);
+          }, 250);
+        }
+        return execution;
+      })
+      .finally(() => {
         window.setTimeout(() => {
           quickBuyBox.classList.remove("wt-axiom-pulse-quick-buy-active");
         }, 450);
-      }),
-    );
+      });
+    runTask(pulseBuy);
   }
 
   function isPrimaryPointerEvent(event) {
@@ -1412,7 +1420,7 @@
       state.balances[chain] -= totalDebit;
       state.positions[delayedToken.key] = updated;
 
-      recordExecution({
+      const execution = recordExecution({
         side: "buy",
         chain,
         token: delayedToken,
@@ -1432,8 +1440,9 @@
       });
 
       await persistAndSync("buy");
-      setStatus(`Bought ${formatters.native(amountNative, chain)} paper.`);
+      setStatus(`Bought ${formatters.native(amountNative, chain)} @ ${formatMarketCapFill(execution)}.`);
       render();
+      return execution;
     } finally {
       tradeInFlight = false;
     }
@@ -1485,7 +1494,7 @@
       after = snapshotPosition(updated);
     }
 
-    recordExecution({
+    const execution = recordExecution({
       side: "sell",
       chain,
       token: delayedToken,
@@ -1511,8 +1520,9 @@
     }
 
     await persistAndSync("sell");
-    setStatus(`Sold ${percent}% paper position.`);
+    setStatus(`Sold ${percent}% @ ${formatMarketCapFill(execution)}.`);
     render();
+    return execution;
     } finally {
       tradeInFlight = false;
     }
@@ -1627,7 +1637,12 @@
   function recordExecution(fields) {
     const usdPrice = DEFAULT_PRICES[fields.chain] || 1;
     const timestampMs = Date.now();
-    state.executions.push({
+    const sourceMarketCapUsd = round(fields.token.marketCap, 2);
+    const executionMarketCapUsd = round(fields.executionPriceNative * usdPrice * MARKET_CAP_SUPPLY, 2);
+    const costBasisNative = round(fields.costBasisNative);
+    const pnlNative = round(fields.pnlNative);
+    const pnlPct = costBasisNative > 0 ? round((pnlNative / costBasisNative) * 100, 4) : 0;
+    const execution = {
       id: createId("exec"),
       schemaVersion: 2,
       timestamp: new Date(timestampMs).toISOString(),
@@ -1641,11 +1656,17 @@
       tokenAddress: fields.token.address,
       tokenName: fields.token.name,
       url: fields.token.url,
-      marketCapUsd: round(fields.token.marketCap, 2),
+      marketCapUsd: sourceMarketCapUsd,
+      sourceMarketCapUsd,
+      executionMarketCapUsd,
       unitPriceNative: round(fields.executionPriceNative, 12),
       unitPriceUsd: round(fields.executionPriceNative * usdPrice, 12),
       requestedAmountNative: round(fields.requestedAmountNative),
       requestedSellPct: fields.requestedSellPct ?? null,
+      tradeSizeNative: fields.side === "buy" ? round(fields.grossNative) : round(fields.netNative),
+      solInvestedNative: fields.side === "buy" ? round(fields.grossNative) : 0,
+      solDebitedNative: fields.side === "buy" ? round(Math.abs(fields.netNative)) : 0,
+      solReceivedNative: fields.side === "sell" ? round(fields.netNative) : 0,
       grossNative: round(fields.grossNative),
       grossUsd: round(fields.grossNative * usdPrice),
       netNative: round(fields.netNative),
@@ -1660,12 +1681,15 @@
       maxSlippagePct: fields.maxSlippagePct ?? fields.slippagePct,
       executionDelayMs: fields.fees?.executionDelayMs ?? 0,
       tokenAmount: round(fields.tokenAmount, 12),
-      costBasisNative: round(fields.costBasisNative),
-      pnlNative: round(fields.pnlNative),
+      costBasisNative,
+      pnlNative,
+      pnlPct,
       pnlUsd: round(fields.pnlNative * usdPrice),
       positionBefore: fields.positionBefore,
       positionAfter: fields.positionAfter,
-    });
+    };
+    state.executions.push(execution);
+    return execution;
   }
 
   function snapshotPosition(position) {
@@ -1736,8 +1760,10 @@
       pnlPreFeeNative: round(pnlPreFeeNative),
       pnlPostFeeNative: round(pnlPostFeeNative),
       pnlPct: round(pnlPct, 4),
-      entryMarketCapVwapUsd: round(weightedAverage(buys, "marketCapUsd", "tokenAmount"), 2),
-      exitMarketCapVwapUsd: round(weightedAverage(sells, "marketCapUsd", "tokenAmount"), 2),
+      entryMarketCapVwapUsd: round(weightedAverageFirst(buys, ["executionMarketCapUsd", "marketCapUsd"], "tokenAmount"), 2),
+      exitMarketCapVwapUsd: round(weightedAverageFirst(sells, ["executionMarketCapUsd", "marketCapUsd"], "tokenAmount"), 2),
+      entrySourceMarketCapVwapUsd: round(weightedAverage(buys, "marketCapUsd", "tokenAmount"), 2),
+      exitSourceMarketCapVwapUsd: round(weightedAverage(sells, "marketCapUsd", "tokenAmount"), 2),
       avgEntryNative: round(weightedAverage(buys, "unitPriceNative", "tokenAmount"), 12),
       avgExitNative: round(weightedAverage(sells, "unitPriceNative", "tokenAmount"), 12),
       executionIds: executions.map((execution) => execution.id),
@@ -1773,8 +1799,24 @@
     return items.reduce((total, item) => total + Number(item[key] || 0), 0);
   }
 
+  function sumFirst(items, keys) {
+    return items.reduce((total, item) => {
+      const value = keys.map((key) => Number(item[key] || 0)).find((candidate) => candidate > 0) || 0;
+      return total + value;
+    }, 0);
+  }
+
   function weightedAverage(items, valueKey, weightKey) {
     const weighted = items.reduce((total, item) => total + Number(item[valueKey] || 0) * Number(item[weightKey] || 0), 0);
+    const weight = sum(items, weightKey);
+    return weight > 0 ? weighted / weight : 0;
+  }
+
+  function weightedAverageFirst(items, valueKeys, weightKey) {
+    const weighted = items.reduce((total, item) => {
+      const value = valueKeys.map((key) => Number(item[key] || 0)).find((candidate) => candidate > 0) || 0;
+      return total + value * Number(item[weightKey] || 0);
+    }, 0);
     const weight = sum(items, weightKey);
     return weight > 0 ? weighted / weight : 0;
   }
@@ -1890,7 +1932,7 @@
       recent.forEach((execution) => {
         const item = document.createElement("div");
         item.className = `wt-log-item wt-${execution.side}`;
-        item.textContent = `${execution.side.toUpperCase()} ${execution.tokenName || shortenAddress(execution.tokenAddress)} - ${formatters.native(Math.abs(execution.grossNative || execution.netNative), execution.chain)} - PnL ${formatters.native(execution.pnlNative, execution.chain)}`;
+        item.textContent = formatExecutionLogLine(execution, { compact: true });
         logEl.appendChild(item);
       });
     }
@@ -2002,14 +2044,7 @@
     entries.forEach((execution) => {
       const item = document.createElement("div");
       item.className = `wt-log-item wt-${execution.side}`;
-      item.textContent = [
-        `${new Date(execution.timestamp).toLocaleTimeString()} ${execution.side.toUpperCase()} ${execution.tokenName}`,
-        `${formatters.native(Math.abs(execution.grossNative || execution.netNative), execution.chain)}`,
-        `fees ${formatters.native(execution.feeNative, execution.chain)}`,
-        `slip ${execution.slippagePct}% / max ${execution.maxSlippagePct ?? execution.slippagePct}%`,
-        `delay ${execution.executionDelayMs || 0}ms`,
-        `PnL ${formatters.native(execution.pnlNative, execution.chain)}`,
-      ].join(" - ");
+      item.textContent = formatExecutionLogLine(execution);
       logEl.appendChild(item);
     });
   }
@@ -2024,6 +2059,10 @@
       ["Executions", String(summary.executionCount)],
       ["Realized", formatters.native(summary.realizedPnlNative, summary.chain, 3)],
       ["Active Open", formatters.native(summary.activeOpenPnlNative, summary.chain, 3)],
+      ["SOL In", formatters.native(summary.totalInvestedNative, summary.chain, 3)],
+      ["SOL Out", formatters.native(summary.totalReceivedNative, summary.chain, 3)],
+      ["Entry MC", summary.entryMarketCapVwapUsd ? formatters.usd(summary.entryMarketCapVwapUsd) : "-"],
+      ["Exit MC", summary.exitMarketCapVwapUsd ? formatters.usd(summary.exitMarketCapVwapUsd) : "-"],
       ["Fees", formatters.native(summary.totalFeesNative, summary.chain)],
       ["Total", formatters.native(summary.totalPnlNative, summary.chain, 3)],
     ];
@@ -2042,7 +2081,12 @@
       state.sessions.slice(-5).reverse().forEach((session) => {
         const item = document.createElement("div");
         item.className = "wt-ledger-session";
-        item.textContent = `${new Date(session.endedAt).toLocaleString()} - ${session.executionCount} trades: ${formatters.signedNative(session.totalPnlNative, session.chain, 2)}`;
+        const context = formatSessionTradeContext(session);
+        item.textContent = [
+          `${new Date(session.endedAt).toLocaleString()} - ${session.executionCount} trades`,
+          `Total ${formatters.signedNative(session.totalPnlNative, session.chain, 2)}`,
+          context,
+        ].filter(Boolean).join(" - ");
         summaryEl.appendChild(item);
       });
     }
@@ -2052,9 +2096,12 @@
     const chain = activeToken?.chain || state.executions[state.executions.length - 1]?.chain || "SOL";
     const buys = state.executions.filter((execution) => execution.side === "buy");
     const sells = state.executions.filter((execution) => execution.side === "sell");
+    const positionSummaries = getPositionSummaries();
     const buyFeesNative = sum(buys, "feeNative");
     const realizedPnlNative = sum(sells, "pnlNative") - buyFeesNative;
     const totalFeesNative = sum(state.executions, "feeNative");
+    const totalInvestedNative = sumFirst(buys, ["solInvestedNative", "grossNative"]);
+    const totalReceivedNative = sumFirst(sells, ["solReceivedNative", "netNative"]);
     const activePosition = activeToken?.key ? state.positions[activeToken.key] : null;
     const activeMarkNative = activePosition && activeToken?.unitPriceNative ? activePosition.tokenAmount * activeToken.unitPriceNative : 0;
     const activeOpenPnlNative = activePosition ? activeMarkNative - activePosition.costNative : 0;
@@ -2066,8 +2113,62 @@
       activeOpenPnlNative: round(activeOpenPnlNative),
       totalFeesNative: round(totalFeesNative),
       totalPnlNative: round(realizedPnlNative + activeOpenPnlNative),
+      totalInvestedNative: round(totalInvestedNative),
+      totalReceivedNative: round(totalReceivedNative),
+      entryMarketCapVwapUsd: round(weightedAverageFirst(buys, ["executionMarketCapUsd", "marketCapUsd"], "tokenAmount"), 2),
+      exitMarketCapVwapUsd: round(weightedAverageFirst(sells, ["executionMarketCapUsd", "marketCapUsd"], "tokenAmount"), 2),
+      latestExecution: state.executions[state.executions.length - 1] || null,
+      positionSummaries,
       elapsedMs: Date.now() - (Date.parse(state.sessionStartedAt || "") || Date.now()),
     };
+  }
+
+  function formatExecutionLogLine(execution, options = {}) {
+    const tokenName = execution.tokenName || shortenAddress(execution.tokenAddress);
+    const time = options.compact ? "" : `${new Date(execution.timestamp).toLocaleTimeString()} `;
+    const size = execution.side === "buy"
+      ? `In ${formatters.native(execution.solInvestedNative || execution.grossNative, execution.chain)}`
+      : `Out ${formatters.native(execution.solReceivedNative || execution.netNative, execution.chain)} net`;
+    const pnl = execution.side === "sell"
+      ? `PnL ${formatters.signedNative(execution.pnlNative, execution.chain)} (${formatters.pct(execution.pnlPct || 0)})`
+      : "Entry";
+    return [
+      `${time}${execution.side.toUpperCase()} ${tokenName}`,
+      size,
+      formatMarketCapFill(execution),
+      `fees ${formatters.native(execution.feeNative, execution.chain)}`,
+      `slip ${execution.slippagePct}% / max ${execution.maxSlippagePct ?? execution.slippagePct}%`,
+      `delay ${execution.executionDelayMs || 0}ms`,
+      pnl,
+    ].join(" - ");
+  }
+
+  function formatMarketCapFill(execution) {
+    const source = Number(execution?.sourceMarketCapUsd || execution?.marketCapUsd || 0);
+    const fill = Number(execution?.executionMarketCapUsd || execution?.marketCapUsd || 0);
+    if (source > 0 && fill > 0 && Math.abs(source - fill) / Math.max(source, 1) > 0.0001) {
+      return `shown MC ${formatters.usd(source)} -> fill MC ${formatters.usd(fill)}`;
+    }
+    if (fill > 0) return `fill MC ${formatters.usd(fill)}`;
+    if (source > 0) return `shown MC ${formatters.usd(source)}`;
+    return "MC unavailable";
+  }
+
+  function formatSessionTradeContext(session) {
+    const positions = Array.isArray(session.positionSummaries) ? session.positionSummaries : [];
+    const latestPosition = positions.slice().reverse().find((position) => position?.buyCount || position?.sellCount);
+    if (latestPosition) {
+      return [
+        latestPosition.tokenName,
+        `In ${formatters.native(latestPosition.investedNative || 0, latestPosition.chain || session.chain)}`,
+        latestPosition.entryMarketCapVwapUsd ? `Entry ${formatters.usd(latestPosition.entryMarketCapVwapUsd)}` : "",
+        latestPosition.sellCount > 0 ? `Out ${formatters.native(latestPosition.netReceivedNative || 0, latestPosition.chain || session.chain)}` : "",
+        latestPosition.exitMarketCapVwapUsd ? `Exit ${formatters.usd(latestPosition.exitMarketCapVwapUsd)}` : "",
+        `PnL ${formatters.signedNative(latestPosition.pnlPostFeeNative || 0, latestPosition.chain || session.chain)} (${formatters.pct(latestPosition.pnlPct || 0)})`,
+      ].filter(Boolean).join(" ");
+    }
+    if (session.latestExecution) return formatExecutionLogLine(session.latestExecution, { compact: true });
+    return "";
   }
 
   function formatDuration(ms) {
