@@ -3527,7 +3527,7 @@
     };
 
     root.addEventListener("pointerdown", diagnoseRootPointerDown, true);
-    tracker.addEventListener("pointerdown", startResize, true);
+    root.addEventListener("pointerdown", startResize, true);
     handles.forEach((handle) => {
       handle.addEventListener("lostpointercapture", finishResize);
     });
