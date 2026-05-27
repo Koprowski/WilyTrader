@@ -19,10 +19,19 @@ Chrome may show developer-mode warnings for unpacked extensions. That is normal 
 
 WilyTrader can check public GitHub tag metadata for the latest extension version. When the installed unpacked extension is behind, the panel shows an update notice with an **Open Extensions** button so the user can reload after pulling or downloading the updated files. This does not install anything automatically.
 
+For a Git-installed copy, update the local files with:
+
+```powershell
+git -C C:\Tools\WilyTrader pull --ff-only
+```
+
+Replace `C:\Tools\WilyTrader` with the folder that contains this repo, then click reload on **WilyTrader** at `chrome://extensions`.
+
 ## Behavior
 
-- Shows the overlay only on Padre token pages and Axiom meme token pages (`https://axiom.trade/meme/...`).
-- Keeps Axiom home, discover, pulse, trackers, and other non-token routes hidden.
+- Shows the trading overlay only on Padre token pages and Axiom meme token pages (`https://axiom.trade/meme/...`).
+- Shows the floating portfolio/session P&L tracker across supported Padre and Axiom pages when enabled.
+- Keeps the full trading controls hidden on Axiom home, discover, pulse, trackers, and other non-token routes.
 - Uses only `chrome.storage.local`.
 - Does not connect to wallets.
 - Does not read seed phrases, private keys, wallet providers, or transactions.

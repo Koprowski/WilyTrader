@@ -2,7 +2,12 @@
   "use strict";
 
   const STORAGE_KEY = "wilytrader_state_v2";
-  const SCHEMA_VERSION = 11;
+  const SCHEMA_VERSION = 12;
+  const PANEL_SCALE_MIN = 0.7;
+  const PANEL_SCALE_MAX = 1.5;
+  const PANEL_VIEWPORT_MARGIN = 8;
+  const PULSE_AUTO_BUY_KEY = "wilytrader_axiom_pulse_auto_buy_v1";
+  const PULSE_AUTO_BUY_TTL_MS = 2 * 60 * 1000;
   const LEGACY_DEFAULT_BUY_AMOUNTS = [0.1, 0.2, 0.5, 1];
   const PADRE_FOUR_DEFAULT_BUY_AMOUNTS = [0.1, 0.25, 0.5, 1];
   const PADRE_EIGHT_DEFAULT_BUY_AMOUNTS = [0.1, 0.25, 0.5, 1, 3, 0.005, 5, 7];
@@ -92,6 +97,7 @@
     sessionStartedAt: new Date().toISOString(),
     notes: [],
     settings: {
+      defaultBuyAmount: 0.5,
       buyAmounts: [0.1, 0.25, 0.5, 1, 2, 5],
       sellPercents: [5, 10, 15, 33, 50, 67, 85, 100],
       platformFeePct: 2,
@@ -106,6 +112,10 @@
       useCustomDelay: true,
       customDelayMs: 1000,
       panelPosition: null,
+      panelScale: 1,
+      trackerEnabled: true,
+      trackerPosition: null,
+      trackerSize: null,
       bridgeEnabled: false,
       autoScreenshotOnTrade: true,
       fallbackDownloadsEnabled: true,
@@ -123,6 +133,11 @@
     price: "wt-price",
     balance: "wt-balance",
     position: "wt-position",
+    tracker: "wt-pnl-tracker",
+    trackerPortfolio: "wt-tracker-portfolio",
+    trackerPnl: "wt-tracker-pnl",
+    trackerPct: "wt-tracker-pct",
+    trackerBar: "wt-tracker-bar",
     updateNotice: "wt-update-notice",
     log: "wt-log",
     settingsModal: "wt-settings-modal",
@@ -139,6 +154,8 @@
   let extensionContextValid = true;
   let lastSyncedExecutionId = null;
   let pulseQuickBuyBound = false;
+  let pendingPulseAutoBuyInFlight = false;
+  let pulseQuickBuyQueuedUntil = 0;
   let updateCheckTimerId = null;
   let updateState = {
     checking: false,
@@ -180,6 +197,7 @@
     injectPanel();
     updateActiveToken();
     render();
+    schedulePendingPulseAutoBuyCheck();
     bindRouteWatcher();
     startUpdateChecks();
     if (isOverlayVisibleRoute()) void syncBridge("startup");
@@ -295,6 +313,8 @@
       migrateSettingsToCurrentDefaults(merged.settings, stored?.settings || {});
     }
     merged.settings.buyAmounts = normalizeBuyAmounts(merged.settings.buyAmounts);
+    merged.settings.defaultBuyAmount = normalizeDefaultBuyAmount(stored?.settings?.defaultBuyAmount, stored?.settings);
+    merged.settings.panelScale = normalizePanelScale(merged.settings.panelScale);
     if (!Array.isArray(merged.settings.sellPercents) || merged.settings.sellPercents.length === 0) {
       merged.settings.sellPercents = DEFAULT_STATE.settings.sellPercents;
     }
@@ -389,6 +409,23 @@
     return values;
   }
 
+  function normalizeDefaultBuyAmount(value, storedSettings = null) {
+    const amount = Number(value);
+    if (Number.isFinite(amount) && amount > 0) return amount;
+
+    const storedAmounts = normalizeBuyAmounts(storedSettings?.buyAmounts);
+    if (storedAmounts[0] && Number(storedAmounts[0]) !== Number(DEFAULT_STATE.settings.buyAmounts[0])) {
+      return storedAmounts[0];
+    }
+    return DEFAULT_STATE.settings.defaultBuyAmount;
+  }
+
+  function normalizePanelScale(value) {
+    const scale = Number(value);
+    if (!Number.isFinite(scale)) return DEFAULT_STATE.settings.panelScale;
+    return Math.max(PANEL_SCALE_MIN, Math.min(PANEL_SCALE_MAX, scale));
+  }
+
   function migrateLegacyTrades(trades) {
     if (!Array.isArray(trades)) return [];
     return trades.map((trade) => ({
@@ -453,14 +490,21 @@
 
   function applyOverlayVisibility() {
     if (!root) return false;
-    const visible = isOverlayVisibleRoute();
-    root.hidden = !visible;
-    root.setAttribute("aria-hidden", visible ? "false" : "true");
-    if (!visible) {
+    const platformVisible = Boolean(getPlatformAdapter(window.location.hostname));
+    const panelVisible = isOverlayVisibleRoute();
+    const trackerVisible = Boolean(platformVisible && state?.settings?.trackerEnabled);
+    const panel = root.querySelector(`.${selectors.panel}`);
+    const tracker = root.querySelector(`.${selectors.tracker}`);
+
+    root.hidden = !(panelVisible || trackerVisible);
+    root.setAttribute("aria-hidden", panelVisible || trackerVisible ? "false" : "true");
+    if (panel) panel.hidden = !panelVisible;
+    if (tracker) tracker.hidden = !trackerVisible;
+    if (!panelVisible) {
       closeModals();
       postAxiomChartBridgeMessage({ op: "clearAll" });
     }
-    return visible;
+    return panelVisible;
   }
 
   function buildEmptyToken(adapter, name = null) {
@@ -635,6 +679,24 @@
     root = document.createElement("div");
     root.id = selectors.root;
     root.innerHTML = `
+      <section class="${selectors.tracker}" data-pnl-tracker aria-label="WilyTrader portfolio tracker">
+        <div class="wt-tracker-face" data-tracker-drag>
+          <div class="wt-tracker-metric">
+            <strong id="${selectors.trackerPortfolio}">0.00 SOL</strong>
+            <span>Portfolio</span>
+          </div>
+          <div class="wt-tracker-brand" aria-hidden="true">
+            <span class="wt-sol-mark"></span>
+            <span>WILY</span>
+          </div>
+          <div class="wt-tracker-metric wt-tracker-pnl-metric">
+            <strong id="${selectors.trackerPnl}">+0.00 SOL</strong>
+            <span>PNL <em id="${selectors.trackerPct}">+0.00%</em></span>
+          </div>
+        </div>
+        <div class="wt-tracker-rail" aria-hidden="true"><span id="${selectors.trackerBar}"></span></div>
+        <span class="wt-tracker-resize" data-tracker-resize aria-hidden="true"></span>
+      </section>
       <section class="${selectors.panel}" aria-label="WilyTrader paper trading panel">
         <header class="wt-header">
           <button type="button" class="wt-icon-btn" data-action="toggle" title="Minimize" aria-label="Minimize">-</button>
@@ -712,6 +774,10 @@
             </div>
           </div>
         </div>
+        <div class="wt-resize-handle wt-resize-nw" data-resize-corner="top-left" title="Scale panel" aria-hidden="true"></div>
+        <div class="wt-resize-handle wt-resize-ne" data-resize-corner="top-right" title="Scale panel" aria-hidden="true"></div>
+        <div class="wt-resize-handle wt-resize-sw" data-resize-corner="bottom-left" title="Scale panel" aria-hidden="true"></div>
+        <div class="wt-resize-handle wt-resize-se" data-resize-corner="bottom-right" title="Scale panel" aria-hidden="true"></div>
       </section>
       <div id="${selectors.settingsModal}" class="wt-modal" aria-hidden="true">
         <section class="wt-modal-panel" aria-label="WilyTrader settings">
@@ -720,6 +786,10 @@
             <button class="wt-icon-btn" data-action="close-modal" title="Close" aria-label="Close">x</button>
           </header>
           <div class="wt-modal-body">
+            <div class="wt-setting-group">
+              <label class="wt-label" for="wt-default-buy-amount">Default buy amount</label>
+              <input id="wt-default-buy-amount" class="wt-input" data-setting="defaultBuyAmount" type="number" min="0" step="0.01" placeholder="0.5" />
+            </div>
             <div class="wt-setting-group">
               <label class="wt-label" for="wt-buy-amounts">Buy presets (6 max)</label>
               <input id="wt-buy-amounts" class="wt-input" data-setting="buyAmounts" placeholder="0.1, 0.25, 0.5, 1, 2, 5" />
@@ -765,6 +835,10 @@
             <label class="wt-check-row">
               <input type="checkbox" data-setting="useCustomDelay" />
               <span>Use custom delay instead of priority-fee delay</span>
+            </label>
+            <label class="wt-check-row">
+              <input type="checkbox" data-setting="trackerEnabled" />
+              <span>Show floating portfolio and session PNL tracker</span>
             </label>
             <label class="wt-check-row">
               <input type="checkbox" data-setting="bridgeEnabled" />
@@ -843,8 +917,15 @@
     window.addEventListener("message", handleAxiomChartBridgeEvent);
     bindAxiomPulseQuickBuy();
     const panel = root.querySelector(`.${selectors.panel}`);
+    const tracker = root.querySelector(`.${selectors.tracker}`);
+    applyPanelScale(panel);
     applyPanelPosition(panel);
+    applyTrackerSize(tracker);
+    applyTrackerPosition(tracker);
     makeDraggable(root.querySelector(".wt-header"), panel);
+    makePanelScalable(panel);
+    makeDraggable(root.querySelector("[data-tracker-drag]"), tracker, { positionKey: "trackerPosition" });
+    makeResizable(root.querySelector("[data-tracker-resize]"), tracker, { sizeKey: "trackerSize" });
   }
 
   function injectAxiomChartBridgeScript() {
@@ -942,8 +1023,7 @@
     } else if (action === "open-add") {
       openAddModal();
     } else if (action === "buy-default") {
-      const amount = normalizeBuyAmounts(state.settings.buyAmounts)[0];
-      runTask(buy(amount));
+      runTask(buy(getDefaultBuyAmount()));
     } else if (action === "sell-all") {
       runTask(sell(100));
     } else if (action === "settings") {
@@ -984,6 +1064,7 @@
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
+    queueAxiomPulseAutoBuy(quickBuyBox);
   }
 
   function handleAxiomPulseQuickBuyClick(event) {
@@ -994,40 +1075,33 @@
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
+    if (Date.now() < pulseQuickBuyQueuedUntil) return;
+    queueAxiomPulseAutoBuy(quickBuyBox);
+  }
 
+  function queueAxiomPulseAutoBuy(quickBuyBox) {
+    pulseQuickBuyQueuedUntil = Date.now() + 1000;
     const token = detectAxiomPulseQuickBuyToken(quickBuyBox);
+    const row = findAxiomPulseTokenRow(quickBuyBox);
     if (!token?.key) {
       flashAxiomPulseQuickBuyBox(quickBuyBox, "wt-axiom-pulse-quick-buy-error", 900);
       setStatus("Pulse quick buy could not find that token address.");
       return;
     }
-    if (!token.unitPriceNative) {
-      flashAxiomPulseQuickBuyBox(quickBuyBox, "wt-axiom-pulse-quick-buy-error", 900);
-      setStatus("Pulse quick buy needs the row market cap to load.");
-      return;
-    }
 
     quickBuyBox.classList.add("wt-axiom-pulse-quick-buy-active");
-    const pulseBuy = buy(getDefaultBuyAmount(), token, {
-        resolveLatestToken: () => {
-          const refreshed = detectAxiomPulseQuickBuyToken(quickBuyBox);
-          return refreshed?.unitPriceNative ? refreshed : token;
-        },
-      })
-      .then((execution) => {
-        if (execution?.url) {
-          window.setTimeout(() => {
-            window.location.assign(execution.url);
-          }, 250);
-        }
-        return execution;
-      })
-      .finally(() => {
-        window.setTimeout(() => {
-          quickBuyBox.classList.remove("wt-axiom-pulse-quick-buy-active");
-        }, 450);
-      });
-    runTask(pulseBuy);
+    const amount = getDefaultBuyAmount();
+    if (!writePendingPulseAutoBuy(token, amount)) {
+      quickBuyBox.classList.remove("wt-axiom-pulse-quick-buy-active");
+      flashAxiomPulseQuickBuyBox(quickBuyBox, "wt-axiom-pulse-quick-buy-error", 900);
+      setStatus("Pulse auto-buy could not be queued.");
+      return;
+    }
+    setStatus(`Opening ${token.name || shortenAddress(token.address)} for ${formatters.native(amount, token.chain)} auto-buy.`);
+    window.setTimeout(() => {
+      quickBuyBox.classList.remove("wt-axiom-pulse-quick-buy-active");
+      triggerAxiomPulseRowNavigation(row, quickBuyBox);
+    }, 120);
   }
 
   function isPrimaryPointerEvent(event) {
@@ -1076,14 +1150,12 @@
 
     const marketCap = detectAxiomPulseMarketCap(row || quickBuyBox, quickBuyBox);
     const name = detectAxiomPulseTokenName(row || quickBuyBox, quickBuyBox, address);
-    const url = buildAxiomMemeUrl(address);
     return buildDetectedToken(adapter, {
       address,
       chain: "SOL",
       platformChain: "solana",
       name,
       marketCap,
-      url,
     });
   }
 
@@ -1148,7 +1220,93 @@
   }
 
   function getDefaultBuyAmount() {
-    return normalizeBuyAmounts(state?.settings?.buyAmounts)[0];
+    return normalizeDefaultBuyAmount(state?.settings?.defaultBuyAmount, state?.settings);
+  }
+
+  function writePendingPulseAutoBuy(token, amountNative) {
+    if (!token?.address) return false;
+    const pending = {
+      sourceTokenAddress: token.address,
+      sourceTokenKey: token.key,
+      tokenName: token.name,
+      chain: token.chain || "SOL",
+      amountNative,
+      sourceUrl: window.location.href,
+      createdAt: Date.now(),
+    };
+    try {
+      window.sessionStorage.setItem(PULSE_AUTO_BUY_KEY, JSON.stringify(pending));
+      return true;
+    } catch (error) {
+      console.debug("[WilyTrader] Could not save pending Pulse auto-buy.", error);
+      return false;
+    }
+  }
+
+  function readPendingPulseAutoBuy() {
+    try {
+      const raw = window.sessionStorage.getItem(PULSE_AUTO_BUY_KEY);
+      if (!raw) return null;
+      const pending = JSON.parse(raw);
+      if (!pending?.sourceTokenAddress || !Number.isFinite(Number(pending.amountNative))) {
+        clearPendingPulseAutoBuy();
+        return null;
+      }
+      if (Date.now() - Number(pending.createdAt || 0) > PULSE_AUTO_BUY_TTL_MS) {
+        clearPendingPulseAutoBuy();
+        return null;
+      }
+      return pending;
+    } catch (error) {
+      clearPendingPulseAutoBuy();
+      return null;
+    }
+  }
+
+  function clearPendingPulseAutoBuy() {
+    try {
+      window.sessionStorage.removeItem(PULSE_AUTO_BUY_KEY);
+    } catch {
+      // Ignore storage cleanup failures; the pending payload is best-effort.
+    }
+  }
+
+  function schedulePendingPulseAutoBuyCheck(delayMs = 0) {
+    if (pendingPulseAutoBuyInFlight) return;
+    window.setTimeout(() => {
+      runTask(maybeRunPendingPulseAutoBuy());
+    }, delayMs);
+  }
+
+  async function maybeRunPendingPulseAutoBuy() {
+    if (pendingPulseAutoBuyInFlight || tradeInFlight || !state) return;
+    const pending = readPendingPulseAutoBuy();
+    if (!pending) return;
+    if (!isAxiomMemeRoute(new URL(window.location.href))) return;
+
+    updateActiveToken();
+    const token = activeToken;
+    if (!token?.key) return;
+
+    if (!token.unitPriceNative) {
+      setStatus(`Waiting for token page price before auto-buying ${formatters.native(pending.amountNative, pending.chain || token.chain)}.`);
+      schedulePendingPulseAutoBuyCheck(750);
+      return;
+    }
+
+    pendingPulseAutoBuyInFlight = true;
+    clearPendingPulseAutoBuy();
+    try {
+      setStatus(`Auto-buying ${formatters.native(pending.amountNative, token.chain)} from Pulse.`);
+      await buy(Number(pending.amountNative), token, {
+        resolveLatestToken: () => {
+          updateActiveToken();
+          return activeToken?.key === token.key && activeToken.unitPriceNative ? activeToken : token;
+        },
+      });
+    } finally {
+      pendingPulseAutoBuyInFlight = false;
+    }
   }
 
   function detectAxiomPulseMarketCap(row, quickBuyBox) {
@@ -1184,8 +1342,41 @@
     return candidates[0]?.text || shortenAddress(address);
   }
 
-  function buildAxiomMemeUrl(address) {
-    return `${window.location.origin}/meme/${address}`;
+  function triggerAxiomPulseRowNavigation(row, quickBuyBox) {
+    const navigationTarget = findAxiomPulseRowNavigationTarget(row, quickBuyBox);
+    if (!navigationTarget) {
+      setStatus("Pulse auto-buy queued, but row navigation target was not found.");
+      return;
+    }
+
+    if (typeof navigationTarget.click === "function") {
+      navigationTarget.click();
+      return;
+    }
+
+    if (typeof MouseEvent === "function") {
+      const clickEvent = new MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window,
+        button: 0,
+      });
+      navigationTarget.dispatchEvent(clickEvent);
+    }
+  }
+
+  function findAxiomPulseRowNavigationTarget(row, quickBuyBox) {
+    let element = row;
+    for (let depth = 0; element && depth < 8; depth += 1, element = element.parentElement) {
+      if (root?.contains(element)) return null;
+      if (element === quickBuyBox || element.contains?.(quickBuyBox)) {
+        const text = cleanText(element.textContent);
+        const rect = element.getBoundingClientRect();
+        if (rect.width >= 240 && rect.height >= 80 && /MC/i.test(text) && /TX/i.test(text)) return element;
+      }
+    }
+    return row || null;
   }
 
   function flashAxiomPulseQuickBuyBox(element, className, durationMs) {
@@ -1250,6 +1441,7 @@
     root.querySelector("[data-setting='buyAmounts']").value = state.settings.buyAmounts.join(", ");
     root.querySelector("[data-setting='sellPercents']").value = state.settings.sellPercents.join(", ");
     [
+      "defaultBuyAmount",
       "buyPriorityFeeNative",
       "sellPriorityFeeNative",
       "buyBribeFeeNative",
@@ -1263,6 +1455,7 @@
       if (input) input.value = String(state.settings[key]);
     });
     root.querySelector("[data-setting='useCustomDelay']").checked = Boolean(state.settings.useCustomDelay);
+    root.querySelector("[data-setting='trackerEnabled']").checked = Boolean(state.settings.trackerEnabled);
     root.querySelector("[data-setting='bridgeEnabled']").checked = Boolean(state.settings.bridgeEnabled);
     root.querySelector("[data-setting='autoScreenshotOnTrade']").checked = Boolean(state.settings.autoScreenshotOnTrade);
     root.querySelector("[data-setting='fallbackDownloadsEnabled']").checked = Boolean(state.settings.fallbackDownloadsEnabled);
@@ -1293,6 +1486,7 @@
     const nextSellPercents = parsedSellPercents.map((value) => Math.min(100, value));
 
     const numericKeys = [
+      "defaultBuyAmount",
       "buyPriorityFeeNative",
       "sellPriorityFeeNative",
       "buyBribeFeeNative",
@@ -1307,6 +1501,7 @@
       buyAmounts: nextBuyAmounts,
       sellPercents: nextSellPercents,
       useCustomDelay: Boolean(root.querySelector("[data-setting='useCustomDelay']")?.checked),
+      trackerEnabled: Boolean(root.querySelector("[data-setting='trackerEnabled']")?.checked),
       bridgeEnabled: Boolean(root.querySelector("[data-setting='bridgeEnabled']")?.checked),
       autoScreenshotOnTrade: Boolean(root.querySelector("[data-setting='autoScreenshotOnTrade']")?.checked),
       fallbackDownloadsEnabled: Boolean(root.querySelector("[data-setting='fallbackDownloadsEnabled']")?.checked),
@@ -1315,11 +1510,12 @@
 
     for (const key of numericKeys) {
       const value = Number(root.querySelector(`[data-setting='${key}']`)?.value);
-      if (!Number.isFinite(value) || value < 0) return setStatus(`Enter a valid ${key}.`);
+      if (!Number.isFinite(value) || value < 0 || (key === "defaultBuyAmount" && value <= 0)) return setStatus(`Enter a valid ${key}.`);
       next[key] = key === "customDelayMs" ? Math.round(value) : value;
     }
 
     next.buyAmounts = normalizeBuyAmounts(next.buyAmounts);
+    next.defaultBuyAmount = normalizeDefaultBuyAmount(next.defaultBuyAmount, next);
     state.settings = next;
     await persistAndSync("settings");
     if (state.settings.updateChecksEnabled) runTask(checkForExtensionUpdate("settings"));
@@ -1332,6 +1528,10 @@
     state.settings = {
       ...DEFAULT_STATE.settings,
       panelPosition: state.settings.panelPosition || null,
+      panelScale: state.settings.panelScale,
+      trackerEnabled: state.settings.trackerEnabled,
+      trackerPosition: state.settings.trackerPosition || null,
+      trackerSize: state.settings.trackerSize || null,
       bridgeEnabled: state.settings.bridgeEnabled,
       autoScreenshotOnTrade: state.settings.autoScreenshotOnTrade,
       fallbackDownloadsEnabled: state.settings.fallbackDownloadsEnabled,
@@ -1841,9 +2041,10 @@
 
   function render() {
     if (!root || !state) return;
-    const visible = applyOverlayVisibility();
+    const panelVisible = applyOverlayVisibility();
     updateActiveToken();
-    if (!visible) return;
+    renderFloatingTracker();
+    if (!panelVisible) return;
 
     const tokenEl = root.querySelector(`#${selectors.token}`);
     const balanceEl = root.querySelector(`#${selectors.balance}`);
@@ -1937,6 +2138,76 @@
       });
     }
     syncAxiomNativeChartLines(summary, token);
+  }
+
+  function renderFloatingTracker() {
+    const tracker = root?.querySelector(`.${selectors.tracker}`);
+    if (!tracker || tracker.hidden) return;
+
+    const metrics = buildFloatingTrackerMetrics();
+    const portfolioEl = root.querySelector(`#${selectors.trackerPortfolio}`);
+    const pnlEl = root.querySelector(`#${selectors.trackerPnl}`);
+    const pctEl = root.querySelector(`#${selectors.trackerPct}`);
+    const barEl = root.querySelector(`#${selectors.trackerBar}`);
+    const direction = metrics.sessionPnlNative > 0 ? "up" : metrics.sessionPnlNative < 0 ? "down" : "flat";
+
+    tracker.classList.toggle("wt-tracker-up", direction === "up");
+    tracker.classList.toggle("wt-tracker-down", direction === "down");
+    tracker.classList.toggle("wt-tracker-flat", direction === "flat");
+    tracker.title = [
+      `Portfolio ${formatTrackerNative(metrics.portfolioNative, metrics.chain)}`,
+      `Session PNL ${formatTrackerNative(metrics.sessionPnlNative, metrics.chain, true)} (${formatters.pct(metrics.sessionPnlPct)})`,
+      `Realized ${formatTrackerNative(metrics.realizedPnlNative, metrics.chain, true)}`,
+      `Marked open ${formatTrackerNative(metrics.markedOpenPnlNative, metrics.chain, true)}`,
+    ].join("\n");
+
+    if (portfolioEl) portfolioEl.textContent = formatTrackerNative(metrics.portfolioNative, metrics.chain);
+    if (pnlEl) pnlEl.textContent = formatTrackerNative(metrics.sessionPnlNative, metrics.chain, true);
+    if (pctEl) pctEl.textContent = formatters.pct(metrics.sessionPnlPct);
+    if (barEl) barEl.style.width = "100%";
+  }
+
+  function buildFloatingTrackerMetrics() {
+    const latestExecution = state.executions[state.executions.length - 1] || null;
+    const chain = activeToken?.chain || latestExecution?.chain || "SOL";
+    const buys = state.executions.filter((execution) => execution.chain === chain && execution.side === "buy");
+    const sells = state.executions.filter((execution) => execution.chain === chain && execution.side === "sell");
+    const positions = Object.values(state.positions).filter((position) => position.chain === chain);
+    const balanceNative = Number(state.balances[chain] || 0);
+    let portfolioNative = balanceNative;
+    let markedOpenPnlNative = 0;
+
+    positions.forEach((position) => {
+      const isActivePosition = activeToken?.key && (position.tokenKey === activeToken.key || state.positions[activeToken.key] === position);
+      const markNative = isActivePosition && activeToken?.unitPriceNative
+        ? Number(position.tokenAmount || 0) * Number(activeToken.unitPriceNative || 0)
+        : Number(position.costNative || 0);
+      portfolioNative += markNative;
+      if (isActivePosition && activeToken?.unitPriceNative) {
+        markedOpenPnlNative += markNative - Number(position.costNative || 0);
+      }
+    });
+
+    const buyFeesNative = sum(buys, "feeNative");
+    const realizedPnlNative = sum(sells, "pnlNative") - buyFeesNative;
+    const sessionPnlNative = realizedPnlNative + markedOpenPnlNative;
+    const sessionBasisNative = sumFirst(buys, ["solInvestedNative", "grossNative"]) + buyFeesNative;
+    const sessionPnlPct = sessionBasisNative > 0 ? (sessionPnlNative / sessionBasisNative) * 100 : 0;
+
+    return {
+      chain,
+      portfolioNative: round(portfolioNative, 2),
+      realizedPnlNative: round(realizedPnlNative, 2),
+      markedOpenPnlNative: round(markedOpenPnlNative, 2),
+      sessionPnlNative: round(sessionPnlNative, 2),
+      sessionPnlPct: round(sessionPnlPct, 2),
+    };
+  }
+
+  function formatTrackerNative(value, chain, signed = false) {
+    const numeric = Number(value || 0);
+    const sign = signed && numeric > 0 ? "+" : signed && numeric < 0 ? "-" : "";
+    return `${sign}${Math.abs(numeric).toFixed(2)} ${chain}`;
   }
 
   function findLatestTokenPositionSummary(token) {
@@ -2488,22 +2759,69 @@
         injectAxiomChartBridgeScript();
         updateActiveToken();
         render();
+        schedulePendingPulseAutoBuyCheck();
       }
     }, 1000);
   }
 
   function applyPanelPosition(panel) {
-    if (!panel || !state?.settings?.panelPosition) return;
-    const { left, top } = state.settings.panelPosition;
-    if (!Number.isFinite(left) || !Number.isFinite(top)) return;
-    panel.style.right = "auto";
-    panel.style.bottom = "auto";
-    panel.style.left = `${Math.max(8, Math.min(window.innerWidth - panel.offsetWidth - 8, left))}px`;
-    panel.style.top = `${Math.max(8, Math.min(window.innerHeight - 48, top))}px`;
+    if (panel && state?.settings?.panelPosition) panel.style.transformOrigin = "top left";
+    applySavedPosition(panel, state?.settings?.panelPosition);
   }
 
-  function makeDraggable(handle, panel) {
+  function applyPanelScale(panel) {
+    if (!panel) return;
+    const scale = normalizePanelScale(state?.settings?.panelScale);
+    state.settings.panelScale = scale;
+    panel.style.setProperty("--wt-panel-scale", String(scale));
+    panel.style.transformOrigin = state.settings.panelPosition ? "top left" : "bottom right";
+  }
+
+  function applyTrackerPosition(tracker) {
+    applySavedPosition(tracker, state?.settings?.trackerPosition);
+  }
+
+  function applySavedPosition(element, position) {
+    if (!element || !position) return;
+    const { left, top } = position;
+    if (!Number.isFinite(left) || !Number.isFinite(top)) return;
+    const next = clampElementPosition(element, left, top);
+    element.style.right = "auto";
+    element.style.bottom = "auto";
+    element.style.left = `${next.left}px`;
+    element.style.top = `${next.top}px`;
+  }
+
+  function applyTrackerSize(tracker) {
+    if (!tracker || !state?.settings?.trackerSize) return;
+    const { width, height } = state.settings.trackerSize;
+    if (Number.isFinite(width)) tracker.style.width = `${Math.max(280, Math.min(window.innerWidth - 16, width))}px`;
+    if (Number.isFinite(height)) tracker.style.height = `${Math.max(76, Math.min(window.innerHeight - 16, height))}px`;
+  }
+
+  function clampElementPosition(element, left, top) {
+    const rect = element.getBoundingClientRect();
+    const width = rect.width || element.offsetWidth;
+    const height = rect.height || element.offsetHeight;
+    const maxLeft = Math.max(PANEL_VIEWPORT_MARGIN, window.innerWidth - width - PANEL_VIEWPORT_MARGIN);
+    const maxTop = Math.max(PANEL_VIEWPORT_MARGIN, window.innerHeight - height - PANEL_VIEWPORT_MARGIN);
+    return {
+      left: Math.max(PANEL_VIEWPORT_MARGIN, Math.min(maxLeft, left)),
+      top: Math.max(PANEL_VIEWPORT_MARGIN, Math.min(maxTop, top)),
+    };
+  }
+
+  function pinPanelToVisualRect(panel, rect = panel.getBoundingClientRect()) {
+    panel.style.transformOrigin = "top left";
+    panel.style.right = "auto";
+    panel.style.bottom = "auto";
+    panel.style.left = `${rect.left}px`;
+    panel.style.top = `${rect.top}px`;
+  }
+
+  function makeDraggable(handle, panel, options = {}) {
     if (!handle || !panel) return;
+    const positionKey = options.positionKey || "panelPosition";
     let dragging = false;
     let startX = 0;
     let startY = 0;
@@ -2517,6 +2835,7 @@
       startX = event.clientX;
       startY = event.clientY;
       const rect = panel.getBoundingClientRect();
+      if (panel.classList.contains(selectors.panel)) pinPanelToVisualRect(panel, rect);
       panelX = rect.left;
       panelY = rect.top;
       panel.style.right = "auto";
@@ -2528,10 +2847,9 @@
 
     document.addEventListener("mousemove", (event) => {
       if (!dragging) return;
-      const nextX = Math.max(8, Math.min(window.innerWidth - panel.offsetWidth - 8, panelX + event.clientX - startX));
-      const nextY = Math.max(8, Math.min(window.innerHeight - 48, panelY + event.clientY - startY));
-      panel.style.left = `${nextX}px`;
-      panel.style.top = `${nextY}px`;
+      const next = clampElementPosition(panel, panelX + event.clientX - startX, panelY + event.clientY - startY);
+      panel.style.left = `${next.left}px`;
+      panel.style.top = `${next.top}px`;
     });
 
     document.addEventListener("mouseup", () => {
@@ -2541,7 +2859,138 @@
       const left = Number.parseFloat(panel.style.left);
       const top = Number.parseFloat(panel.style.top);
       if (Number.isFinite(left) && Number.isFinite(top)) {
-        state.settings.panelPosition = { left, top };
+        state.settings[positionKey] = { left, top };
+        runTask(persist());
+      }
+    });
+  }
+
+  function makePanelScalable(panel) {
+    if (!panel) return;
+    const handles = panel.querySelectorAll("[data-resize-corner]");
+    let resizing = null;
+
+    handles.forEach((handle) => {
+      handle.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+
+        const rect = panel.getBoundingClientRect();
+        const anchor = getPanelScaleAnchor(handle.dataset.resizeCorner, rect);
+        if (!anchor) return;
+
+        panel.style.transformOrigin = anchor.origin;
+        positionPanelForScaleAnchor(panel, anchor, panel.offsetWidth, panel.offsetHeight);
+        resizing = {
+          anchor,
+          baseWidth: panel.offsetWidth,
+          baseHeight: panel.offsetHeight,
+          startScale: getPanelScale(),
+          startDistance: Math.hypot(event.clientX - anchor.x, event.clientY - anchor.y),
+        };
+        document.body.style.userSelect = "none";
+      });
+    });
+
+    document.addEventListener("mousemove", (event) => {
+      if (!resizing) return;
+      const distance = Math.hypot(event.clientX - resizing.anchor.x, event.clientY - resizing.anchor.y);
+      const rawScale = resizing.startScale * (distance / Math.max(1, resizing.startDistance));
+      const maxScale = getPanelAnchorMaxScale(resizing.anchor, resizing.baseWidth, resizing.baseHeight);
+      const nextScale = Math.max(PANEL_SCALE_MIN, Math.min(maxScale, rawScale));
+      setPanelScale(panel, nextScale);
+    });
+
+    document.addEventListener("mouseup", () => {
+      if (!resizing) return;
+      resizing = null;
+      document.body.style.userSelect = "";
+      const rect = panel.getBoundingClientRect();
+      const scale = normalizePanelScale(getPanelScale());
+      state.settings.panelScale = scale;
+      setPanelScale(panel, scale);
+      pinPanelToVisualRect(panel, rect);
+      state.settings.panelPosition = { left: rect.left, top: rect.top };
+      runTask(persist());
+    });
+  }
+
+  function getPanelScale() {
+    return normalizePanelScale(state?.settings?.panelScale ?? DEFAULT_STATE.settings.panelScale);
+  }
+
+  function setPanelScale(panel, scale) {
+    const normalized = normalizePanelScale(scale);
+    state.settings.panelScale = normalized;
+    panel.style.setProperty("--wt-panel-scale", String(Number(normalized.toFixed(3))));
+  }
+
+  function getPanelScaleAnchor(corner, rect) {
+    const anchors = {
+      "top-left": { x: rect.right, y: rect.bottom, origin: "bottom right", xDir: -1, yDir: -1 },
+      "top-right": { x: rect.left, y: rect.bottom, origin: "bottom left", xDir: 1, yDir: -1 },
+      "bottom-left": { x: rect.right, y: rect.top, origin: "top right", xDir: -1, yDir: 1 },
+      "bottom-right": { x: rect.left, y: rect.top, origin: "top left", xDir: 1, yDir: 1 },
+    };
+    return anchors[corner] || null;
+  }
+
+  function positionPanelForScaleAnchor(panel, anchor, width, height) {
+    panel.style.right = "auto";
+    panel.style.bottom = "auto";
+    panel.style.left = `${anchor.xDir > 0 ? anchor.x : anchor.x - width}px`;
+    panel.style.top = `${anchor.yDir > 0 ? anchor.y : anchor.y - height}px`;
+  }
+
+  function getPanelAnchorMaxScale(anchor, baseWidth, baseHeight) {
+    const availableWidth = anchor.xDir > 0
+      ? window.innerWidth - PANEL_VIEWPORT_MARGIN - anchor.x
+      : anchor.x - PANEL_VIEWPORT_MARGIN;
+    const availableHeight = anchor.yDir > 0
+      ? window.innerHeight - PANEL_VIEWPORT_MARGIN - anchor.y
+      : anchor.y - PANEL_VIEWPORT_MARGIN;
+    return Math.max(
+      PANEL_SCALE_MIN,
+      Math.min(PANEL_SCALE_MAX, availableWidth / baseWidth, availableHeight / baseHeight),
+    );
+  }
+
+  function makeResizable(handle, element, options = {}) {
+    if (!handle || !element) return;
+    const sizeKey = options.sizeKey || "trackerSize";
+    let resizing = false;
+    let startX = 0;
+    let startY = 0;
+    let startWidth = 0;
+    let startHeight = 0;
+
+    handle.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      resizing = true;
+      startX = event.clientX;
+      startY = event.clientY;
+      startWidth = element.offsetWidth;
+      startHeight = element.offsetHeight;
+      document.body.style.userSelect = "none";
+    });
+
+    document.addEventListener("mousemove", (event) => {
+      if (!resizing) return;
+      const width = Math.max(280, Math.min(window.innerWidth - 16, startWidth + event.clientX - startX));
+      const height = Math.max(76, Math.min(window.innerHeight - 16, startHeight + event.clientY - startY));
+      element.style.width = `${width}px`;
+      element.style.height = `${height}px`;
+    });
+
+    document.addEventListener("mouseup", () => {
+      if (!resizing) return;
+      resizing = false;
+      document.body.style.userSelect = "";
+      const width = Number.parseFloat(element.style.width);
+      const height = Number.parseFloat(element.style.height);
+      if (Number.isFinite(width) && Number.isFinite(height)) {
+        state.settings[sizeKey] = { width, height };
         runTask(persist());
       }
     });

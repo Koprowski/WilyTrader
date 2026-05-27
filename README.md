@@ -5,6 +5,7 @@ Local-only Chrome extension for Padre.gg and Axiom paper trading with execution-
 ## What It Does
 
 - Adds a draggable WilyTrader overlay on Padre token pages and Axiom meme token pages (`https://axiom.trade/meme/...`).
+- Shows a draggable, resizable portfolio and session P&L tracker across supported Padre and Axiom pages.
 - Simulates paper buys and sells without connecting to wallets.
 - Tracks execution-level fees, slippage, delay, and P&L.
 - Exports a ledger JSON file with executions, open positions, closed positions, notes, settings, and Snipalot-compatible trade summaries.
@@ -23,6 +24,18 @@ WilyTrader is not installed from the Chrome Web Store. Install it as an unpacked
 7. Open a supported token page at `https://trade.padre.gg/*` or `https://axiom.trade/meme/...`.
 
 Chrome may label unpacked extensions as developer-mode or non-Web-Store extensions. That is expected for local development. Keep Developer mode enabled for the extension to remain loaded, and use the reload button on `chrome://extensions` after editing files.
+
+## Keep It Updated
+
+If the repo was cloned with Git, pull the latest files and reload the unpacked extension:
+
+```powershell
+git -C C:\Tools\WilyTrader pull --ff-only
+```
+
+Replace `C:\Tools\WilyTrader` with the local folder that contains this repo. After the pull finishes, open `chrome://extensions` and click reload on **WilyTrader**. The in-extension update notice can open the Chrome extensions page, but Chrome still requires the reload click for unpacked extensions.
+
+If Git is not installed, download the latest ZIP from GitHub, replace the local repo folder, and reload the unpacked extension from `chrome://extensions`.
 
 ## Privacy Boundary
 
