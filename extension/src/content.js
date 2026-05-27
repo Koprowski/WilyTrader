@@ -75,6 +75,7 @@
   const TRADE_SOUND_PATH = "assets/cash-register-sound.mp3";
   const TRADE_SOUND_GAIN = 0.85;
   const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
+  const CHART_ARTIFACT_PAGE_STARTED_MS = Date.now();
   const MARKET_CAP_SUPPLY = 1_000_000_000;
   const DEFAULT_PRICES = { SOL: 190, BNB: 600 };
   const SOLANA_ADDRESS_PATTERN = /[1-9A-HJ-NP-Za-km-z]{32,44}/;
@@ -806,8 +807,8 @@
               <span>Paper Balance</span>
             </div>
             <button type="button" class="wt-tracker-brand" data-action="tracker-menu" title="WilyTrader tracker actions" aria-label="WilyTrader tracker actions" aria-expanded="false">
+              <span>WilyTrader</span>
               <span class="wt-sol-mark"></span>
-              <span>WILY</span>
             </button>
             <div class="wt-tracker-metric wt-tracker-pnl-metric">
               <strong id="${selectors.trackerPnl}">+0.00 SOL</strong>
@@ -865,7 +866,7 @@
             </div>
             <div class="wt-button-row wt-buy-grid" data-buy-buttons></div>
             <div class="wt-fee-strip" aria-label="Buy execution settings">
-              <label class="wt-inline-setting wt-icon-setting" title="Slippage %" aria-label="Buy slippage percent">
+              <label class="wt-inline-setting wt-icon-setting" title="Max price move %" aria-label="Buy max price move percent">
                 <span class="wt-fee-icon">${SLIPPAGE_ICON}</span>
                 <input data-quick-setting="buySlippagePct" type="number" min="0" step="0.1" />
                 <span class="wt-percent-suffix">%</span>
@@ -887,7 +888,7 @@
             </div>
             <div class="wt-button-row" data-sell-buttons></div>
             <div class="wt-fee-strip" aria-label="Sell execution settings">
-              <label class="wt-inline-setting wt-icon-setting" title="Slippage %" aria-label="Sell slippage percent">
+              <label class="wt-inline-setting wt-icon-setting" title="Max price move %" aria-label="Sell max price move percent">
                 <span class="wt-fee-icon">${SLIPPAGE_ICON}</span>
                 <input data-quick-setting="sellSlippagePct" type="number" min="0" step="0.1" />
                 <span class="wt-percent-suffix">%</span>
@@ -945,11 +946,11 @@
                 <input id="wt-sell-bribe" class="wt-input" data-setting="sellBribeFeeNative" type="number" min="0" step="0.0001" />
               </div>
               <div class="wt-setting-group">
-                <label class="wt-label" for="wt-buy-slippage">Buy max slippage %</label>
+                <label class="wt-label" for="wt-buy-slippage">Buy max price move %</label>
                 <input id="wt-buy-slippage" class="wt-input" data-setting="buySlippagePct" type="number" min="0" step="0.1" />
               </div>
               <div class="wt-setting-group">
-                <label class="wt-label" for="wt-sell-slippage">Sell max slippage %</label>
+                <label class="wt-label" for="wt-sell-slippage">Sell max price move %</label>
                 <input id="wt-sell-slippage" class="wt-input" data-setting="sellSlippagePct" type="number" min="0" step="0.1" />
               </div>
               <div class="wt-setting-group">
@@ -1909,14 +1910,12 @@
       const chain = delayedToken.chain;
       const fees = calculateFees("buy", amountNative, delayedToken.executionDelayMs);
       const maxSlippagePct = Number(state.settings.buySlippagePct || 0);
-      const realizedSlippagePct = calculateRealizedSlippagePct(maxSlippagePct);
-      const slippage = realizedSlippagePct / 100;
       const totalDebit = amountNative + fees.totalFeeNative;
       if ((state.balances[chain] || 0) < totalDebit) {
         return setStatus(`Insufficient ${chain} paper balance.`);
       }
 
-      const executionPrice = delayedToken.unitPriceNative * (1 + slippage);
+      const executionPrice = delayedToken.unitPriceNative;
       const tokenAmount = amountNative / executionPrice;
       const existing = state.positions[delayedToken.key] || createEmptyPosition(delayedToken);
       const before = snapshotPosition(existing);
@@ -1946,8 +1945,9 @@
         grossNative: amountNative,
         netNative: -totalDebit,
         fees,
-        slippagePct: realizedSlippagePct,
+        slippagePct: 0,
         maxSlippagePct,
+        priceMovePct: delayedToken.priceMovePct,
         tokenAmount,
         executionPriceNative: executionPrice,
         pnlNative: 0,
@@ -1985,9 +1985,7 @@
     const tokenAmount = position.tokenAmount * sellRatio;
     const costBasis = position.costNative * sellRatio;
     const maxSlippagePct = Number(state.settings.sellSlippagePct || 0);
-    const realizedSlippagePct = calculateRealizedSlippagePct(maxSlippagePct);
-    const slippage = realizedSlippagePct / 100;
-    const executionPrice = delayedToken.unitPriceNative * Math.max(0.000001, 1 - slippage);
+    const executionPrice = delayedToken.unitPriceNative;
     const grossProceeds = tokenAmount * executionPrice;
     const fees = calculateFees("sell", grossProceeds, delayedToken.executionDelayMs);
     const netProceeds = Math.max(0, grossProceeds - fees.totalFeeNative);
@@ -2022,8 +2020,9 @@
       grossNative: grossProceeds,
       netNative: netProceeds,
       fees,
-      slippagePct: realizedSlippagePct,
+      slippagePct: 0,
       maxSlippagePct,
+      priceMovePct: delayedToken.priceMovePct,
       tokenAmount,
       executionPriceNative: executionPrice,
       pnlNative,
@@ -2094,12 +2093,12 @@
       return null;
     }
     const slippageLimit = Number(side === "buy" ? state.settings.buySlippagePct : state.settings.sellSlippagePct) || 0;
-    const movementPct = Math.abs(((delayedToken.unitPriceNative - token.unitPriceNative) / token.unitPriceNative) * 100);
-    if (movementPct > slippageLimit) {
-      setStatus(`Execution cancelled: price moved ${movementPct.toFixed(2)}%.`);
+    const priceMovePct = calculatePriceMovePct(token.unitPriceNative, delayedToken.unitPriceNative);
+    if (Math.abs(priceMovePct) > slippageLimit) {
+      setStatus(`Execution cancelled: price moved ${Math.abs(priceMovePct).toFixed(2)}%.`);
       return null;
     }
-    return { ...delayedToken, executionDelayMs: delayMs };
+    return { ...delayedToken, executionDelayMs: delayMs, priceMovePct };
   }
 
   async function resolveExecutionTokenAfterDelay(token, options = {}) {
@@ -2145,12 +2144,11 @@
     };
   }
 
-  function calculateRealizedSlippagePct(maxSlippagePct) {
-    const max = Math.max(0, Number(maxSlippagePct || 0));
-    if (max <= 0) return 0;
-    const cap = Math.min(max, Math.max(0.15, max * 0.06), 5);
-    const realized = cap * (0.25 + Math.random() * 0.75);
-    return round(realized, 4);
+  function calculatePriceMovePct(beforePrice, afterPrice) {
+    const before = Number(beforePrice);
+    const after = Number(afterPrice);
+    if (!Number.isFinite(before) || before <= 0 || !Number.isFinite(after)) return 0;
+    return round(((after - before) / before) * 100, 4);
   }
 
   function recordExecution(fields) {
@@ -2198,6 +2196,7 @@
       platformFeePct: Number(state.settings.platformFeePct || 0),
       slippagePct: fields.slippagePct,
       maxSlippagePct: fields.maxSlippagePct ?? fields.slippagePct,
+      priceMovePct: round(fields.priceMovePct, 4),
       executionDelayMs: fields.fees?.executionDelayMs ?? 0,
       tokenAmount: round(fields.tokenAmount, 12),
       costBasisNative,
@@ -2224,7 +2223,11 @@
   function buildPositionSummary(positionId, statusOverride) {
     const executions = state.executions
       .filter((execution) => execution.positionId === positionId)
-      .sort((a, b) => a.timestampMs - b.timestampMs);
+      .sort((a, b) => getExecutionTimestampMs(a) - getExecutionTimestampMs(b));
+    return buildPositionSummaryFromExecutions(positionId, statusOverride, executions);
+  }
+
+  function buildPositionSummaryFromExecutions(positionId, statusOverride, executions) {
     if (executions.length === 0) return null;
 
     const buys = executions.filter((execution) => execution.side === "buy");
@@ -2385,6 +2388,7 @@
     const token = activeToken;
     const position = token.key ? state.positions[token.key] : null;
     const summary = position ? buildPositionSummary(position.positionId, "open") : findLatestTokenPositionSummary(token);
+    const chartSummary = buildChartArtifactSummary(summary);
     const positionPnl = position ? calculateMarkedPositionMetrics(position, token) : null;
 
     tokenEl.textContent = token.address
@@ -2456,7 +2460,7 @@
         logEl.appendChild(item);
       });
     }
-    syncAxiomNativeChartLines(summary, token);
+    syncAxiomNativeChartLines(chartSummary, token);
   }
 
   function renderFloatingTracker() {
@@ -2566,6 +2570,29 @@
     return relatedExecution ? buildPositionSummary(relatedExecution.positionId) : null;
   }
 
+  function buildChartArtifactSummary(summary) {
+    if (!summary?.id) return null;
+    const executionIds = new Set(summary?.executionIds || []);
+    if (executionIds.size === 0) return null;
+    const cutoffMs = getChartArtifactCutoffMs();
+    const chartExecutions = state.executions
+      .filter((execution) => executionIds.has(execution.id) && getExecutionTimestampMs(execution) >= cutoffMs)
+      .sort((a, b) => getExecutionTimestampMs(a) - getExecutionTimestampMs(b));
+    return buildPositionSummaryFromExecutions(summary.id, summary.status, chartExecutions);
+  }
+
+  function getChartArtifactCutoffMs() {
+    const sessionStartedMs = Date.parse(state?.sessionStartedAt || "");
+    return Math.max(CHART_ARTIFACT_PAGE_STARTED_MS, Number.isFinite(sessionStartedMs) ? sessionStartedMs : 0);
+  }
+
+  function getExecutionTimestampMs(execution) {
+    const timestampMs = Number(execution?.timestampMs);
+    if (Number.isFinite(timestampMs) && timestampMs > 0) return timestampMs;
+    const parsed = Date.parse(execution?.timestamp || "");
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
   function renderUpdateNotice() {
     const notice = root?.querySelector(`#${selectors.updateNotice}`);
     if (!notice) return;
@@ -2625,11 +2652,12 @@
 
   function syncAxiomExecutionMarkers(summary, token) {
     const executionIds = new Set(summary.executionIds || []);
+    const cutoffMs = getChartArtifactCutoffMs();
     state.executions
-      .filter((execution) => executionIds.has(execution.id))
+      .filter((execution) => executionIds.has(execution.id) && getExecutionTimestampMs(execution) >= cutoffMs)
       .forEach((execution) => {
         const price = getAxiomExecutionMarkerPrice(execution, token);
-        const time = Math.floor((Number(execution.timestampMs) || Date.parse(execution.timestamp || "") || Date.now()) / 1000);
+        const time = Math.floor((getExecutionTimestampMs(execution) || Date.now()) / 1000);
         if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(time)) return;
         postAxiomChartBridgeMessage({
           op: "upsertMarker",
@@ -2797,7 +2825,7 @@
       size,
       formatMarketCapFill(execution),
       `fees ${formatters.native(execution.feeNative, execution.chain)}`,
-      `slip ${execution.slippagePct}% / max ${execution.maxSlippagePct ?? execution.slippagePct}%`,
+      `move ${formatters.pct(execution.priceMovePct || 0)} / max ${Number(execution.maxSlippagePct ?? 0).toFixed(2)}%`,
       `delay ${execution.executionDelayMs || 0}ms`,
       pnl,
     ].join(" - ");
