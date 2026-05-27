@@ -9,6 +9,7 @@
   const TRACKER_BASE_WIDTH = 480;
   const TRACKER_BASE_HEIGHT = 76;
   const TRACKER_SCALE_MIN = 0.25;
+  const TRACKER_RESIZE_DIAGNOSTICS = true;
   const PULSE_AUTO_BUY_KEY = "wilytrader_axiom_pulse_auto_buy_v1";
   const PULSE_AUTO_BUY_TTL_MS = 2 * 60 * 1000;
   const LEGACY_DEFAULT_BUY_AMOUNTS = [0.1, 0.2, 0.5, 1];
@@ -1110,7 +1111,73 @@
 
   function stopOverlayEvent(event) {
     if (!root?.contains(event.target)) return;
+    const trackerHandle = event.target?.closest?.("[data-tracker-resize-corner]");
+    if (trackerHandle) {
+      logTrackerResizeDiagnostic("root-stop-overlay-event", event, {
+        corner: trackerHandle.dataset.trackerResizeCorner || null,
+      });
+    }
     event.stopPropagation();
+  }
+
+  function logTrackerResizeDiagnostic(stage, event = null, extra = {}, level = "debug") {
+    if (!TRACKER_RESIZE_DIAGNOSTICS) return;
+    const target = event?.target || null;
+    const tracker = root?.querySelector?.(`.${selectors.tracker}`) || null;
+    const handle = target?.closest?.("[data-tracker-resize-corner]") || null;
+    const payload = {
+      stage,
+      eventType: event?.type || null,
+      pointerId: Number.isFinite(event?.pointerId) ? event.pointerId : null,
+      button: Number.isFinite(event?.button) ? event.button : null,
+      buttons: Number.isFinite(event?.buttons) ? event.buttons : null,
+      clientX: Number.isFinite(event?.clientX) ? event.clientX : null,
+      clientY: Number.isFinite(event?.clientY) ? event.clientY : null,
+      eventPhase: event ? eventPhaseName(event.eventPhase) : null,
+      defaultPrevented: event?.defaultPrevented ?? null,
+      cancelBubble: event?.cancelBubble ?? null,
+      target: elementSummary(target),
+      handle: elementSummary(handle),
+      tracker: elementSummary(tracker),
+      corner: handle?.dataset?.trackerResizeCorner || null,
+      rootContainsTarget: Boolean(root && target && root.contains(target)),
+      trackerContainsTarget: Boolean(tracker && target && tracker.contains(target)),
+      path: event?.composedPath ? event.composedPath().slice(0, 8).map(elementSummary) : [],
+      ...extra,
+    };
+    const log = console[level] || console.debug;
+    log.call(console, `[WilyTrader][tracker-resize] ${stage}`, payload);
+  }
+
+  function eventPhaseName(phase) {
+    if (phase === Event.CAPTURING_PHASE) return "capturing";
+    if (phase === Event.AT_TARGET) return "at-target";
+    if (phase === Event.BUBBLING_PHASE) return "bubbling";
+    return "none";
+  }
+
+  function elementSummary(element) {
+    if (!element || element === window) return element === window ? "window" : null;
+    if (element === document) return "document";
+    if (element === document.documentElement) return "html";
+    if (!element.tagName) return String(element);
+    const id = element.id ? `#${element.id}` : "";
+    const classes = typeof element.className === "string" && element.className
+      ? `.${element.className.trim().replace(/\s+/g, ".")}`
+      : "";
+    return `${element.tagName.toLowerCase()}${id}${classes}`;
+  }
+
+  function rectSnapshot(rect) {
+    if (!rect) return null;
+    return {
+      left: round(rect.left, 2),
+      top: round(rect.top, 2),
+      width: round(rect.width, 2),
+      height: round(rect.height, 2),
+      right: round(rect.right, 2),
+      bottom: round(rect.bottom, 2),
+    };
   }
 
   function handleClick(event) {
@@ -3317,6 +3384,20 @@
     const handles = tracker.querySelectorAll("[data-tracker-resize-corner]");
     if (!handles.length) return;
     let resizing = null;
+    let updateLogCount = 0;
+    let observedPointerDown = null;
+
+    logTrackerResizeDiagnostic("bind", null, {
+      handleCount: handles.length,
+      trackerRect: rectSnapshot(tracker.getBoundingClientRect()),
+      handles: Array.from(handles).map((handle) => ({
+        corner: handle.dataset.trackerResizeCorner || null,
+        rect: rectSnapshot(handle.getBoundingClientRect()),
+        pointerEvents: window.getComputedStyle(handle).pointerEvents,
+        opacity: window.getComputedStyle(handle).opacity,
+        zIndex: window.getComputedStyle(handle).zIndex,
+      })),
+    });
 
     const removeResizeListeners = () => {
       document.removeEventListener("pointermove", updateResize, true);
@@ -3329,6 +3410,12 @@
     const finishResize = () => {
       if (!resizing) return;
       const { pointerId, handle } = resizing;
+      logTrackerResizeDiagnostic("finish", null, {
+        pointerId,
+        corner: handle.dataset.trackerResizeCorner || null,
+        currentScale: state.settings.trackerScale,
+        trackerRect: rectSnapshot(tracker.getBoundingClientRect()),
+      });
       resizing = null;
       removeResizeListeners();
       document.body.style.userSelect = "";
@@ -3353,6 +3440,9 @@
       if (!resizing) return;
       if (Number.isFinite(event.pointerId) && event.pointerId !== resizing.pointerId) return;
       if (event.buttons === 0) {
+        logTrackerResizeDiagnostic("pointermove-buttons-zero", event, {
+          activePointerId: resizing.pointerId,
+        });
         finishResize();
         return;
       }
@@ -3360,18 +3450,36 @@
       const distance = Math.hypot(event.clientX - resizing.anchor.x, event.clientY - resizing.anchor.y);
       const rawScale = resizing.startScale * (distance / Math.max(1, resizing.startDistance));
       const maxScale = getTrackerAnchorMaxScale(resizing.anchor);
-      setTrackerScale(tracker, Math.max(TRACKER_SCALE_MIN, Math.min(maxScale, rawScale)));
+      const nextScale = Math.max(TRACKER_SCALE_MIN, Math.min(maxScale, rawScale));
+      if (updateLogCount < 5 || updateLogCount % 20 === 0) {
+        logTrackerResizeDiagnostic("update", event, {
+          distance,
+          rawScale,
+          maxScale,
+          nextScale,
+          updateLogCount,
+        });
+      }
+      updateLogCount += 1;
+      setTrackerScale(tracker, nextScale);
     };
 
     const startResize = (event) => {
       const handle = event.target?.closest?.("[data-tracker-resize-corner]");
       if (!handle || !tracker.contains(handle) || event.button !== 0 || resizing) return;
+      if (observedPointerDown?.pointerId === event.pointerId) {
+        observedPointerDown.started = true;
+      }
+      logTrackerResizeDiagnostic("start-candidate", event, {
+        corner: handle.dataset.trackerResizeCorner || null,
+      });
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();
       const rect = tracker.getBoundingClientRect();
       const anchor = getTrackerScaleAnchor(handle.dataset.trackerResizeCorner, rect);
       if (!anchor) return;
+      updateLogCount = 0;
       tracker.style.transformOrigin = anchor.origin;
       positionTrackerForScaleAnchor(tracker, anchor);
       resizing = {
@@ -3381,6 +3489,13 @@
         startScale: getTrackerScale(),
         startDistance: Math.hypot(event.clientX - anchor.x, event.clientY - anchor.y),
       };
+      logTrackerResizeDiagnostic("start", event, {
+        corner: handle.dataset.trackerResizeCorner || null,
+        anchor,
+        startScale: resizing.startScale,
+        startDistance: resizing.startDistance,
+        trackerRectBeforePin: rectSnapshot(rect),
+      });
       handle.setPointerCapture?.(event.pointerId);
       document.addEventListener("pointermove", updateResize, true);
       document.addEventListener("pointerup", finishResize, true);
@@ -3390,6 +3505,28 @@
       document.body.style.userSelect = "none";
     };
 
+    const diagnoseRootPointerDown = (event) => {
+      const handle = event.target?.closest?.("[data-tracker-resize-corner]");
+      if (!handle || !tracker.contains(handle) || event.button !== 0) return;
+      observedPointerDown = {
+        pointerId: event.pointerId,
+        corner: handle.dataset.trackerResizeCorner || null,
+        started: false,
+      };
+      logTrackerResizeDiagnostic("root-pointerdown-observed", event, {
+        corner: observedPointerDown.corner,
+      });
+      window.setTimeout(() => {
+        if (observedPointerDown?.pointerId !== event.pointerId) return;
+        if (observedPointerDown.started) return;
+        logTrackerResizeDiagnostic("start-not-observed-after-root-pointerdown", event, {
+          corner: observedPointerDown.corner,
+          reason: "Root saw a resize handle pointerdown, but the tracker resize handler did not start on the same event.",
+        }, "warn");
+      }, 0);
+    };
+
+    root.addEventListener("pointerdown", diagnoseRootPointerDown, true);
     tracker.addEventListener("pointerdown", startResize, true);
     handles.forEach((handle) => {
       handle.addEventListener("lostpointercapture", finishResize);
