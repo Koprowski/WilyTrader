@@ -2379,8 +2379,8 @@
     const isEntry = kind === "avg_entry";
     return {
       color: isEntry ? "#22c55e" : "#ef4444",
-      lineWidth: 2,
-      lineStyle: "solid",
+      lineWidth: 1,
+      lineStyle: "dashed",
       labelText: `${isEntry ? "AVG ENTRY" : "AVG EXIT"} ${formatters.usd(price)}`,
       labelBackground: isEntry ? "rgba(34, 197, 94, 0.86)" : "rgba(239, 68, 68, 0.86)",
       showPrice: true,

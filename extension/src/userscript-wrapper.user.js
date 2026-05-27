@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WileyTrader Axiom Chart Bridge
 // @namespace    https://github.com/Koprowski/WilyTrader
-// @version      0.3.1
+// @version      0.3.4
 // @description  Draw WileyTrader average entry/exit lines as native TradingView chart shapes on axiom.trade.
 // @match        https://axiom.trade/*
 // @run-at       document-idle
@@ -16,15 +16,15 @@
   const IFRAME_ID_RE = /^tradingview_[a-f0-9]+$/i;
   const DEFAULT_ENTRY_STYLE = {
     color: "#22c55e",
-    lineWidth: 2,
-    lineStyle: "solid",
+    lineWidth: 1,
+    lineStyle: "dashed",
     labelText: "AVG ENTRY",
     showPrice: true,
   };
   const DEFAULT_EXIT_STYLE = {
     color: "#ef4444",
-    lineWidth: 2,
-    lineStyle: "solid",
+    lineWidth: 1,
+    lineStyle: "dashed",
     labelText: "AVG EXIT",
     showPrice: true,
   };
@@ -296,12 +296,12 @@
     function buildOverrides(style) {
       return {
         linecolor: style.color,
-        linewidth: style.lineWidth ?? 2,
+        linewidth: style.lineWidth ?? 1,
         linestyle: toTvLineStyle(style.lineStyle),
         showLabel: Boolean(style.labelText),
         text: style.labelText || "",
         showPrice: style.showPrice !== false,
-        horzLabelsAlign: "right",
+        horzLabelsAlign: "center",
         vertLabelsAlign: "middle",
         textcolor: "#ffffff",
         backgroundColor: style.labelBackground || style.color,
@@ -313,11 +313,13 @@
     function buildInternalProperties(style) {
       return {
         color: style.color,
-        linewidth: style.lineWidth ?? 2,
+        linewidth: style.lineWidth ?? 1,
         linestyle: toTvLineStyle(style.lineStyle),
         text: style.labelText || "",
         showLabel: Boolean(style.labelText),
         showPrice: style.showPrice !== false,
+        horzLabelsAlign: "center",
+        vertLabelsAlign: "middle",
         lock: true,
         disableSave: true,
       };

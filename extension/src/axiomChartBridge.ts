@@ -60,15 +60,15 @@ type BoundChart = {
 const IFRAME_ID_RE = /^tradingview_[a-f0-9]+$/i;
 const DEFAULT_ENTRY_STYLE: PriceLineStyle = {
   color: "#22c55e",
-  lineWidth: 2,
-  lineStyle: "solid",
+  lineWidth: 1,
+  lineStyle: "dashed",
   labelText: "AVG ENTRY",
   showPrice: true,
 };
 const DEFAULT_EXIT_STYLE: PriceLineStyle = {
   color: "#ef4444",
-  lineWidth: 2,
-  lineStyle: "solid",
+  lineWidth: 1,
+  lineStyle: "dashed",
   labelText: "AVG EXIT",
   showPrice: true,
 };
@@ -343,12 +343,12 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
   function buildOverrides(style: PriceLineStyle) {
     return {
       linecolor: style.color,
-      linewidth: style.lineWidth ?? 2,
+      linewidth: style.lineWidth ?? 1,
       linestyle: toTvLineStyle(style.lineStyle),
       showLabel: Boolean(style.labelText),
       text: style.labelText || "",
       showPrice: style.showPrice !== false,
-      horzLabelsAlign: "right",
+      horzLabelsAlign: "center",
       vertLabelsAlign: "middle",
       textcolor: "#ffffff",
       backgroundColor: style.labelBackground || style.color,
@@ -360,11 +360,13 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
   function buildInternalProperties(style: PriceLineStyle) {
     return {
       color: style.color,
-      linewidth: style.lineWidth ?? 2,
+      linewidth: style.lineWidth ?? 1,
       linestyle: toTvLineStyle(style.lineStyle),
       text: style.labelText || "",
       showLabel: Boolean(style.labelText),
       showPrice: style.showPrice !== false,
+      horzLabelsAlign: "center",
+      vertLabelsAlign: "middle",
       lock: true,
       disableSave: true,
     };
