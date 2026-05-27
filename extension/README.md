@@ -15,6 +15,10 @@ This extension is loaded directly from source. It is not approved by, packaged f
 
 Chrome may show developer-mode warnings for unpacked extensions. That is normal for a local, non-Web-Store extension. Keep Developer mode enabled, and click the extension's reload button on `chrome://extensions` after changing local files. The WilyTrader settings panel also has an **Open Extensions** button that opens the Chrome extension manager for reloads.
 
+## Update Notices
+
+WilyTrader can check the public GitHub manifest for the latest extension version. When the installed unpacked extension is behind, the panel shows an update notice with an **Open Extensions** button so the user can reload after pulling or downloading the updated files. This does not install anything automatically.
+
 ## Behavior
 
 - Shows the overlay only on Padre token pages and Axiom meme token pages (`https://axiom.trade/meme/...`).
@@ -22,7 +26,7 @@ Chrome may show developer-mode warnings for unpacked extensions. That is normal 
 - Uses only `chrome.storage.local`.
 - Does not connect to wallets.
 - Does not read seed phrases, private keys, wallet providers, or transactions.
-- Does not call any internet backend.
+- Does not call any trading backend. With update checks enabled, it fetches the public GitHub manifest to compare extension versions.
 - Keeps Snipalot localhost sync off by default.
 
 ## Ledger Export

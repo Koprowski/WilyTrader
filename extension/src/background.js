@@ -1,3 +1,5 @@
+const UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/Koprowski/WilyTrader/main/extension/manifest.json";
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message?.type) return false;
 
@@ -15,8 +17,43 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "WILYTRADER_CHECK_FOR_UPDATE") {
+    checkForUpdate()
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({ ok: false, error: error?.message || String(error) }));
+    return true;
+  }
+
   return false;
 });
+
+async function checkForUpdate() {
+  const installedVersion = chrome.runtime.getManifest().version;
+  const url = `${UPDATE_MANIFEST_URL}?t=${Date.now()}`;
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) throw new Error(`Update check failed: HTTP ${response.status}`);
+  const manifest = await response.json();
+  const latestVersion = String(manifest?.version || "");
+  if (!latestVersion) throw new Error("Update manifest did not include a version.");
+  return {
+    ok: true,
+    installedVersion,
+    latestVersion,
+    updateAvailable: compareVersions(installedVersion, latestVersion) < 0,
+    checkedAt: new Date().toISOString(),
+  };
+}
+
+function compareVersions(current, latest) {
+  const a = String(current || "").replace(/^v/i, "").split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const b = String(latest || "").replace(/^v/i, "").split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const length = Math.max(a.length, b.length);
+  for (let index = 0; index < length; index += 1) {
+    if ((a[index] || 0) < (b[index] || 0)) return -1;
+    if ((a[index] || 0) > (b[index] || 0)) return 1;
+  }
+  return 0;
+}
 
 function openExtensionManager() {
   return new Promise((resolve, reject) => {

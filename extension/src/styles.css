@@ -91,6 +91,35 @@
   gap: 4px;
 }
 
+.wt-update-notice {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  padding: 7px;
+  border: 1px solid rgba(47, 232, 189, 0.46);
+  border-radius: 6px;
+  background: rgba(14, 37, 34, 0.96);
+}
+
+.wt-update-notice[hidden] {
+  display: none;
+}
+
+.wt-update-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  color: #e9fff9;
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.wt-update-copy span {
+  color: #aee9dc;
+}
+
 .wt-trade-header {
   display: flex;
   align-items: center;

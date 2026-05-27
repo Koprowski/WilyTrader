@@ -63,6 +63,7 @@
     ["wily", "mem", "trader_state_v1"].join(""),
   ];
   const BRIDGE_BASE_URL = "http://127.0.0.1:17365/v1/wilytrader";
+  const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
   const MARKET_CAP_SUPPLY = 1_000_000_000;
   const DEFAULT_PRICES = { SOL: 190, BNB: 600 };
   const SOLANA_ADDRESS_PATTERN = /[1-9A-HJ-NP-Za-km-z]{32,44}/;
@@ -108,6 +109,7 @@
       bridgeEnabled: false,
       autoScreenshotOnTrade: true,
       fallbackDownloadsEnabled: true,
+      updateChecksEnabled: true,
     },
   };
 
@@ -121,6 +123,7 @@
     price: "wt-price",
     balance: "wt-balance",
     position: "wt-position",
+    updateNotice: "wt-update-notice",
     log: "wt-log",
     settingsModal: "wt-settings-modal",
     logModal: "wt-log-modal",
@@ -136,6 +139,15 @@
   let extensionContextValid = true;
   let lastSyncedExecutionId = null;
   let pulseQuickBuyBound = false;
+  let updateCheckTimerId = null;
+  let updateState = {
+    checking: false,
+    checkedAt: null,
+    installedVersion: "",
+    latestVersion: "",
+    updateAvailable: false,
+    error: null,
+  };
 
   const formatters = {
     native(value, chain, decimals = 4) {
@@ -169,6 +181,7 @@
     updateActiveToken();
     render();
     bindRouteWatcher();
+    startUpdateChecks();
     if (isOverlayVisibleRoute()) void syncBridge("startup");
   }
 
@@ -642,6 +655,13 @@
           </div>
         </header>
         <div class="wt-body">
+          <div id="${selectors.updateNotice}" class="wt-update-notice" hidden>
+            <div class="wt-update-copy">
+              <strong>Update available</strong>
+              <span data-update-detail></span>
+            </div>
+            <button type="button" class="wt-button" data-action="open-extension-manager">Open Extensions</button>
+          </div>
           <div class="wt-section">
             <div class="wt-token-row">
               <div id="${selectors.token}" class="wt-token"></div>
@@ -762,8 +782,13 @@
               <input type="checkbox" data-setting="fallbackDownloadsEnabled" />
               <span>If Snipalot is unavailable, save fallback screenshots to Chrome Downloads</span>
             </label>
+            <label class="wt-check-row">
+              <input type="checkbox" data-setting="updateChecksEnabled" />
+              <span>Check GitHub for WilyTrader extension updates</span>
+            </label>
             <div class="wt-settings-note">Snipalot saves to the active trade session folder. The Chrome fallback saves under Downloads/WilyTrader and crops to the largest visible chart when possible. After installing an update, open Extensions and reload WilyTrader.</div>
             <div class="wt-button-row">
+              <button class="wt-button wt-button-secondary" data-action="check-for-update">Check Update</button>
               <button class="wt-button wt-button-secondary" data-action="open-extension-manager">Open Extensions</button>
               <button class="wt-button" data-action="reset-settings">Defaults</button>
               <button class="wt-button" data-action="save-settings">Save</button>
@@ -935,6 +960,8 @@
       runTask(resetSettingsToDefaults());
     } else if (action === "open-extension-manager") {
       runTask(openExtensionManager());
+    } else if (action === "check-for-update") {
+      runTask(checkForExtensionUpdate("manual"));
     } else if (action === "view-log") {
       openLogModal();
     } else if (action === "add-note") {
@@ -1235,6 +1262,7 @@
     root.querySelector("[data-setting='bridgeEnabled']").checked = Boolean(state.settings.bridgeEnabled);
     root.querySelector("[data-setting='autoScreenshotOnTrade']").checked = Boolean(state.settings.autoScreenshotOnTrade);
     root.querySelector("[data-setting='fallbackDownloadsEnabled']").checked = Boolean(state.settings.fallbackDownloadsEnabled);
+    root.querySelector("[data-setting='updateChecksEnabled']").checked = Boolean(state.settings.updateChecksEnabled);
     modal.classList.add("wt-modal-open");
     modal.setAttribute("aria-hidden", "false");
   }
@@ -1278,6 +1306,7 @@
       bridgeEnabled: Boolean(root.querySelector("[data-setting='bridgeEnabled']")?.checked),
       autoScreenshotOnTrade: Boolean(root.querySelector("[data-setting='autoScreenshotOnTrade']")?.checked),
       fallbackDownloadsEnabled: Boolean(root.querySelector("[data-setting='fallbackDownloadsEnabled']")?.checked),
+      updateChecksEnabled: Boolean(root.querySelector("[data-setting='updateChecksEnabled']")?.checked),
     };
 
     for (const key of numericKeys) {
@@ -1289,6 +1318,7 @@
     next.buyAmounts = normalizeBuyAmounts(next.buyAmounts);
     state.settings = next;
     await persistAndSync("settings");
+    if (state.settings.updateChecksEnabled) runTask(checkForExtensionUpdate("settings"));
     closeModals();
     render();
     setStatus("Settings saved.");
@@ -1301,6 +1331,7 @@
       bridgeEnabled: state.settings.bridgeEnabled,
       autoScreenshotOnTrade: state.settings.autoScreenshotOnTrade,
       fallbackDownloadsEnabled: state.settings.fallbackDownloadsEnabled,
+      updateChecksEnabled: state.settings.updateChecksEnabled,
     };
     await persistAndSync("settings-reset");
     openSettingsModal();
@@ -1785,6 +1816,8 @@
     const sellAssetsEl = root.querySelector("[data-sell-assets]");
     const logEl = root.querySelector(`#${selectors.log}`);
 
+    renderUpdateNotice();
+
     const token = activeToken;
     const position = token.key ? state.positions[token.key] : null;
     const summary = position ? buildPositionSummary(position.positionId, "open") : findLatestTokenPositionSummary(token);
@@ -1860,6 +1893,21 @@
       });
     }
     syncAxiomNativeChartLines(summary, token, position);
+  }
+
+  function renderUpdateNotice() {
+    const notice = root?.querySelector(`#${selectors.updateNotice}`);
+    if (!notice) return;
+    const shouldShow = Boolean(state?.settings?.updateChecksEnabled && updateState.updateAvailable);
+    notice.hidden = !shouldShow;
+    if (!shouldShow) return;
+
+    const detail = notice.querySelector("[data-update-detail]");
+    if (detail) {
+      const current = updateState.installedVersion || "current";
+      const latest = updateState.latestVersion || "latest";
+      detail.textContent = `Installed ${current}; latest ${latest}. Reload the unpacked extension after updating files.`;
+    }
   }
 
   function syncAxiomNativeChartLines(summary, token, position) {
@@ -2110,6 +2158,49 @@
     const response = await sendRuntimeMessage({ type: "WILYTRADER_OPEN_EXTENSION_MANAGER" });
     if (response?.ok) setStatus("Opened Chrome Extensions. Click Reload on WilyTrader after pulling updates.");
     else setStatus("Could not open Chrome Extensions. Go to chrome://extensions manually.");
+  }
+
+  function startUpdateChecks() {
+    if (updateCheckTimerId !== null) return;
+    window.setTimeout(() => runTask(checkForExtensionUpdate("startup")), 1500);
+    updateCheckTimerId = window.setInterval(() => runTask(checkForExtensionUpdate("scheduled")), UPDATE_CHECK_INTERVAL_MS);
+  }
+
+  async function checkForExtensionUpdate(reason = "scheduled") {
+    if (!state?.settings?.updateChecksEnabled) {
+      updateState = { ...updateState, checking: false, updateAvailable: false, error: null };
+      renderUpdateNotice();
+      if (reason === "manual") setStatus("Update checks are disabled in settings.");
+      return;
+    }
+    if (updateState.checking) return;
+
+    updateState = { ...updateState, checking: true, error: null };
+    renderUpdateNotice();
+    const response = await sendRuntimeMessage({ type: "WILYTRADER_CHECK_FOR_UPDATE" });
+    if (response?.ok) {
+      updateState = {
+        checking: false,
+        checkedAt: response.checkedAt || new Date().toISOString(),
+        installedVersion: response.installedVersion || "",
+        latestVersion: response.latestVersion || "",
+        updateAvailable: Boolean(response.updateAvailable),
+        error: null,
+      };
+      if (reason === "manual") {
+        setStatus(updateState.updateAvailable ? `Update available: ${updateState.latestVersion}.` : "WilyTrader is up to date.");
+      }
+    } else {
+      updateState = {
+        ...updateState,
+        checking: false,
+        checkedAt: new Date().toISOString(),
+        updateAvailable: false,
+        error: response?.error || "Update check failed.",
+      };
+      if (reason === "manual") setStatus("Update check failed.");
+    }
+    renderUpdateNotice();
   }
 
   function sendRuntimeMessage(message) {
