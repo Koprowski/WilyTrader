@@ -43,3 +43,19 @@ Canonical policy: `E:\Apps\mission-control\resources\repo-change-traceability.md
   whenever Mission Control needs to be updated.
 - Keep detailed implementation work in this repo or GitHub Issues; keep Mission
   Control compact and linked to the repo artifact.
+
+## Recent handoff notes
+
+- **Axiom token names for Snipalot trade logs (local branch):** WilyTrader now
+  tries to read Axiom chart/header text such as `Save Snuggles/USD on Pump V1`
+  before falling back to a shortened mint address, and
+  `mockapeCompatibleTrades` now includes `entryTimestamp`, `firstEntryAt`,
+  `timeInTradeSeconds`, and `tokenAddress` so Snipalot can generate actual
+  entry times from the execution ledger.
+- **P&L tracker border alignment:** The floating P&L tracker now uses the same
+  `1.6px solid #1f5f93` blue border and matching blue outer ring style as the
+  main WilyTrader panel.
+- **Version:** Extension manifest bumped to `0.3.16`.
+- **Validation:** `node --check E:\Apps\wilytrader\extension\src\content.js`
+  passed. The pre-existing local edit to session P&L basis in
+  `extension/src/content.js` was preserved.

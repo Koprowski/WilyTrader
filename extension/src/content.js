@@ -735,6 +735,11 @@
   }
 
   function detectTokenName(address, adapter) {
+    if (adapter?.id === "axiom") {
+      const axiomChartName = detectAxiomChartTokenName(address);
+      if (axiomChartName) return axiomChartName;
+    }
+
     const heading = queryPageSelector(
       "h1.MuiTypography-h1, h1, h2, [data-testid*='token-name' i], [class*='token-name' i], [class*='pair-name' i], [class*='asset-name' i]",
     );
@@ -747,6 +752,31 @@
     if (fromTitle && !fromTitle.toLowerCase().includes(adapter?.id || "")) return fromTitle;
 
     return address ? shortenAddress(address) : "Unknown token";
+  }
+
+  function detectAxiomChartTokenName(address) {
+    const shortened = shortenAddress(address);
+    for (const text of getPageTextCandidates(2000)) {
+      if (!text || text.length > 240) continue;
+      if (findTokenAddress(text) || (shortened && text.includes(shortened))) continue;
+
+      const pairMatch = text.match(/\b([A-Za-z][A-Za-z0-9 ._'’-]{1,80}?)\/(?:USD|SOL)\s+on\b/i);
+      const pairName = cleanTokenDisplayName(pairMatch?.[1]);
+      if (pairName) return pairName;
+
+      const headerMatch = text.match(/^[A-Z0-9$]{2,16}\s+([A-Za-z][A-Za-z0-9 ._'’-]{1,80})(?:\s+\d+[smhdw]\b|\s+\$|\s+Price\b|$)/);
+      const headerName = cleanTokenDisplayName(headerMatch?.[1]);
+      if (headerName) return headerName;
+    }
+    return null;
+  }
+
+  function cleanTokenDisplayName(value) {
+    const text = cleanText(value);
+    if (!text || text.length < 2 || text.length > 80) return null;
+    if (/^(price|market|chart|trade|token|usd|sol)$/i.test(text)) return null;
+    if (!/[A-Za-z]/.test(text)) return null;
+    return text;
   }
 
   function detectMarketCap() {
@@ -2376,6 +2406,10 @@
         solInvested: position.investedNative + position.buyFeesNative,
         solReceived: position.netReceivedNative,
         timestamp: Date.parse(position.finalExitAt),
+        entryTimestamp: Date.parse(position.firstEntryAt),
+        firstEntryAt: position.firstEntryAt,
+        timeInTradeSeconds: position.timeInTradeSeconds,
+        tokenAddress: position.tokenAddress,
         tokenName: position.tokenName,
       }));
   }
@@ -2577,7 +2611,7 @@
     const buyFeesNative = sum(buys, "feeNative");
     const realizedPnlNative = sum(sells, "pnlNative") - buyFeesNative;
     const sessionPnlNative = realizedPnlNative + markedOpenPnlNative;
-    const sessionBasisNative = sumFirst(buys, ["solInvestedNative", "grossNative"]) + buyFeesNative;
+    const sessionBasisNative = portfolioNative - sessionPnlNative;
     const sessionPnlPct = sessionBasisNative > 0 ? (sessionPnlNative / sessionBasisNative) * 100 : 0;
 
     return {
