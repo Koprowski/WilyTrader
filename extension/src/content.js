@@ -152,6 +152,7 @@
     settingsModal: "wt-settings-modal",
     logModal: "wt-log-modal",
     addModal: "wt-add-modal",
+    pnlModal: "wt-pnl-modal",
   };
 
   let state = null;
@@ -889,6 +890,7 @@
               <div class="wt-mini-stats">
                 <span id="${selectors.balance}"></span>
                 <span id="${selectors.position}"></span>
+                <button type="button" class="wt-mini-pnl-button" data-action="view-closed-pnl" title="Closed trade P&L" aria-label="Closed trade P&L" hidden>P&amp;L</button>
               </div>
             </div>
           </div>
@@ -1067,6 +1069,20 @@
             </div>
             <div class="wt-ledger-summary" data-ledger-summary></div>
             <div class="wt-log-full" data-log-full></div>
+          </div>
+        </section>
+      </div>
+      <div id="${selectors.pnlModal}" class="wt-modal" aria-hidden="true">
+        <section class="wt-modal-panel wt-pnl-panel" aria-label="WilyTrader closed trade P&L">
+          <header class="wt-modal-header">
+            <div>
+              <div class="wt-title">Closed P&amp;L</div>
+              <div class="wt-muted" data-pnl-token></div>
+            </div>
+            <button class="wt-icon-btn" data-action="close-modal" title="Close" aria-label="Close">x</button>
+          </header>
+          <div class="wt-modal-body">
+            <div class="wt-closed-pnl" data-closed-pnl></div>
           </div>
         </section>
       </div>
@@ -1279,6 +1295,8 @@
       runTask(checkForExtensionUpdate("manual"));
     } else if (action === "view-log") {
       openLogModal();
+    } else if (action === "view-closed-pnl") {
+      openClosedPnlModal();
     } else if (action === "add-note") {
       runTask(addNote());
     } else if (action === "new-session") {
@@ -1875,6 +1893,22 @@
   function openLogModal() {
     renderFullLog();
     const modal = root.querySelector(`#${selectors.logModal}`);
+    if (!modal) return;
+    modal.classList.add("wt-modal-open");
+    modal.setAttribute("aria-hidden", "false");
+    refreshAxiomPulseQuickBuyLayer();
+  }
+
+  function openClosedPnlModal() {
+    updateActiveToken();
+    const summary = findLatestClosedTokenPositionSummary(activeToken);
+    if (!summary) {
+      setStatus("No completed P&L for this token yet.");
+      render();
+      return;
+    }
+    renderClosedPnl(summary);
+    const modal = root.querySelector(`#${selectors.pnlModal}`);
     if (!modal) return;
     modal.classList.add("wt-modal-open");
     modal.setAttribute("aria-hidden", "false");
@@ -2487,17 +2521,31 @@
     const summary = position ? buildPositionSummary(position.positionId, "open") : findLatestTokenPositionSummary(token);
     const chartSummary = buildChartArtifactSummary(summary);
     const positionPnl = position ? calculateMarkedPositionMetrics(position, token) : null;
+    const closedSummary = findLatestClosedTokenPositionSummary(token);
+    const displayedPnl = positionPnl || closedSummary ? {
+      totalPnlNative: positionPnl?.totalPnlNative ?? closedSummary.pnlPostFeeNative,
+      totalPnlPct: positionPnl?.totalPnlPct ?? closedSummary.pnlPct,
+    } : null;
+    const pnlButton = root.querySelector("[data-action='view-closed-pnl']");
 
     tokenEl.textContent = token.address
       ? `${token.name} (${shortenAddress(token.address)})`
       : "Open a supported token page";
     balanceEl.textContent = `Bal ${formatters.compactNative(state.balances[token.chain] || 0, token.chain)}`;
-    positionEl.classList.toggle("wt-pnl-up", Boolean(positionPnl) && positionPnl.totalPnlNative > 0);
-    positionEl.classList.toggle("wt-pnl-down", Boolean(positionPnl) && positionPnl.totalPnlNative < 0);
-    positionEl.classList.toggle("wt-pnl-flat", Boolean(positionPnl) && positionPnl.totalPnlNative === 0);
+    positionEl.classList.toggle("wt-pnl-up", Boolean(displayedPnl) && displayedPnl.totalPnlNative > 0);
+    positionEl.classList.toggle("wt-pnl-down", Boolean(displayedPnl) && displayedPnl.totalPnlNative < 0);
+    positionEl.classList.toggle("wt-pnl-flat", Boolean(displayedPnl) && displayedPnl.totalPnlNative === 0);
     positionEl.textContent = position
       ? `Pos ${formatters.native(position.costNative, token.chain)} ${formatters.pct(positionPnl.totalPnlPct)}`
+      : closedSummary
+        ? `Closed ${formatters.pct(closedSummary.pnlPct)}`
       : "Pos none";
+    positionEl.title = position
+      ? `Open P&L ${formatters.signedNative(positionPnl.totalPnlNative, token.chain)} (${formatters.pct(positionPnl.totalPnlPct)})`
+      : closedSummary
+        ? `Closed P&L ${formatters.signedNative(closedSummary.pnlPostFeeNative, closedSummary.chain)} (${formatters.pct(closedSummary.pnlPct)})`
+      : "";
+    if (pnlButton) pnlButton.hidden = !closedSummary;
     if (buyChainEl) buyChainEl.textContent = token.chain;
     if (sellAssetsEl) {
       sellAssetsEl.textContent = position
@@ -2665,6 +2713,13 @@
       .reverse()
       .find((execution) => execution.tokenAddress === token.address && execution.chain === token.chain);
     return relatedExecution ? buildPositionSummary(relatedExecution.positionId) : null;
+  }
+
+  function findLatestClosedTokenPositionSummary(token) {
+    if (!token?.key) return null;
+    return state.closedPositions
+      .filter((position) => position.status === "closed" && position.finalExitAt && position.tokenAddress === token.address && position.chain === token.chain)
+      .sort((a, b) => Date.parse(b.finalExitAt || b.firstEntryAt || "") - Date.parse(a.finalExitAt || a.firstEntryAt || ""))[0] || null;
   }
 
   function buildChartArtifactSummary(summary) {
@@ -2876,6 +2931,128 @@
         summaryEl.appendChild(item);
       });
     }
+  }
+
+  function renderClosedPnl(summary) {
+    const container = root.querySelector("[data-closed-pnl]");
+    const tokenEl = root.querySelector("[data-pnl-token]");
+    if (!container || !summary) return;
+
+    const chain = summary.chain || activeToken?.chain || "SOL";
+    const pnlNative = Number(summary.pnlPostFeeNative || 0);
+    const directionClass = getPnlDirectionClass(pnlNative);
+    const executions = getSummaryExecutions(summary);
+    const sellLegs = executions.filter((execution) => execution.side === "sell");
+
+    if (tokenEl) {
+      tokenEl.textContent = [
+        summary.tokenName || activeToken?.name || shortenAddress(summary.tokenAddress),
+        summary.finalExitAt ? new Date(summary.finalExitAt).toLocaleString() : "",
+      ].filter(Boolean).join(" - ");
+    }
+
+    container.innerHTML = "";
+    const hero = document.createElement("section");
+    hero.className = `wt-pnl-hero ${directionClass}`;
+
+    const pnlValue = document.createElement("strong");
+    pnlValue.textContent = formatters.signedNative(pnlNative, chain, 4);
+    hero.appendChild(pnlValue);
+
+    const pnlMeta = document.createElement("span");
+    pnlMeta.textContent = `${formatters.pct(summary.pnlPct || 0)} post-fee P&L`;
+    hero.appendChild(pnlMeta);
+    container.appendChild(hero);
+
+    const stats = document.createElement("div");
+    stats.className = "wt-pnl-stats";
+    [
+      ["Bought", formatters.native(summary.investedNative || 0, chain, 4)],
+      ["Sold", formatters.native(summary.netReceivedNative || 0, chain, 4)],
+      ["Hold Time", formatClosedPositionHoldTime(summary)],
+      ["Trades", `${summary.buyCount || 0} buys / ${summary.sellCount || 0} sells`],
+    ].forEach(([label, value]) => stats.appendChild(createPnlStat(label, value)));
+    container.appendChild(stats);
+
+    const title = document.createElement("div");
+    title.className = "wt-pnl-subtitle";
+    title.textContent = "Sell Leg P&L";
+    container.appendChild(title);
+
+    const legList = document.createElement("div");
+    legList.className = "wt-pnl-leg-list";
+    if (sellLegs.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "wt-muted";
+      empty.textContent = "No sell legs recorded for this position.";
+      legList.appendChild(empty);
+    } else {
+      sellLegs.forEach((execution, index) => {
+        legList.appendChild(createSellLegPnlRow(execution, index, chain));
+      });
+    }
+    container.appendChild(legList);
+  }
+
+  function createPnlStat(label, value) {
+    const item = document.createElement("div");
+    item.className = "wt-pnl-stat";
+    const labelEl = document.createElement("span");
+    labelEl.textContent = label;
+    const valueEl = document.createElement("strong");
+    valueEl.textContent = value;
+    item.append(labelEl, valueEl);
+    return item;
+  }
+
+  function createSellLegPnlRow(execution, index, chain) {
+    const pnlNative = Number(execution.pnlNative || 0);
+    const row = document.createElement("div");
+    row.className = `wt-pnl-leg ${getPnlDirectionClass(pnlNative)}`;
+
+    const header = document.createElement("div");
+    header.className = "wt-pnl-leg-header";
+    const title = document.createElement("strong");
+    title.textContent = `Sell ${index + 1}${execution.requestedSellPct ? ` - ${Number(execution.requestedSellPct).toFixed(0)}%` : ""}`;
+    const pnl = document.createElement("span");
+    pnl.textContent = `${formatters.signedNative(pnlNative, chain, 4)} (${formatters.pct(execution.pnlPct || 0)})`;
+    header.append(title, pnl);
+
+    const details = document.createElement("div");
+    details.className = "wt-pnl-leg-details";
+    [
+      ["Sold", formatters.native(execution.netNative || execution.solReceivedNative || 0, chain, 4)],
+      ["Basis", formatters.native(execution.costBasisNative || 0, chain, 4)],
+      ["Tokens", round(execution.tokenAmount || 0, 6).toLocaleString()],
+      ["Time", execution.timestamp ? new Date(execution.timestamp).toLocaleTimeString() : "-"],
+    ].forEach(([label, value]) => details.appendChild(createPnlStat(label, value)));
+
+    row.append(header, details);
+    return row;
+  }
+
+  function getSummaryExecutions(summary) {
+    const executionIds = new Set(summary?.executionIds || []);
+    return state.executions
+      .filter((execution) => executionIds.size > 0 ? executionIds.has(execution.id) : execution.positionId === summary.id)
+      .sort((a, b) => getExecutionTimestampMs(a) - getExecutionTimestampMs(b));
+  }
+
+  function getPnlDirectionClass(value) {
+    const numeric = Number(value || 0);
+    if (numeric > 0) return "wt-pnl-up";
+    if (numeric < 0) return "wt-pnl-down";
+    return "wt-pnl-flat";
+  }
+
+  function formatClosedPositionHoldTime(summary) {
+    if (Number.isFinite(Number(summary?.timeInTradeSeconds))) {
+      return formatDuration(Number(summary.timeInTradeSeconds) * 1000);
+    }
+    const firstEntryMs = Date.parse(summary?.firstEntryAt || "");
+    const finalExitMs = Date.parse(summary?.finalExitAt || "");
+    if (!Number.isFinite(firstEntryMs) || !Number.isFinite(finalExitMs)) return "-";
+    return formatDuration(finalExitMs - firstEntryMs);
   }
 
   function buildCurrentSessionSummary() {
