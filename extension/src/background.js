@@ -1,10 +1,40 @@
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!message || message.type !== "WILYTRADER_SAVE_FALLBACK") return false;
-  saveFallbackArtifacts(message, sender)
-    .then((result) => sendResponse(result))
-    .catch((error) => sendResponse({ ok: false, error: error?.message || String(error) }));
-  return true;
+  if (!message?.type) return false;
+
+  if (message.type === "WILYTRADER_SAVE_FALLBACK") {
+    saveFallbackArtifacts(message, sender)
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({ ok: false, error: error?.message || String(error) }));
+    return true;
+  }
+
+  if (message.type === "WILYTRADER_OPEN_EXTENSION_MANAGER") {
+    openExtensionManager()
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({ ok: false, error: error?.message || String(error) }));
+    return true;
+  }
+
+  return false;
 });
+
+function openExtensionManager() {
+  return new Promise((resolve, reject) => {
+    const extensionUrl = `chrome://extensions/?id=${chrome.runtime.id}`;
+    chrome.tabs.create({ url: extensionUrl }, (tab) => {
+      const error = chrome.runtime.lastError;
+      if (error) {
+        chrome.tabs.create({ url: "chrome://extensions/" }, (fallbackTab) => {
+          const fallbackError = chrome.runtime.lastError;
+          if (fallbackError) reject(new Error(fallbackError.message));
+          else resolve({ ok: true, url: "chrome://extensions/", tabId: fallbackTab?.id || null });
+        });
+        return;
+      }
+      resolve({ ok: true, url: extensionUrl, tabId: tab?.id || null });
+    });
+  });
+}
 
 async function saveFallbackArtifacts(message, sender) {
   const payload = message.payload || {};

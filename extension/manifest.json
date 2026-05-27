@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "WilyTrader",
-  "version": "0.2.2",
+  "version": "0.2.4",
   "description": "Local-only paper trading overlay for Padre.gg and Axiom with execution-ledger export.",
   "permissions": ["storage", "downloads"],
   "host_permissions": [
@@ -18,6 +18,12 @@
       "css": ["src/styles.css"],
       "js": ["src/content.js"],
       "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["src/userscript-wrapper.user.js"],
+      "matches": ["https://axiom.trade/*"]
     }
   ]
 }

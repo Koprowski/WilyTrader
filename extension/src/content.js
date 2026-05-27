@@ -121,7 +121,6 @@
     price: "wt-price",
     balance: "wt-balance",
     position: "wt-position",
-    chartLayer: "wt-chart-layer",
     log: "wt-log",
     settingsModal: "wt-settings-modal",
     logModal: "wt-log-modal",
@@ -136,7 +135,7 @@
   let tradeInFlight = false;
   let extensionContextValid = true;
   let lastSyncedExecutionId = null;
-  let chartLineRefreshId = null;
+  let pulseQuickBuyBound = false;
 
   const formatters = {
     native(value, chain, decimals = 4) {
@@ -165,6 +164,7 @@
 
   async function initialize() {
     state = await loadState();
+    injectAxiomChartBridgeScript();
     injectPanel();
     updateActiveToken();
     render();
@@ -416,6 +416,11 @@
     return false;
   }
 
+  function isAxiomPulseRoute(url = new URL(window.location.href)) {
+    const adapter = getPlatformAdapter(url.hostname);
+    return adapter?.id === "axiom" && normalizePathname(url.pathname).startsWith("/pulse");
+  }
+
   function isAxiomMemeRoute(url) {
     const path = normalizePathname(url.pathname);
     if (path.startsWith("/meme/")) return true;
@@ -440,7 +445,7 @@
     root.setAttribute("aria-hidden", visible ? "false" : "true");
     if (!visible) {
       closeModals();
-      clearChartLayer(root.querySelector(`#${selectors.chartLayer}`));
+      postAxiomChartBridgeMessage({ op: "clearAll" });
     }
     return visible;
   }
@@ -460,7 +465,7 @@
     };
   }
 
-  function buildDetectedToken(adapter, { address, chain = "SOL", platformChain = "solana", name, marketCap }) {
+  function buildDetectedToken(adapter, { address, chain = "SOL", platformChain = "solana", name, marketCap, url = window.location.href }) {
     const unitPriceUsd = marketCap ? marketCap / MARKET_CAP_SUPPLY : null;
     const chainUsd = DEFAULT_PRICES[chain] || 1;
     const unitPriceNative = unitPriceUsd ? unitPriceUsd / chainUsd : null;
@@ -478,7 +483,7 @@
       marketCap,
       unitPriceUsd,
       unitPriceNative,
-      url: window.location.href,
+      url,
     };
   }
 
@@ -579,7 +584,7 @@
   }
 
   function parseCompactNumber(value, suffix = "") {
-    const parsed = Number.parseFloat(value);
+    const parsed = Number.parseFloat(String(value || "").replace(/,/g, ""));
     if (!Number.isFinite(parsed)) return null;
     const multipliers = { K: 1_000, M: 1_000_000, B: 1_000_000_000 };
     return parsed * (multipliers[String(suffix).toUpperCase()] || 1);
@@ -613,6 +618,8 @@
   function injectPanel() {
     if (document.getElementById(selectors.root)) {
       root = document.getElementById(selectors.root);
+      injectAxiomChartBridgeScript();
+      bindAxiomPulseQuickBuy();
       return;
     }
 
@@ -690,7 +697,6 @@
           </div>
         </div>
       </section>
-      <div id="${selectors.chartLayer}" class="wt-chart-layer" aria-hidden="true"></div>
       <div id="${selectors.settingsModal}" class="wt-modal" aria-hidden="true">
         <section class="wt-modal-panel" aria-label="WilyTrader settings">
           <header class="wt-modal-header">
@@ -756,8 +762,9 @@
               <input type="checkbox" data-setting="fallbackDownloadsEnabled" />
               <span>If Snipalot is unavailable, save fallback screenshots to Chrome Downloads</span>
             </label>
-            <div class="wt-settings-note">Snipalot saves to the active trade session folder. The Chrome fallback saves under Downloads/WilyTrader and crops to the largest visible chart when possible.</div>
+            <div class="wt-settings-note">Snipalot saves to the active trade session folder. The Chrome fallback saves under Downloads/WilyTrader and crops to the largest visible chart when possible. After installing an update, open Extensions and reload WilyTrader.</div>
             <div class="wt-button-row">
+              <button class="wt-button wt-button-secondary" data-action="open-extension-manager">Open Extensions</button>
               <button class="wt-button" data-action="reset-settings">Defaults</button>
               <button class="wt-button" data-action="save-settings">Save</button>
             </div>
@@ -812,12 +819,44 @@
     root.addEventListener("change", handleChange);
     window.addEventListener("unhandledrejection", handleUnhandledRejection);
     window.addEventListener("error", handleWindowError);
-    window.addEventListener("resize", () => renderTradeChartLines());
-    window.addEventListener("scroll", () => renderTradeChartLines(), true);
+    window.addEventListener("message", handleAxiomChartBridgeEvent);
+    bindAxiomPulseQuickBuy();
     const panel = root.querySelector(`.${selectors.panel}`);
     applyPanelPosition(panel);
     makeDraggable(root.querySelector(".wt-header"), panel);
-    if (!chartLineRefreshId) chartLineRefreshId = window.setInterval(renderTradeChartLines, 1000);
+  }
+
+  function injectAxiomChartBridgeScript() {
+    if (getPlatformAdapter(window.location.hostname)?.id !== "axiom") return;
+    if (document.getElementById("wt-axiom-chart-bridge-script")) return;
+    try {
+      const runtime = chrome?.runtime;
+      if (!runtime?.getURL) return;
+      const script = document.createElement("script");
+      script.id = "wt-axiom-chart-bridge-script";
+      script.src = runtime.getURL("src/userscript-wrapper.user.js");
+      script.async = false;
+      (document.head || document.documentElement).appendChild(script);
+    } catch (error) {
+      console.debug("[WilyTrader] Axiom chart bridge injection skipped.", error);
+    }
+  }
+
+  function handleAxiomChartBridgeEvent(event) {
+    if (event.source !== window || event.origin !== window.location.origin) return;
+    const data = event.data || {};
+    if (data.source !== "wiley-chart-bridge") return;
+    if (data.event === "chartRebound" || data.event === "symbolChange") {
+      injectAxiomChartBridgeScript();
+      render();
+    }
+  }
+
+  function bindAxiomPulseQuickBuy() {
+    if (pulseQuickBuyBound) return;
+    pulseQuickBuyBound = true;
+    document.addEventListener("pointerdown", handleAxiomPulseQuickBuyPointerDown, true);
+    document.addEventListener("click", handleAxiomPulseQuickBuyClick, true);
   }
 
   function handleUnhandledRejection(event) {
@@ -894,6 +933,8 @@
       runTask(saveSettingsFromModal());
     } else if (action === "reset-settings") {
       runTask(resetSettingsToDefaults());
+    } else if (action === "open-extension-manager") {
+      runTask(openExtensionManager());
     } else if (action === "view-log") {
       openLogModal();
     } else if (action === "add-note") {
@@ -911,6 +952,214 @@
     } else if (action === "toggle") {
       togglePanel();
     }
+  }
+
+  function handleAxiomPulseQuickBuyPointerDown(event) {
+    if (!isPrimaryPointerEvent(event)) return;
+    const quickBuyBox = findAxiomPulseQuickBuyBox(event.target);
+    if (!quickBuyBox) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+  }
+
+  function handleAxiomPulseQuickBuyClick(event) {
+    if (event.button !== undefined && event.button !== 0) return;
+    const quickBuyBox = findAxiomPulseQuickBuyBox(event.target);
+    if (!quickBuyBox) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+
+    const token = detectAxiomPulseQuickBuyToken(quickBuyBox);
+    if (!token?.key) {
+      flashAxiomPulseQuickBuyBox(quickBuyBox, "wt-axiom-pulse-quick-buy-error", 900);
+      setStatus("Pulse quick buy could not find that token address.");
+      return;
+    }
+    if (!token.unitPriceNative) {
+      flashAxiomPulseQuickBuyBox(quickBuyBox, "wt-axiom-pulse-quick-buy-error", 900);
+      setStatus("Pulse quick buy needs the row market cap to load.");
+      return;
+    }
+
+    quickBuyBox.classList.add("wt-axiom-pulse-quick-buy-active");
+    runTask(
+      buy(getDefaultBuyAmount(), token, {
+        resolveLatestToken: () => {
+          const refreshed = detectAxiomPulseQuickBuyToken(quickBuyBox);
+          return refreshed?.unitPriceNative ? refreshed : token;
+        },
+      }).finally(() => {
+        window.setTimeout(() => {
+          quickBuyBox.classList.remove("wt-axiom-pulse-quick-buy-active");
+        }, 450);
+      }),
+    );
+  }
+
+  function isPrimaryPointerEvent(event) {
+    return event.button === undefined || event.button === 0;
+  }
+
+  function findAxiomPulseQuickBuyBox(target) {
+    if (!isAxiomPulseRoute()) return null;
+    if (!(target instanceof Element) || root?.contains(target)) return null;
+
+    let element = target;
+    for (let depth = 0; element && depth < 8; depth += 1, element = element.parentElement) {
+      if (root?.contains(element)) return null;
+      if (isAxiomPulseQuickBuyBoxElement(element)) return element;
+    }
+    return null;
+  }
+
+  function isAxiomPulseQuickBuyBoxElement(element) {
+    const text = cleanText(element.textContent);
+    if (!/^\d+(?:\.\d+)?\s*SOL$/i.test(text)) return false;
+
+    const rect = element.getBoundingClientRect();
+    if (!rect || rect.width < 105 || rect.width > 360 || rect.height < 48 || rect.height > 180) return false;
+    if (rect.right < 0 || rect.left > window.innerWidth || rect.bottom < 0 || rect.top > window.innerHeight) return false;
+
+    const style = window.getComputedStyle(element);
+    if (style.visibility === "hidden" || style.display === "none" || Number(style.opacity) === 0) return false;
+    const classAndStyle = [
+      element.getAttribute("class") || "",
+      element.getAttribute("style") || "",
+      style.boxShadow,
+      style.backgroundColor,
+    ].join(" ");
+    const hasAxiomBlueButtonStyle = /primaryBlue/i.test(classAndStyle) || /82,\s*111,\s*255/.test(classAndStyle);
+    return style.cursor === "pointer" && (hasAxiomBlueButtonStyle || element.tagName === "BUTTON");
+  }
+
+  function detectAxiomPulseQuickBuyToken(quickBuyBox) {
+    const adapter = getPlatformAdapter(window.location.hostname);
+    if (!adapter || adapter.id !== "axiom") return null;
+
+    const row = findAxiomPulseTokenRow(quickBuyBox);
+    const address = findAxiomPulseTokenAddress(row || quickBuyBox, quickBuyBox);
+    if (!address) return null;
+
+    const marketCap = detectAxiomPulseMarketCap(row || quickBuyBox, quickBuyBox);
+    const name = detectAxiomPulseTokenName(row || quickBuyBox, quickBuyBox, address);
+    const url = buildAxiomMemeUrl(address);
+    return buildDetectedToken(adapter, {
+      address,
+      chain: "SOL",
+      platformChain: "solana",
+      name,
+      marketCap,
+      url,
+    });
+  }
+
+  function findAxiomPulseTokenRow(quickBuyBox) {
+    const quickRect = quickBuyBox.getBoundingClientRect();
+    const candidates = [];
+    let element = quickBuyBox.parentElement;
+    for (let depth = 0; element && depth < 10; depth += 1, element = element.parentElement) {
+      if (root?.contains(element)) continue;
+      const rect = element.getBoundingClientRect();
+      if (!rect || rect.width <= 0 || rect.height <= 0) continue;
+      if (rect.width < quickRect.width + 90) continue;
+      if (rect.width > Math.min(window.innerWidth, 900)) continue;
+      if (rect.height < Math.max(48, quickRect.height * 0.65) || rect.height > 210) continue;
+      if (!element.contains(quickBuyBox)) continue;
+      candidates.push({ element, area: rect.width * rect.height });
+    }
+    return candidates.sort((a, b) => a.area - b.area)[0]?.element || quickBuyBox.parentElement || quickBuyBox;
+  }
+
+  function findAxiomPulseTokenAddress(row, quickBuyBox) {
+    return findAxiomMemeHrefAddress(row)
+      || findTokenAddressInElementAttributes(row)
+      || findAxiomMemeHrefAddress(row?.parentElement)
+      || findTokenAddressInElementAttributes(row?.parentElement)
+      || findTokenAddressInElementAttributes(quickBuyBox);
+  }
+
+  function findAxiomMemeHrefAddress(scope) {
+    if (!scope?.querySelectorAll) return null;
+    const anchors = Array.from(scope.querySelectorAll("a[href]"));
+    for (const anchor of anchors) {
+      const href = safeDecode(anchor.getAttribute("href") || anchor.href || "");
+      if (!/\/meme(?:\/|\?|$)/i.test(href)) continue;
+      const address = findTokenAddress(href);
+      if (address) return address;
+    }
+    for (const anchor of anchors) {
+      const href = safeDecode(anchor.getAttribute("href") || anchor.href || "");
+      const address = findTokenAddress(href);
+      if (address) return address;
+    }
+    return null;
+  }
+
+  function findTokenAddressInElementAttributes(scope) {
+    if (!scope?.querySelectorAll) return null;
+    const elements = [scope, ...Array.from(scope.querySelectorAll("*")).slice(0, 180)];
+    for (const element of elements) {
+      for (const attr of Array.from(element.attributes || [])) {
+        const name = attr.name.toLowerCase();
+        if (["class", "style", "id"].includes(name)) continue;
+        const value = safeDecode(attr.value || "");
+        if (/^data:/i.test(value)) continue;
+        if (["src", "srcset"].includes(name) && !/(coin|meme|search|address|mint|token|contract|\bca\b)/i.test(value)) continue;
+        if (!/(meme|address|mint|token|contract|\bca\b|href|title|aria-label|data-)/i.test(`${name} ${value}`)) continue;
+        const address = findTokenAddress(value);
+        if (address) return address;
+      }
+    }
+    return null;
+  }
+
+  function getDefaultBuyAmount() {
+    return normalizeBuyAmounts(state?.settings?.buyAmounts)[0];
+  }
+
+  function detectAxiomPulseMarketCap(row, quickBuyBox) {
+    const texts = [quickBuyBox, row]
+      .filter(Boolean)
+      .map((element) => cleanText(element.textContent));
+    for (const text of texts) {
+      const match = text.match(/\bMC\s*:?\s*\$?\s*([0-9.,]+)\s*([KMB])?/i);
+      if (match) return parseCompactNumber(match[1], match[2]);
+    }
+    return null;
+  }
+
+  function detectAxiomPulseTokenName(row, quickBuyBox, address) {
+    const quickRect = quickBuyBox.getBoundingClientRect();
+    const candidates = Array.from(row.querySelectorAll("a, span, div, p"))
+      .filter((element) => element !== quickBuyBox && !element.contains(quickBuyBox) && !quickBuyBox.contains(element))
+      .map((element) => ({
+        element,
+        text: cleanText(element.textContent),
+        rect: element.getBoundingClientRect(),
+      }))
+      .filter(({ text, rect }) => {
+        if (!text || text.length < 2 || text.length > 72) return false;
+        if (findTokenAddress(text) || text.includes(shortenAddress(address))) return false;
+        if (/^@|^\$|[%$]|^\d/.test(text)) return false;
+        if (/\b(MC|TX|SOL|P1|P2|P3|F)\b/i.test(text)) return false;
+        if (!/[A-Za-z]/.test(text)) return false;
+        return rect && rect.width > 0 && rect.height > 0 && rect.left < quickRect.left;
+      })
+      .sort((a, b) => (a.rect.top - b.rect.top) || (a.rect.left - b.rect.left));
+
+    return candidates[0]?.text || shortenAddress(address);
+  }
+
+  function buildAxiomMemeUrl(address) {
+    return `${window.location.origin}/meme/${address}`;
+  }
+
+  function flashAxiomPulseQuickBuyBox(element, className, durationMs) {
+    element.classList.add(className);
+    window.setTimeout(() => element.classList.remove(className), durationMs);
   }
 
   function handleChange(event) {
@@ -1092,72 +1341,72 @@
     setStatus("Note added.");
   }
 
-  async function buy(amountNative) {
+  async function buy(amountNative, tokenOverride = null, options = {}) {
     if (tradeInFlight) return setStatus("Execution already pending.");
     if (!Number.isFinite(amountNative) || amountNative <= 0) return setStatus("Enter a valid buy amount.");
     tradeInFlight = true;
     try {
-    updateActiveToken();
-    const token = activeToken;
-    if (!token.key) return setStatus("Open a supported token page first.");
-    if (!token.unitPriceNative) return setStatus(`Price unavailable. Wait for ${token.platformLabel || "the platform"} market cap to load.`);
+      const token = tokenOverride || (updateActiveToken(), activeToken);
+      if (tokenOverride) activeToken = tokenOverride;
+      if (!token.key) return setStatus("Open a supported token page first.");
+      if (!token.unitPriceNative) return setStatus(`Price unavailable. Wait for ${token.platformLabel || "the platform"} market cap to load.`);
 
-    const delayedToken = await waitForSimulatedExecution("buy", token);
-    if (!delayedToken) return;
+      const delayedToken = await waitForSimulatedExecution("buy", token, options);
+      if (!delayedToken) return;
 
-    const chain = delayedToken.chain;
-    const fees = calculateFees("buy", amountNative, delayedToken.executionDelayMs);
-    const maxSlippagePct = Number(state.settings.buySlippagePct || 0);
-    const realizedSlippagePct = calculateRealizedSlippagePct(maxSlippagePct);
-    const slippage = realizedSlippagePct / 100;
-    const totalDebit = amountNative + fees.totalFeeNative;
-    if ((state.balances[chain] || 0) < totalDebit) {
-      return setStatus(`Insufficient ${chain} paper balance.`);
-    }
+      const chain = delayedToken.chain;
+      const fees = calculateFees("buy", amountNative, delayedToken.executionDelayMs);
+      const maxSlippagePct = Number(state.settings.buySlippagePct || 0);
+      const realizedSlippagePct = calculateRealizedSlippagePct(maxSlippagePct);
+      const slippage = realizedSlippagePct / 100;
+      const totalDebit = amountNative + fees.totalFeeNative;
+      if ((state.balances[chain] || 0) < totalDebit) {
+        return setStatus(`Insufficient ${chain} paper balance.`);
+      }
 
-    const executionPrice = delayedToken.unitPriceNative * (1 + slippage);
-    const tokenAmount = amountNative / executionPrice;
-    const existing = state.positions[delayedToken.key] || createEmptyPosition(delayedToken);
-    const before = snapshotPosition(existing);
-    const newCost = existing.costNative + amountNative;
-    const newTokenAmount = existing.tokenAmount + tokenAmount;
-    const updated = {
-      ...existing,
-      tokenName: delayedToken.name,
-      lastUrl: delayedToken.url,
-      tokenAmount: newTokenAmount,
-      costNative: newCost,
-      avgEntryNative: newCost / newTokenAmount,
-      avgEntryUsd: (newCost / newTokenAmount) * (DEFAULT_PRICES[chain] || 1),
-      buyCount: (existing.buyCount || 0) + 1,
-      updatedAt: new Date().toISOString(),
-    };
+      const executionPrice = delayedToken.unitPriceNative * (1 + slippage);
+      const tokenAmount = amountNative / executionPrice;
+      const existing = state.positions[delayedToken.key] || createEmptyPosition(delayedToken);
+      const before = snapshotPosition(existing);
+      const newCost = existing.costNative + amountNative;
+      const newTokenAmount = existing.tokenAmount + tokenAmount;
+      const updated = {
+        ...existing,
+        tokenName: delayedToken.name,
+        lastUrl: delayedToken.url,
+        tokenAmount: newTokenAmount,
+        costNative: newCost,
+        avgEntryNative: newCost / newTokenAmount,
+        avgEntryUsd: (newCost / newTokenAmount) * (DEFAULT_PRICES[chain] || 1),
+        buyCount: (existing.buyCount || 0) + 1,
+        updatedAt: new Date().toISOString(),
+      };
 
-    state.balances[chain] -= totalDebit;
-    state.positions[delayedToken.key] = updated;
+      state.balances[chain] -= totalDebit;
+      state.positions[delayedToken.key] = updated;
 
-    recordExecution({
-      side: "buy",
-      chain,
-      token: delayedToken,
-      positionId: updated.positionId,
-      requestedAmountNative: amountNative,
-      grossNative: amountNative,
-      netNative: -totalDebit,
-      fees,
-      slippagePct: realizedSlippagePct,
-      maxSlippagePct,
-      tokenAmount,
-      executionPriceNative: executionPrice,
-      pnlNative: 0,
-      positionBefore: before,
-      positionAfter: snapshotPosition(updated),
-      costBasisNative: 0,
-    });
+      recordExecution({
+        side: "buy",
+        chain,
+        token: delayedToken,
+        positionId: updated.positionId,
+        requestedAmountNative: amountNative,
+        grossNative: amountNative,
+        netNative: -totalDebit,
+        fees,
+        slippagePct: realizedSlippagePct,
+        maxSlippagePct,
+        tokenAmount,
+        executionPriceNative: executionPrice,
+        pnlNative: 0,
+        positionBefore: before,
+        positionAfter: snapshotPosition(updated),
+        costBasisNative: 0,
+      });
 
-    await persistAndSync("buy");
-    setStatus(`Bought ${formatters.native(amountNative, chain)} paper.`);
-    render();
+      await persistAndSync("buy");
+      setStatus(`Bought ${formatters.native(amountNative, chain)} paper.`);
+      render();
     } finally {
       tradeInFlight = false;
     }
@@ -1277,14 +1526,13 @@
     };
   }
 
-  async function waitForSimulatedExecution(side, token) {
+  async function waitForSimulatedExecution(side, token, options = {}) {
     const delayMs = calculateExecutionDelay(side);
     const priorityFee = Number(side === "buy" ? state.settings.buyPriorityFeeNative : state.settings.sellPriorityFeeNative) || 0;
     const bribeFee = Number(side === "buy" ? state.settings.buyBribeFeeNative : state.settings.sellBribeFeeNative) || 0;
     setStatus(`${side === "buy" ? "Buy" : "Sell"} pending (${delayMs}ms delay, prio ${priorityFee}, bribe ${bribeFee}).`);
     if (delayMs > 0) await new Promise((resolve) => window.setTimeout(resolve, delayMs));
-    updateActiveToken();
-    const delayedToken = activeToken;
+    const delayedToken = await resolveExecutionTokenAfterDelay(token, options);
     if (!delayedToken?.key || delayedToken.key !== token.key || !delayedToken.unitPriceNative) {
       setStatus("Execution cancelled: token or price changed.");
       return null;
@@ -1296,6 +1544,16 @@
       return null;
     }
     return { ...delayedToken, executionDelayMs: delayMs };
+  }
+
+  async function resolveExecutionTokenAfterDelay(token, options = {}) {
+    if (typeof options.resolveLatestToken === "function") {
+      const resolved = await Promise.resolve(options.resolveLatestToken(token));
+      if (resolved?.key) activeToken = resolved;
+      return resolved || token;
+    }
+    updateActiveToken();
+    return activeToken;
   }
 
   function calculateExecutionDelay(side) {
@@ -1601,284 +1859,70 @@
         logEl.appendChild(item);
       });
     }
-    renderTradeChartLines(summary);
+    syncAxiomNativeChartLines(summary, token, position);
   }
 
-  function renderTradeChartLines(summary = null) {
-    const layer = root?.querySelector(`#${selectors.chartLayer}`);
-    if (!layer || !state || !activeToken?.key) return clearChartLayer(layer);
-
-    const token = activeToken;
-    const position = state.positions[token.key] || null;
-    const tradeSummary = summary || (position ? buildPositionSummary(position.positionId, "open") : findLatestTokenPositionSummary(token));
-    if (!tradeSummary) return clearChartLayer(layer);
-
-    const chartRect = detectBestVisibleChartRect();
-    if (!chartRect) return clearChartLayer(layer);
-
-    const detectedScale = detectChartPriceScale(chartRect);
-    const levels = buildTradeChartLevels(tradeSummary, token, detectedScale);
-    if (levels.length === 0) return clearChartLayer(layer);
-    const priceScale = detectedScale || buildFallbackChartPriceScale(chartRect, levels, token);
-    if (!priceScale) return clearChartLayer(layer);
-
-    layer.innerHTML = "";
-    levels.forEach((level) => {
-      const y = priceToY(level.value, priceScale);
-      if (!Number.isFinite(y) || y < chartRect.top - 1 || y > chartRect.bottom + 1) return;
-
-      const line = document.createElement("div");
-      line.className = `wt-chart-price-line wt-chart-price-line-${level.side}`;
-      if (priceScale.estimated) line.classList.add("wt-chart-price-line-estimated");
-      line.style.left = `${chartRect.left}px`;
-      line.style.top = `${y}px`;
-      line.style.width = `${chartRect.width}px`;
-      if (priceScale.estimated) line.title = "Estimated position because the chart price axis is rendered inside canvas.";
-
-      const label = document.createElement("span");
-      label.textContent = level.label;
-      line.appendChild(label);
-      layer.appendChild(line);
-    });
-  }
-
-  function clearChartLayer(layer) {
-    if (layer) layer.innerHTML = "";
-  }
-
-  function findLatestTokenPositionSummary(token) {
-    if (!token?.key) return null;
-    const closed = state.closedPositions
-      .filter((position) => position.tokenAddress === token.address && position.chain === token.chain)
-      .sort((a, b) => Date.parse(b.finalExitAt || b.firstEntryAt || "") - Date.parse(a.finalExitAt || a.firstEntryAt || ""));
-    if (closed[0]) return closed[0];
-
-    const relatedExecution = state.executions
-      .slice()
-      .reverse()
-      .find((execution) => execution.tokenAddress === token.address && execution.chain === token.chain);
-    return relatedExecution ? buildPositionSummary(relatedExecution.positionId) : null;
-  }
-
-  function detectBestVisibleChartRect() {
-    const ignoredRoot = root;
-    const candidates = getChartCandidateElements()
-      .filter((element) => !ignoredRoot?.contains(element))
-      .map((element) => {
-        const rect = element.getBoundingClientRect();
-        const visibleLeft = Math.max(rect.left, 0);
-        const visibleTop = Math.max(rect.top, 0);
-        const visibleRight = Math.min(rect.right, window.innerWidth);
-        const visibleBottom = Math.min(rect.bottom, window.innerHeight);
-        const width = Math.max(0, visibleRight - visibleLeft);
-        const height = Math.max(0, visibleBottom - visibleTop);
-        return {
-          left: visibleLeft,
-          top: visibleTop,
-          right: visibleRight,
-          bottom: visibleBottom,
-          width,
-          height,
-          area: width * height,
-        };
-      })
-      .filter((rect) => rect.area >= 40_000 && rect.width >= 240 && rect.height >= 160)
-      .sort((a, b) => b.area - a.area);
-
-    return candidates[0] || null;
-  }
-
-  function getChartCandidateElements() {
-    const selectors = [
-      "canvas",
-      "iframe",
-      "[class*='chart' i]",
-      "[class*='candle' i]",
-      "[class*='kline' i]",
-      "[class*='tradingview' i]",
-      "[id*='chart' i]",
-      "[id*='tradingview' i]",
-    ];
-    const seen = new Set();
-    return selectors.flatMap((selector) => {
-      try {
-        return Array.from(document.querySelectorAll(selector));
-      } catch {
-        return [];
-      }
-    }).filter((element) => {
-      if (seen.has(element)) return false;
-      seen.add(element);
-      return true;
-    });
-  }
-
-  function detectChartPriceScale(chartRect) {
-    const labels = collectChartPriceLabels(chartRect);
-    if (labels.length < 2) return null;
-
-    const unique = [];
-    labels.forEach((label) => {
-      if (!unique.some((existing) => Math.abs(existing.value - label.value) <= Math.max(1e-12, Math.abs(label.value) * 1e-6))) {
-        unique.push(label);
-      }
-    });
-
-    const sorted = unique.sort((a, b) => a.y - b.y);
-    const top = sorted[0];
-    const bottom = sorted[sorted.length - 1];
-    if (!top || !bottom || top.y === bottom.y || top.value === bottom.value) return null;
-
-    return {
-      labels: sorted,
-      topY: top.y,
-      bottomY: bottom.y,
-      topValue: top.value,
-      bottomValue: bottom.value,
-    };
-  }
-
-  function collectChartPriceLabels(chartRect) {
-    const labels = [];
-    Array.from(document.querySelectorAll("body *")).forEach((element) => {
-      if (root?.contains(element)) return;
-      if (element.children.length > 0) return;
-      const text = cleanText(element.textContent);
-      const value = parsePriceLabel(text);
-      if (!Number.isFinite(value) || value <= 0) return;
-
-      const rect = element.getBoundingClientRect();
-      if (!rect || rect.width <= 0 || rect.height <= 0) return;
-
-      const y = rect.top + rect.height / 2;
-      const nearChartVertically = y >= chartRect.top - 24 && y <= chartRect.bottom + 24;
-      const nearRightScale = rect.left >= chartRect.left + chartRect.width * 0.55 && rect.left <= chartRect.right + 120;
-      if (nearChartVertically && nearRightScale) labels.push({ value, y });
-    });
-
-    return labels;
-  }
-
-  function parsePriceLabel(text) {
-    const label = cleanText(text);
-    if (!label || label.length > 24 || /[%:/]/.test(label)) return null;
-    const match = label.match(/^\$?\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?|[0-9]*\.[0-9]+)\s*([KMB])?$/i);
-    if (!match) return null;
-    return parseCompactNumber(match[1].replace(/,/g, ""), match[2]);
-  }
-
-  function buildTradeChartLevels(summary, token, priceScale) {
-    const entry = selectChartLevel(buildEntryLevelCandidates(summary, token), priceScale);
-    const exit = selectChartLevel(buildExitLevelCandidates(summary, token), priceScale);
-
-    return [
-      entry
-        ? {
-            side: "entry",
-            value: entry.value,
-            label: `Avg entry ${formatChartLevelLabel(entry, priceScale)}`,
-          }
-        : null,
-      exit
-        ? {
-            side: "exit",
-            value: exit.value,
-            label: `Avg exit ${formatChartLevelLabel(exit, priceScale)}`,
-          }
-        : null,
-    ].filter(Boolean);
-  }
-
-  function selectChartLevel(candidates, priceScale) {
-    const finite = candidates
-      .map((candidate) => ({
-        value: Number(candidate?.value),
-        kind: candidate?.kind === "mc" ? "mc" : "price",
-      }))
-      .filter((candidate) => Number.isFinite(candidate.value) && candidate.value > 0);
-    if (finite.length === 0) return null;
-    if (!priceScale) return selectFallbackLevel(finite);
-
-    const min = Math.min(priceScale.topValue, priceScale.bottomValue);
-    const max = Math.max(priceScale.topValue, priceScale.bottomValue);
-    const inRange = finite.filter((candidate) => candidate.value >= min && candidate.value <= max);
-    if (inRange.length > 0) return inRange[0];
-
-    const midpoint = (min + max) / 2;
-    return finite
-      .map((candidate) => ({
-        ...candidate,
-        distance: Math.abs(candidate.value - midpoint) / Math.max(Math.abs(midpoint), 1e-12),
-      }))
-      .sort((a, b) => a.distance - b.distance)[0] || null;
-  }
-
-  function selectFallbackLevel(candidates) {
-    return candidates.find((candidate) => candidate.kind === "mc") || candidates[0] || null;
-  }
-
-  function buildEntryLevelCandidates(summary, token) {
-    return [
-      { value: summary.entryMarketCapVwapUsd, kind: "mc" },
-      { value: summary.avgEntryNative * (DEFAULT_PRICES[token.chain] || 1) * MARKET_CAP_SUPPLY, kind: "mc" },
-      { value: summary.avgEntryNative * (DEFAULT_PRICES[token.chain] || 1), kind: "price" },
-      { value: summary.avgEntryNative, kind: "price" },
-    ];
-  }
-
-  function buildExitLevelCandidates(summary, token) {
-    return [
-      { value: summary.exitMarketCapVwapUsd, kind: "mc" },
-      { value: summary.avgExitNative * (DEFAULT_PRICES[token.chain] || 1) * MARKET_CAP_SUPPLY, kind: "mc" },
-      { value: summary.avgExitNative * (DEFAULT_PRICES[token.chain] || 1), kind: "price" },
-      { value: summary.avgExitNative, kind: "price" },
-    ];
-  }
-
-  function buildFallbackChartPriceScale(chartRect, levels, token) {
-    const primaryKind = levels.find((level) => level.kind === "mc") ? "mc" : "price";
-    const currentValue = primaryKind === "mc"
-      ? Number(token.marketCap || 0)
-      : Number(token.unitPriceUsd || token.unitPriceNative || 0);
-    const values = levels
-      .filter((level) => level.kind === primaryKind)
-      .map((level) => Number(level.value))
-      .filter((value) => Number.isFinite(value) && value > 0);
-    if (Number.isFinite(currentValue) && currentValue > 0) values.push(currentValue);
-    if (values.length === 0) return null;
-
-    let min = Math.min(...values);
-    let max = Math.max(...values);
-    if (min === max) {
-      min *= 0.85;
-      max *= 1.15;
-    } else {
-      const padding = (max - min) * 0.28;
-      min = Math.max(0, min - padding);
-      max += padding;
+  function syncAxiomNativeChartLines(summary, token, position) {
+    if (token?.platform !== "axiom") return;
+    if (!position || !summary?.id) {
+      postAxiomChartBridgeMessage({ op: "clearAll" });
+      return;
     }
 
+    const entryPrice = getAxiomChartPrice(summary, "entry", token);
+    if (entryPrice > 0) {
+      postAxiomChartBridgeMessage({
+        op: "upsert",
+        positionId: summary.id,
+        kind: "avg_entry",
+        price: entryPrice,
+        style: buildAxiomChartLineStyle("avg_entry", entryPrice),
+      });
+    }
+
+    const exitPrice = getAxiomChartPrice(summary, "exit", token);
+    if (summary.sellCount > 0 && exitPrice > 0) {
+      postAxiomChartBridgeMessage({
+        op: "upsert",
+        positionId: summary.id,
+        kind: "avg_exit",
+        price: exitPrice,
+        style: buildAxiomChartLineStyle("avg_exit", exitPrice),
+      });
+    } else {
+      postAxiomChartBridgeMessage({
+        op: "remove",
+        positionId: summary.id,
+        kind: "avg_exit",
+      });
+    }
+  }
+
+  function getAxiomChartPrice(summary, side, token) {
+    const marketCap = side === "entry" ? summary.entryMarketCapVwapUsd : summary.exitMarketCapVwapUsd;
+    if (Number(marketCap) > 0) return Number(marketCap);
+
+    const avgNative = side === "entry" ? summary.avgEntryNative : summary.avgExitNative;
+    const chainUsd = DEFAULT_PRICES[token.chain] || 1;
+    const estimatedMarketCap = Number(avgNative || 0) * chainUsd * MARKET_CAP_SUPPLY;
+    return Number.isFinite(estimatedMarketCap) && estimatedMarketCap > 0 ? estimatedMarketCap : 0;
+  }
+
+  function buildAxiomChartLineStyle(kind, price) {
+    const isEntry = kind === "avg_entry";
     return {
-      estimated: true,
-      topY: chartRect.top + chartRect.height * 0.14,
-      bottomY: chartRect.bottom - chartRect.height * 0.14,
-      topValue: max,
-      bottomValue: min,
+      color: isEntry ? "#22c55e" : "#ef4444",
+      lineWidth: 2,
+      lineStyle: "solid",
+      labelText: `${isEntry ? "AVG ENTRY" : "AVG EXIT"} ${formatters.usd(price)}`,
+      labelBackground: isEntry ? "rgba(34, 197, 94, 0.86)" : "rgba(239, 68, 68, 0.86)",
+      showPrice: true,
     };
   }
 
-  function priceToY(value, priceScale) {
-    const ratio = (value - priceScale.topValue) / (priceScale.bottomValue - priceScale.topValue);
-    return priceScale.topY + ratio * (priceScale.bottomY - priceScale.topY);
-  }
-
-  function formatChartLevelLabel(level, priceScale) {
-    const value = Number(level?.value);
-    const kind = level?.kind === "mc" ? "MC" : "price";
-    const maxScaleValue = Math.max(Math.abs(priceScale.topValue), Math.abs(priceScale.bottomValue));
-    if (kind === "MC") return `MC ${formatters.usd(value)}`;
-    if (maxScaleValue >= 0.01) return `price $${value.toFixed(4)}`;
-    return `price ${value.toPrecision(4)}`;
+  function postAxiomChartBridgeMessage(message) {
+    if (getPlatformAdapter(window.location.hostname)?.id !== "axiom") return;
+    window.postMessage({ source: "wileytrader", ...message }, window.location.origin);
   }
 
   function renderFullLog() {
@@ -2062,6 +2106,12 @@
     }
   }
 
+  async function openExtensionManager() {
+    const response = await sendRuntimeMessage({ type: "WILYTRADER_OPEN_EXTENSION_MANAGER" });
+    if (response?.ok) setStatus("Opened Chrome Extensions. Click Reload on WilyTrader after pulling updates.");
+    else setStatus("Could not open Chrome Extensions. Go to chrome://extensions manually.");
+  }
+
   function sendRuntimeMessage(message) {
     return new Promise((resolve) => {
       if (!extensionContextValid) return resolve({ ok: false, error: "Extension context invalidated." });
@@ -2227,6 +2277,7 @@
       const routeKey = `${window.location.href}|${document.title}`;
       if (routeKey !== lastRouteKey) {
         lastRouteKey = routeKey;
+        injectAxiomChartBridgeScript();
         updateActiveToken();
         render();
       }

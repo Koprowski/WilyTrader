@@ -13,7 +13,7 @@ This extension is loaded directly from source. It is not approved by, packaged f
 5. Confirm that **WilyTrader** appears in the extensions list.
 6. Open a supported token page such as `https://trade.padre.gg/trade/solana/...` or `https://axiom.trade/meme/...`.
 
-Chrome may show developer-mode warnings for unpacked extensions. That is normal for a local, non-Web-Store extension. Keep Developer mode enabled, and click the extension's reload button on `chrome://extensions` after changing local files.
+Chrome may show developer-mode warnings for unpacked extensions. That is normal for a local, non-Web-Store extension. Keep Developer mode enabled, and click the extension's reload button on `chrome://extensions` after changing local files. The WilyTrader settings panel also has an **Open Extensions** button that opens the Chrome extension manager for reloads.
 
 ## Behavior
 
@@ -56,3 +56,45 @@ If Snipalot is not recording, the sync fails closed and the overlay remains loca
 The export file is named like:
 
 `wilytrader-axiom-ledger-2026-05-25T23-00-00-000Z.json`
+
+## Axiom Native Chart Lines
+
+WilyTrader injects `src/userscript-wrapper.user.js` on `https://axiom.trade/*`.
+That page-context bridge exposes `window.__wileyChartBridge` and listens for
+messages from the extension:
+
+```js
+function syncNativeLines(position) {
+  const post = (message) => window.postMessage({ source: "wileytrader", ...message }, window.location.origin);
+  if (!position) return post({ op: "clearAll" });
+  post({
+    op: "upsert",
+    positionId: position.id,
+    kind: "avg_entry",
+    price: position.entryMarketCapVwapUsd,
+    style: { color: "#22c55e", labelText: `AVG ENTRY ${position.entryMarketCapVwapUsd}` },
+  });
+  if (position.sellCount > 0) {
+    post({
+      op: "upsert",
+      positionId: position.id,
+      kind: "avg_exit",
+      price: position.exitMarketCapVwapUsd,
+      style: { color: "#ef4444", labelText: `AVG EXIT ${position.exitMarketCapVwapUsd}` },
+    });
+  } else {
+    post({ op: "remove", positionId: position.id, kind: "avg_exit" });
+  }
+}
+```
+
+Known fragility points:
+
+- The bridge depends on Axiom's `tradingview_<hex>` iframe id pattern.
+- The preferred path uses `tradingViewApi.activeChart().createShape`; if Axiom
+  removes that API, the fallback uses private `chartWidget._model.createLineTool`.
+- The bridge assumes Axiom's `blob:` TradingView iframe is reachable from a
+  page-context script. Content scripts alone cannot see these page JS handles.
+- Run `window.__wileyChartBridge.selfTest()` in DevTools after Axiom updates.
+  It logs one health line showing iframe, public API, fallback API, and symbol
+  status.
