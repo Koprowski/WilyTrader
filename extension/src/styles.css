@@ -145,12 +145,41 @@
 }
 
 .wt-tracker-scale {
+  position: relative;
   width: 480px;
   height: 76px;
   overflow: hidden;
   border-radius: 8px;
   transform: scale(var(--wt-tracker-scale-x, 1), var(--wt-tracker-scale-y, 1));
   transform-origin: top left;
+}
+
+.wt-tracker-settings {
+  appearance: none;
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  z-index: 2;
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(8, 10, 16, 0.36);
+  color: #cbd3e6;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.wt-tracker-settings:hover,
+.wt-tracker-settings:focus-visible {
+  background: rgba(255, 255, 255, 0.1);
+  color: #f6f8ff;
+  outline: none;
 }
 
 .wt-tracker-face {

@@ -686,6 +686,7 @@
     root.innerHTML = `
       <section class="${selectors.tracker}" data-pnl-tracker aria-label="WilyTrader portfolio tracker">
         <div class="wt-tracker-scale">
+          <button type="button" class="wt-tracker-settings" data-action="settings" title="Settings" aria-label="Settings">&#9881;</button>
           <div class="wt-tracker-face" data-tracker-drag>
             <div class="wt-tracker-metric">
               <strong id="${selectors.trackerPortfolio}">0.00 SOL</strong>
