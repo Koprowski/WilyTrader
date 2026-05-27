@@ -611,15 +611,18 @@
     const platformVisible = Boolean(getPlatformAdapter(window.location.hostname));
     const panelVisible = isOverlayVisibleRoute();
     const trackerVisible = Boolean(platformVisible && state?.settings?.trackerEnabled);
+    const overlayVisible = panelVisible || trackerVisible;
     const panel = root.querySelector(`.${selectors.panel}`);
     const tracker = root.querySelector(`.${selectors.tracker}`);
 
-    root.hidden = !(panelVisible || trackerVisible);
-    root.setAttribute("aria-hidden", panelVisible || trackerVisible ? "false" : "true");
+    root.hidden = !overlayVisible;
+    root.setAttribute("aria-hidden", overlayVisible ? "false" : "true");
     if (panel) panel.hidden = !panelVisible;
     if (tracker) tracker.hidden = !trackerVisible;
-    if (!panelVisible) {
+    if (!overlayVisible) {
       closeModals();
+    }
+    if (!panelVisible) {
       lastAxiomChartArtifactKey = null;
       postAxiomChartBridgeMessage({ op: "clearAll" });
     }
