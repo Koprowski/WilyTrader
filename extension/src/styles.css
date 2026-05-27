@@ -12,6 +12,20 @@
   letter-spacing: 0;
 }
 
+#wt-pulse-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483646;
+  pointer-events: none;
+}
+
+.wt-pulse-quick-buy-hit {
+  position: fixed;
+  pointer-events: auto;
+  cursor: pointer;
+  background: rgba(79, 108, 255, 0.001);
+}
+
 .wt-panel {
   position: fixed;
   right: 18px;

@@ -139,6 +139,7 @@
     trackerPct: "wt-tracker-pct",
     trackerBar: "wt-tracker-bar",
     updateNotice: "wt-update-notice",
+    pulseLayer: "wt-pulse-layer",
     log: "wt-log",
     settingsModal: "wt-settings-modal",
     logModal: "wt-log-modal",
@@ -156,6 +157,8 @@
   let pulseQuickBuyBound = false;
   let pendingPulseAutoBuyInFlight = false;
   let pulseQuickBuyQueuedUntil = 0;
+  let pulseQuickBuyLayer = null;
+  let pulseQuickBuyLayerRefreshId = null;
   let updateCheckTimerId = null;
   let updateState = {
     checking: false,
@@ -957,8 +960,13 @@
   function bindAxiomPulseQuickBuy() {
     if (pulseQuickBuyBound) return;
     pulseQuickBuyBound = true;
-    document.addEventListener("pointerdown", handleAxiomPulseQuickBuyPointerDown, true);
-    document.addEventListener("click", handleAxiomPulseQuickBuyClick, true);
+    ["pointerdown", "pointerup", "mousedown", "mouseup", "click"].forEach((eventName) => {
+      document.addEventListener(eventName, handleAxiomPulseQuickBuyEvent, true);
+    });
+    ensureAxiomPulseQuickBuyLayer();
+    if (!pulseQuickBuyLayerRefreshId) {
+      pulseQuickBuyLayerRefreshId = window.setInterval(refreshAxiomPulseQuickBuyLayer, 350);
+    }
   }
 
   function handleUnhandledRejection(event) {
@@ -1057,26 +1065,36 @@
     }
   }
 
-  function handleAxiomPulseQuickBuyPointerDown(event) {
+  function handleAxiomPulseQuickBuyEvent(event) {
     if (!isPrimaryPointerEvent(event)) return;
     const quickBuyBox = findAxiomPulseQuickBuyBox(event.target);
     if (!quickBuyBox) return;
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
+    if (Date.now() < pulseQuickBuyQueuedUntil) return;
     queueAxiomPulseAutoBuy(quickBuyBox);
   }
 
-  function handleAxiomPulseQuickBuyClick(event) {
-    if (event.button !== undefined && event.button !== 0) return;
-    const quickBuyBox = findAxiomPulseQuickBuyBox(event.target);
-    if (!quickBuyBox) return;
-
+  function handleAxiomPulseLayerPointerDown(event) {
+    if (!isPrimaryPointerEvent(event)) return;
+    const target = event.target.closest("[data-wt-pulse-quick-buy-index]");
+    if (!target) return;
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
+    const quickBuyBox = findAxiomPulseQuickBuyBoxes()[Number(target.dataset.wtPulseQuickBuyIndex)];
+    if (!quickBuyBox) return refreshAxiomPulseQuickBuyLayer();
     if (Date.now() < pulseQuickBuyQueuedUntil) return;
     queueAxiomPulseAutoBuy(quickBuyBox);
+  }
+
+  function handleAxiomPulseLayerSuppress(event) {
+    const target = event.target.closest("[data-wt-pulse-quick-buy-index]");
+    if (!target) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
   }
 
   function queueAxiomPulseAutoBuy(quickBuyBox) {
@@ -1118,6 +1136,66 @@
       if (isAxiomPulseQuickBuyBoxElement(element)) return element;
     }
     return null;
+  }
+
+  function findAxiomPulseQuickBuyBoxes() {
+    if (!isAxiomPulseRoute()) return [];
+    return Array.from(document.querySelectorAll("body *"))
+      .filter((element) => !root?.contains(element) && !pulseQuickBuyLayer?.contains(element))
+      .filter(isAxiomPulseQuickBuyBoxElement)
+      .filter((element, index, items) => {
+        const rect = element.getBoundingClientRect();
+        return !items.some((other, otherIndex) => {
+          if (otherIndex === index || !other.contains?.(element)) return false;
+          const otherRect = other.getBoundingClientRect();
+          return Math.abs(otherRect.left - rect.left) <= 2
+            && Math.abs(otherRect.top - rect.top) <= 2
+            && Math.abs(otherRect.width - rect.width) <= 4
+            && Math.abs(otherRect.height - rect.height) <= 4;
+        });
+      });
+  }
+
+  function ensureAxiomPulseQuickBuyLayer() {
+    if (pulseQuickBuyLayer?.isConnected) return pulseQuickBuyLayer;
+    pulseQuickBuyLayer = document.getElementById(selectors.pulseLayer);
+    if (!pulseQuickBuyLayer) {
+      pulseQuickBuyLayer = document.createElement("div");
+      pulseQuickBuyLayer.id = selectors.pulseLayer;
+      pulseQuickBuyLayer.setAttribute("aria-hidden", "true");
+      document.documentElement.appendChild(pulseQuickBuyLayer);
+    }
+    pulseQuickBuyLayer.addEventListener("pointerdown", handleAxiomPulseLayerPointerDown, true);
+    ["pointerup", "mousedown", "mouseup", "click"].forEach((eventName) => {
+      pulseQuickBuyLayer.addEventListener(eventName, handleAxiomPulseLayerSuppress, true);
+    });
+    return pulseQuickBuyLayer;
+  }
+
+  function refreshAxiomPulseQuickBuyLayer() {
+    const layer = ensureAxiomPulseQuickBuyLayer();
+    if (!layer) return;
+    if (!isAxiomPulseRoute()) {
+      layer.hidden = true;
+      layer.innerHTML = "";
+      return;
+    }
+
+    const boxes = findAxiomPulseQuickBuyBoxes();
+    layer.hidden = false;
+    layer.innerHTML = "";
+    boxes.forEach((box, index) => {
+      const rect = box.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const hitTarget = document.createElement("div");
+      hitTarget.className = "wt-pulse-quick-buy-hit";
+      hitTarget.dataset.wtPulseQuickBuyIndex = String(index);
+      hitTarget.style.left = `${Math.max(0, rect.left)}px`;
+      hitTarget.style.top = `${Math.max(0, rect.top)}px`;
+      hitTarget.style.width = `${Math.min(window.innerWidth, rect.right) - Math.max(0, rect.left)}px`;
+      hitTarget.style.height = `${Math.min(window.innerHeight, rect.bottom) - Math.max(0, rect.top)}px`;
+      layer.appendChild(hitTarget);
+    });
   }
 
   function isAxiomPulseQuickBuyBoxElement(element) {
