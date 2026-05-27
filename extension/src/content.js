@@ -3091,35 +3091,18 @@
   function makeResizable(handle, element, options = {}) {
     if (!handle || !element) return;
     const sizeKey = options.sizeKey || "trackerSize";
-    let resizing = false;
-    let startX = 0;
-    let startY = 0;
-    let startWidth = 0;
-    let startHeight = 0;
+    let resizing = null;
 
-    handle.addEventListener("mousedown", (event) => {
-      event.preventDefault();
-      resizing = true;
-      startX = event.clientX;
-      startY = event.clientY;
-      startWidth = element.offsetWidth;
-      startHeight = element.offsetHeight;
-      document.body.style.userSelect = "none";
-    });
-
-    document.addEventListener("mousemove", (event) => {
+    const finishResize = () => {
       if (!resizing) return;
-      const width = Math.max(280, Math.min(window.innerWidth - 16, startWidth + event.clientX - startX));
-      const height = Math.max(76, Math.min(window.innerHeight - 16, startHeight + event.clientY - startY));
-      element.style.width = `${width}px`;
-      element.style.height = `${height}px`;
-      updateTrackerScale(element);
-    });
-
-    document.addEventListener("mouseup", () => {
-      if (!resizing) return;
-      resizing = false;
+      const { pointerId } = resizing;
+      resizing = null;
       document.body.style.userSelect = "";
+      try {
+        if (handle.hasPointerCapture?.(pointerId)) handle.releasePointerCapture(pointerId);
+      } catch {
+        // Pointer capture may already be released by the browser.
+      }
       const width = Number.parseFloat(element.style.width);
       const height = Number.parseFloat(element.style.height);
       if (Number.isFinite(width) && Number.isFinite(height)) {
@@ -3127,7 +3110,43 @@
         updateTrackerScale(element);
         runTask(persist());
       }
+    };
+
+    const updateResize = (event) => {
+      if (!resizing || event.pointerId !== resizing.pointerId) return;
+      if (event.buttons === 0) {
+        finishResize();
+        return;
+      }
+      event.preventDefault();
+      const width = Math.max(280, Math.min(window.innerWidth - 16, resizing.startWidth + event.clientX - resizing.startX));
+      const height = Math.max(76, Math.min(window.innerHeight - 16, resizing.startHeight + event.clientY - resizing.startY));
+      element.style.width = `${width}px`;
+      element.style.height = `${height}px`;
+      updateTrackerScale(element);
+    };
+
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || resizing) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      resizing = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        startWidth: element.offsetWidth,
+        startHeight: element.offsetHeight,
+      };
+      handle.setPointerCapture?.(event.pointerId);
+      document.body.style.userSelect = "none";
     });
+
+    handle.addEventListener("pointermove", updateResize);
+    handle.addEventListener("pointerup", finishResize);
+    handle.addEventListener("pointercancel", finishResize);
+    handle.addEventListener("lostpointercapture", finishResize);
+    window.addEventListener("blur", finishResize);
   }
 
   function createId(prefix) {
