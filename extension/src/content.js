@@ -2761,6 +2761,7 @@
       lineStyle: "dashed",
       labelText: `${isEntry ? "AVG ENTRY" : "AVG EXIT"} ${formatters.usd(price)}`,
       labelBackground: isEntry ? "rgba(34, 197, 94, 0.86)" : "rgba(239, 68, 68, 0.86)",
+      labelAlign: isEntry ? "left" : "right",
       showPrice: true,
     };
   }

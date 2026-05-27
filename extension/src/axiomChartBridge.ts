@@ -7,6 +7,7 @@ export interface PriceLineStyle {
   lineStyle?: "solid" | "dashed" | "dotted";
   labelText?: string;
   labelBackground?: string;
+  labelAlign?: "left" | "center" | "right";
   showPrice?: boolean;
 }
 
@@ -448,7 +449,7 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
       showLabel: Boolean(style.labelText),
       text: style.labelText || "",
       showPrice: style.showPrice !== false,
-      horzLabelsAlign: "center",
+      horzLabelsAlign: style.labelAlign || "center",
       vertLabelsAlign: "middle",
       textcolor: "#ffffff",
       backgroundColor: style.labelBackground || style.color,
@@ -465,7 +466,7 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
       text: style.labelText || "",
       showLabel: Boolean(style.labelText),
       showPrice: style.showPrice !== false,
-      horzLabelsAlign: "center",
+      horzLabelsAlign: style.labelAlign || "center",
       vertLabelsAlign: "middle",
       lock: true,
       disableSave: true,

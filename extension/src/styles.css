@@ -235,7 +235,7 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 5px;
+  gap: 8px;
   min-width: 88px;
   min-height: 42px;
   padding: 3px 8px;
@@ -246,6 +246,11 @@
   font-family: inherit;
   white-space: nowrap;
   cursor: pointer;
+}
+
+.wt-tracker-brand span:first-child {
+  display: block;
+  line-height: 1;
 }
 
 .wt-tracker-brand:hover,
@@ -297,8 +302,9 @@
 .wt-sol-mark {
   position: relative;
   width: 23px;
-  height: 18px;
+  height: 4px;
   flex: 0 0 auto;
+  margin-block: 7px;
 }
 
 .wt-sol-mark,
@@ -315,10 +321,6 @@
   position: absolute;
   left: 0;
   width: 23px;
-  height: 4px;
-}
-
-.wt-sol-mark {
   height: 4px;
 }
 
@@ -460,11 +462,20 @@
   gap: 5px;
 }
 
+.wt-header > div:not(.wt-header-controls) {
+  min-width: 0;
+  overflow: hidden;
+}
+
 .wt-title {
+  max-width: 100%;
+  overflow: hidden;
   font-size: 13px;
   line-height: 1.2;
   font-weight: 700;
   color: #f1f3f8;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .wt-muted,
@@ -472,6 +483,15 @@
   font-size: 11px;
   line-height: 1.35;
   color: #a6a8b4;
+}
+
+#wt-status {
+  display: block;
+  max-width: 100%;
+  min-height: 1.35em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .wt-body {
