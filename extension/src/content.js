@@ -217,6 +217,7 @@
     schedulePendingPulseAutoBuyCheck();
     bindRouteWatcher();
     startUpdateChecks();
+    runTask(sendDesktopExtensionStatus("startup"));
     if (isOverlayVisibleRoute()) void syncBridge("startup");
   }
 
@@ -1007,7 +1008,7 @@
             </label>
             <label class="wt-check-row">
               <input type="checkbox" data-setting="bridgeEnabled" />
-              <span>Auto-save logs to active Snipalot trade session folder</span>
+              <span>Auto-save logs to WilyTrader Desktop trade session folder</span>
             </label>
             <label class="wt-check-row">
               <input type="checkbox" data-setting="autoScreenshotOnTrade" />
@@ -1015,13 +1016,13 @@
             </label>
             <label class="wt-check-row">
               <input type="checkbox" data-setting="fallbackDownloadsEnabled" />
-              <span>If Snipalot is unavailable, save fallback screenshots to Chrome Downloads</span>
+              <span>If WilyTrader Desktop is unavailable, save fallback screenshots to Chrome Downloads</span>
             </label>
             <label class="wt-check-row">
               <input type="checkbox" data-setting="updateChecksEnabled" />
               <span>Check GitHub for WilyTrader extension updates</span>
             </label>
-            <div class="wt-settings-note">Snipalot saves to the active trade session folder. The Chrome fallback saves under Downloads/WilyTrader and crops to the largest visible chart when possible. After installing an update, open Extensions and reload WilyTrader.</div>
+            <div class="wt-settings-note">WilyTrader Desktop saves to the active trade session folder. The Chrome fallback saves under Downloads/WilyTrader and crops to the largest visible chart when possible. After installing an update, open Extensions and reload WilyTrader.</div>
             <div class="wt-button-row">
               <button class="wt-button wt-button-secondary" data-action="check-for-update">Check Update</button>
               <button class="wt-button wt-button-secondary" data-action="open-extension-manager">Open Extensions</button>
@@ -3161,13 +3162,13 @@
     button.setAttribute("aria-label", minimized ? "Maximize" : "Minimize");
   }
 
-  function buildExportPayload(reason = "manual", eventExecution = null, captureScreenshot = false) {
+  function buildExportPayload(reason = "manual", eventExecution = null, captureScreenshot = false, screenshot = null) {
     const positions = getPositionSummaries();
     return {
       schemaVersion: 2,
       exportedAt: new Date().toISOString(),
       source: `wilytrader-${activeToken?.platform || "supported"}-extension`,
-      privacy: "local-only; no backend sync; optional localhost Snipalot bridge",
+      privacy: "local-only; no backend sync; optional localhost WilyTrader bridge",
       reason,
       event: eventExecution
         ? {
@@ -3186,6 +3187,7 @@
         pageTitle: document.title,
         activeToken,
       },
+      screenshot,
       balances: state.balances,
       openPositions: positions.filter((position) => position.status === "open"),
       closedPositions: positions.filter((position) => position.status === "closed"),
@@ -3228,6 +3230,25 @@
     }
   }
 
+  async function captureBridgeScreenshot(captureScreenshot) {
+    if (!captureScreenshot) return null;
+    const response = await sendRuntimeMessage({
+      type: "WILYTRADER_CAPTURE_SCREENSHOT",
+      captureRect: detectBestChartCaptureRect(),
+    });
+    if (!response?.ok || !response.dataUrl) return null;
+    return {
+      dataUrl: response.dataUrl,
+      capturedAt: response.capturedAt,
+      capturedAtMs: response.capturedAtMs,
+      capturedOffsetMs: Number.isFinite(response.capturedAtMs)
+        ? response.capturedAtMs - (Date.parse(state.sessionStartedAt || "") || response.capturedAtMs)
+        : null,
+      captureRect: response.captureRect || null,
+      source: response.source || "chrome-tab-capture",
+    };
+  }
+
   async function openExtensionManager() {
     const response = await sendRuntimeMessage({ type: "WILYTRADER_OPEN_EXTENSION_MANAGER" });
     if (response?.ok) setStatus("Opened Chrome Extensions. Click Reload on WilyTrader after pulling updates.");
@@ -3264,6 +3285,7 @@
       if (reason === "manual") {
         setStatus(updateState.updateAvailable ? `Update available: ${updateState.latestVersion}.` : "WilyTrader is up to date.");
       }
+      runTask(sendDesktopExtensionStatus("update-check"));
     } else {
       updateState = {
         ...updateState,
@@ -3275,6 +3297,28 @@
       if (reason === "manual") setStatus("Update check failed.");
     }
     renderUpdateNotice();
+  }
+
+  async function sendDesktopExtensionStatus(reason = "heartbeat") {
+    if (!extensionContextValid) return;
+    try {
+      const manifest = chrome?.runtime?.getManifest?.() || {};
+      await fetch(`${BRIDGE_BASE_URL}/extension-status`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          reason,
+          name: manifest.name || "WilyTrader",
+          installedVersion: manifest.version || null,
+          extensionId: chrome?.runtime?.id || null,
+          pageUrl: window.location.href,
+          checkedAt: new Date().toISOString(),
+          updateState,
+        }),
+      });
+    } catch {
+      // Desktop may not be running; this heartbeat is best-effort only.
+    }
   }
 
   function sendRuntimeMessage(message) {
@@ -3342,20 +3386,21 @@
     if (!extensionContextValid) return false;
     if (!state?.settings?.bridgeEnabled) return false;
     try {
+      const screenshot = await captureBridgeScreenshot(captureScreenshot);
       const response = await fetch(`${BRIDGE_BASE_URL}/ledger`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildExportPayload(reason, eventExecution, captureScreenshot)),
+        body: JSON.stringify(buildExportPayload(reason, eventExecution, captureScreenshot, screenshot)),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json().catch(() => ({}));
       bridgeState = {
         active: true,
-        lastMessage: data.sessionDir ? "Snipalot bridge synced" : "Snipalot bridge active",
+        lastMessage: data.sessionDir ? "WilyTrader bridge synced" : "WilyTrader bridge active",
       };
       return true;
     } catch {
-      bridgeState = { active: false, lastMessage: "Snipalot bridge not connected" };
+      bridgeState = { active: false, lastMessage: "WilyTrader bridge not connected" };
       return false;
     } finally {
       render();

@@ -1,6 +1,6 @@
 # WilyTrader
 
-Local-only Chrome extension for Padre.gg and Axiom paper trading with execution-ledger export and optional Snipalot localhost sync.
+Local-only WilyTrader workspace for Padre.gg and Axiom paper trading. The existing Chrome extension remains in `extension/`; the new audio-first desktop vertical slice lives in `desktop/`.
 
 ## What It Does
 
@@ -9,7 +9,8 @@ Local-only Chrome extension for Padre.gg and Axiom paper trading with execution-
 - Simulates paper buys and sells without connecting to wallets.
 - Tracks execution-level fees, slippage, delay, and P&L.
 - Exports a ledger JSON file with executions, open positions, closed positions, notes, settings, and Snipalot-compatible trade summaries.
-- Can optionally sync the ledger to Snipalot over `http://127.0.0.1:17365/v1/wilytrader/ledger` during active trade recordings.
+- Can optionally sync the ledger to WilyTrader Desktop over `http://127.0.0.1:17365/v1/wilytrader/ledger` during active trade sessions.
+- WilyTrader Desktop owns audio-first session folders, microphone recording, transcript artifacts, bridge intake, trade screenshots, and `trade_log.xlsx` / `trade_log.md` generation.
 
 ## Install Locally In Chrome
 
@@ -41,4 +42,15 @@ If Git is not installed, download the latest ZIP from GitHub, replace the local 
 
 WilyTrader is content-script only. It does not connect to wallets, request seed phrases, sign transactions, or use an internet backend. Core paper-trading data is stored in `chrome.storage.local`.
 
-Snipalot sync is localhost-only and opt-in. To enable it, open the WilyTrader settings panel and turn on **Sync to Snipalot localhost bridge**. When enabled, the extension POSTs the current ledger export to `http://127.0.0.1:17365/v1/wilytrader/ledger`. Trade-time Chrome fallback downloads are screenshot-only; use **Save JSON** when you want a ledger file.
+WilyTrader Desktop sync is localhost-only and opt-in. To enable it, start a WilyTrader Desktop trade session, then open the WilyTrader extension settings panel and enable the bridge. When enabled, the extension POSTs the current ledger export to `http://127.0.0.1:17365/v1/wilytrader/ledger`. Trade-time Chrome fallback downloads are screenshot-only; use **Save JSON** when you want a ledger file.
+
+## Desktop Slice
+
+```powershell
+cd E:\Apps\wilytrader-desktop\desktop
+npm install
+npm run build
+npm start
+```
+
+See `desktop/README.md` and `desktop/ARCHITECTURE.md` for the architecture, session folder shape, and intentionally omitted Snipalot features.

@@ -10,6 +10,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "WILYTRADER_CAPTURE_SCREENSHOT") {
+    captureScreenshotForBridge(message, sender)
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({ ok: false, error: error?.message || String(error) }));
+    return true;
+  }
+
   if (message.type === "WILYTRADER_OPEN_EXTENSION_MANAGER") {
     openExtensionManager()
       .then((result) => sendResponse(result))
@@ -119,6 +126,20 @@ async function saveFallbackArtifacts(message, sender) {
     mode: "chrome-downloads",
     ledgerDownloadId,
     screenshotDownloadId,
+  };
+}
+
+async function captureScreenshotForBridge(message, sender) {
+  const capturedAtMs = Date.now();
+  const dataUrl = await captureVisibleTab(sender?.tab?.windowId);
+  const screenshotUrl = await maybeCropDataUrl(dataUrl, message.captureRect);
+  return {
+    ok: true,
+    dataUrl: screenshotUrl,
+    capturedAt: new Date(capturedAtMs).toISOString(),
+    capturedAtMs,
+    captureRect: message.captureRect || null,
+    source: "chrome-tabs-captureVisibleTab",
   };
 }
 

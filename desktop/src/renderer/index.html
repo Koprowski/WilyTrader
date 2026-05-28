@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WilyTrader Desktop</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <section class="toolbar">
+        <div>
+          <h1>WilyTrader Desktop</h1>
+          <p data-status>Idle</p>
+        </div>
+        <div class="actions">
+          <button class="icon-button" data-action="settings" title="Settings" aria-label="Settings">
+            <span aria-hidden="true">&#9881;</span>
+          </button>
+          <button data-action="start">Start Trade Session</button>
+          <button data-action="stop" disabled>Stop</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="label">Session Folder</div>
+        <div class="path" data-session-dir>No active session</div>
+      </section>
+
+      <section class="grid">
+        <div class="panel">
+          <div class="label">Local Bridge</div>
+          <div data-bridge>Bridge: http://127.0.0.1:17365/v1/wilytrader/ledger</div>
+        </div>
+        <div class="panel">
+          <div class="label">Artifacts</div>
+          <div data-counts>Audio file saved on stop, 0 bridge events, 0 screenshots</div>
+        </div>
+      </section>
+
+      <section class="panel extension-status">
+        <div class="panel-heading">
+          <div class="label">WilyTrader Extension</div>
+          <div class="inline-actions">
+            <button class="small-button" data-action="open-chrome-extensions">Open Chrome Extensions</button>
+            <button class="small-button" data-action="check-extension-update">Check Update</button>
+          </div>
+        </div>
+        <div data-extension-version>Installed: Not detected</div>
+        <div data-extension-update>No WilyTrader extension heartbeat received yet.</div>
+        <div class="path" data-extension-path>No local manifest path detected</div>
+      </section>
+
+      <div class="modal" data-settings-modal hidden>
+        <section class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+          <div class="settings-header">
+            <h2 id="settings-title">Settings</h2>
+            <button class="icon-button compact" data-action="settings-close" title="Close" aria-label="Close">
+              <span aria-hidden="true">X</span>
+            </button>
+          </div>
+
+          <div class="settings-scroll">
+            <section class="settings-section">
+              <div class="section-title">Trade Session</div>
+              <label class="field">
+                <span>Session output folder</span>
+                <input data-setting="outputDir" type="text" />
+              </label>
+              <label class="field">
+                <span>Start / stop trade session hotkey</span>
+                <input data-setting="tradeSessionHotkey" type="text" spellcheck="false" autocomplete="off" />
+              </label>
+              <label class="check-row">
+                <input data-setting="microphoneCaptureEnabled" type="checkbox" />
+                <span>Record microphone audio file</span>
+              </label>
+              <label class="check-row">
+                <input data-setting="saveBrowserScreenshots" type="checkbox" />
+                <span>Save browser trade screenshots</span>
+              </label>
+              <label class="check-row">
+                <input data-setting="generateTradeLogOnStop" type="checkbox" />
+                <span>Generate trade log on stop</span>
+              </label>
+            </section>
+
+            <section class="settings-section">
+              <div class="section-title">Setup Checklist</div>
+              <div class="dependency-status" data-dependency-status>Checking dependencies...</div>
+              <div class="button-wrap">
+                <button class="small-button" data-action="check-dependencies">Check Dependencies</button>
+                <button class="small-button" data-action="install-whisper">Install Whisper</button>
+                <button class="small-button" data-action="install-gemini-cli">Install Gemini CLI</button>
+                <button class="small-button" data-action="install-node">Install Node.js</button>
+              </div>
+            </section>
+
+            <section class="settings-section">
+              <div class="section-title">LLM Backend</div>
+              <label class="field">
+                <span>Backend</span>
+                <select data-setting="llmMode">
+                  <option value="gemini-cli">Gemini CLI (local, preferred)</option>
+                  <option value="api">API keys (OpenRouter/OpenAI-compatible)</option>
+                </select>
+              </label>
+
+              <div class="callout">
+                <div class="panel-heading">
+                  <strong>Google account</strong>
+                  <div class="inline-actions">
+                    <button class="small-button" data-action="gemini-signin">Sign in with Google</button>
+                    <button class="small-button" data-action="gemini-signout">Sign out</button>
+                    <button class="small-button danger" data-action="gemini-signin-cancel">Cancel</button>
+                  </div>
+                </div>
+                <div class="muted" data-gemini-signin-status>Checking sign-in status...</div>
+              </div>
+
+              <label class="field">
+                <span>Gemini CLI model</span>
+                <div class="input-row">
+                  <input data-setting="geminiCliModel" type="text" spellcheck="false" autocomplete="off" />
+                  <button class="small-button" data-action="fetch-gemini-models">Show Models</button>
+                </div>
+              </label>
+              <input class="full-input" data-setting="geminiCliModelFilter" type="text" placeholder="Filter Gemini model names" spellcheck="false" autocomplete="off" />
+              <select data-setting="geminiCliModels" class="select" size="1"></select>
+              <details>
+                <summary>Advanced: Gemini CLI command</summary>
+                <label class="field">
+                  <span>Command</span>
+                  <input data-setting="geminiCliCommand" type="text" spellcheck="false" autocomplete="off" />
+                </label>
+              </details>
+
+              <label class="field">
+                <span>OpenRouter / OpenAI API key</span>
+                <div class="input-row">
+                  <input data-setting="openRouterApiKey" type="password" placeholder="sk-or-... or sk-..." spellcheck="false" autocomplete="off" />
+                  <button class="small-button" data-action="toggle-openrouter-key">Show</button>
+                </div>
+              </label>
+              <label class="field">
+                <span>API base URL</span>
+                <input data-setting="openRouterBaseUrl" type="text" spellcheck="false" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>OpenRouter model</span>
+                <div class="input-row">
+                  <input data-setting="openRouterModel" type="text" spellcheck="false" autocomplete="off" />
+                  <button class="small-button" data-action="fetch-openrouter-models">Fetch Models</button>
+                </div>
+              </label>
+              <input class="full-input" data-setting="openRouterModelFilter" type="text" placeholder="Filter model names" spellcheck="false" autocomplete="off" />
+              <div class="input-row compact-row">
+                <label class="mini-check">
+                  <input data-setting="openRouterFreeOnly" type="checkbox" checked />
+                  <span>Free only</span>
+                </label>
+                <label class="mini-field">
+                  <span>Max input $/1M</span>
+                  <input data-setting="openRouterMaxCost" type="number" min="0" step="0.01" placeholder="Any" />
+                </label>
+              </div>
+              <select data-setting="openRouterModels" class="select" size="1"></select>
+              <button class="small-button" data-action="test-llm-connection">Test LLM Connection</button>
+            </section>
+
+            <section class="settings-section">
+              <div class="section-title">WilyTrader Extension</div>
+              <label class="check-row">
+                <input data-setting="autoCheckExtensionUpdates" type="checkbox" />
+                <span>Check WilyTrader extension updates</span>
+              </label>
+              <div class="install-info">
+                <div>Installed version: <strong data-settings-extension-version>Not detected</strong></div>
+                <button class="path-link" data-action="open-extension-folder" type="button">No local manifest path detected</button>
+              </div>
+              <div class="button-wrap">
+                <button class="small-button" data-action="move-extension-location">Move Location</button>
+                <button class="small-button" data-action="open-chrome-extensions">Open Chrome Extensions</button>
+              </div>
+            </section>
+
+            <div class="settings-message" data-settings-message></div>
+          </div>
+
+          <div class="settings-footer">
+            <button class="secondary-button" data-action="settings-close" type="button">Cancel</button>
+            <button data-action="settings-save">Save</button>
+          </div>
+        </section>
+      </div>
+    </main>
+    <script src="./renderer.js"></script>
+  </body>
+</html>

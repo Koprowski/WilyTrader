@@ -1,6 +1,6 @@
 # WilyTrader Extension
 
-Local-only Padre.gg and Axiom paper-trading overlay with execution-ledger JSON export and optional Snipalot localhost sync.
+Local-only Padre.gg and Axiom paper-trading overlay with execution-ledger JSON export and optional WilyTrader Desktop localhost sync.
 
 ## Install In Chrome
 
@@ -36,7 +36,7 @@ Replace `C:\Tools\WilyTrader` with the folder that contains this repo, then clic
 - Does not connect to wallets.
 - Does not read seed phrases, private keys, wallet providers, or transactions.
 - Does not call any trading backend. With update checks enabled, it fetches public GitHub tag metadata to compare extension versions.
-- Keeps Snipalot localhost sync off by default.
+- Keeps WilyTrader Desktop localhost sync off by default.
 
 ## Ledger Export
 
@@ -49,7 +49,7 @@ Use **Save JSON** or the header download button in the overlay. The export inclu
 - Native Axiom chart markers for individual buy/sell executions, alongside average entry/exit lines.
 - Derived `openPositions`, `closedPositions`, and `positions` summaries.
 - Scale-in/out counts, VWAP entry/exit market caps, fees, slippage, and pre/post-fee P&L.
-- `mockapeCompatibleTrades` for Snipalot's current compact outcome join.
+- `mockapeCompatibleTrades` for the existing compact outcome join.
 - Settings used for simulation.
 - Optional notes entered in the overlay.
 
@@ -62,11 +62,11 @@ The sell controls default to an 8-button grid. The buy controls use six preset b
 - Delay is active. With custom delay off, priority plus bribe maps to a randomized faster/slower execution delay; with custom delay on, the configured millisecond delay is used directly.
 - Defaults use an aggressive meme-trading paper model: base gas `0.000005`, priority `0.007`, and bribe `0.003` native per side.
 
-When Snipalot sync is enabled in WilyTrader settings, the extension tries to POST the latest ledger to:
+When WilyTrader Desktop sync is enabled in WilyTrader settings, the extension tries to POST the latest ledger to:
 
 `http://127.0.0.1:17365/v1/wilytrader/ledger`
 
-If Snipalot is not recording, the sync fails closed and the overlay remains local-only. Snipalot sync is disabled by default. Trade-time Chrome fallback downloads are screenshot-only; use **Save JSON** when you want a ledger file.
+If WilyTrader Desktop does not have an active trade session, the sync fails closed and the overlay remains local-only. Desktop sync is disabled by default. Trade-time Chrome fallback downloads are screenshot-only; use **Save JSON** when you want a ledger file.
 
 The export file is named like:
 
