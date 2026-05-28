@@ -1331,16 +1331,16 @@
       logExitTargetDiagnostic("target-menu-ignored-no-button", event, { target: elementSummary(target) });
       return false;
     }
-    const sellPercent = Number(target.dataset.sellPct || 0);
-    const isHundredPercentSell = Math.round(sellPercent) === 100 || target.dataset.action === "sell-all";
-    if (!isHundredPercentSell) {
-      logExitTargetDiagnostic("target-menu-ignored-not-100", event, {
+    const rawSellPercent = target.dataset.action === "sell-all" ? 100 : Number(target.dataset.sellPct);
+    if (!Number.isFinite(rawSellPercent) || rawSellPercent <= 0) {
+      logExitTargetDiagnostic("target-menu-ignored-no-sell-percent", event, {
         action: target.dataset.action || null,
-        sellPercent,
+        sellPercent: rawSellPercent,
         buttonText: cleanText(target.textContent),
       });
       return false;
     }
+    const sellPercent = normalizeTargetSellPercent(rawSellPercent);
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
@@ -1352,10 +1352,10 @@
     lastExitTargetMenuOpenedAt = now;
     logExitTargetDiagnostic("target-menu-opening", event, {
       action: target.dataset.action || null,
-      sellPercent: sellPercent || 100,
+      sellPercent,
       buttonText: cleanText(target.textContent),
     });
-    showSellButtonTargetMenu(event.clientX, event.clientY, target.getBoundingClientRect());
+    showSellButtonTargetMenu(event.clientX, event.clientY, target.getBoundingClientRect(), sellPercent);
     return true;
   }
 
@@ -1484,8 +1484,13 @@
       logExitTargetDiagnostic("target-menu-select", event, {
         targetKind: target.dataset.targetKind || null,
         targetMarketCap: target.dataset.targetMarketCap || null,
+        targetSellPercent: target.dataset.targetSellPercent || null,
       });
-      runTask(setExitTarget(target.dataset.targetKind, Number(target.dataset.targetMarketCap), 100));
+      runTask(setExitTarget(
+        target.dataset.targetKind,
+        Number(target.dataset.targetMarketCap),
+        normalizeTargetSellPercent(target.dataset.targetSellPercent)
+      ));
     } else if (action === "context-set-stop-loss") {
       closeContextMenu();
       runTask(setExitTargetAtCurrentMarketCap(EXIT_TARGET_KINDS.stopLoss, 100));
@@ -2225,18 +2230,20 @@
     positionContextMenu(menu, clientX, clientY);
   }
 
-  function showSellButtonTargetMenu(clientX, clientY, anchorRect = null) {
+  function showSellButtonTargetMenu(clientX, clientY, anchorRect = null, sellPercent = 100) {
     const menu = root?.querySelector(`#${selectors.contextMenu}`);
     if (!menu) {
-      logExitTargetDiagnostic("target-menu-missing-root-menu", null, { clientX, clientY }, "warn");
+      logExitTargetDiagnostic("target-menu-missing-root-menu", null, { clientX, clientY, sellPercent }, "warn");
       return;
     }
+    const targetSellPercent = normalizeTargetSellPercent(sellPercent);
     updateActiveToken();
     const currentMarketCap = Number(activeToken?.marketCap || 0);
     if (!Number.isFinite(currentMarketCap) || currentMarketCap <= 0) {
       logExitTargetDiagnostic("target-menu-market-cap-unavailable", null, {
         clientX,
         clientY,
+        sellPercent: targetSellPercent,
         activeTokenKey: activeToken?.key || null,
         detectedMarketCap: activeToken?.marketCap || null,
       }, "warn");
@@ -2248,15 +2255,19 @@
       clientX,
       clientY,
       anchorRect: rectSnapshot(anchorRect),
+      sellPercent: targetSellPercent,
       currentMarketCap,
       firstTargetOption: targetOptions[0] || null,
       firstStopOption: stopOptions[0] || null,
       optionCount: { target: targetOptions.length, stop: stopOptions.length },
     });
+    const stopLossHtml = Math.round(targetSellPercent) === 100
+      ? buildMarketCapSubmenuHtml("Target Stop Loss MC", EXIT_TARGET_KINDS.stopLoss, stopOptions, targetSellPercent)
+      : "";
     menu.innerHTML = `
-      <div class="wt-context-title">WilyTrader 100% @ ${formatters.usd(currentMarketCap)}</div>
-      ${buildMarketCapSubmenuHtml("Target Exit MC", EXIT_TARGET_KINDS.takeProfit, targetOptions)}
-      ${buildMarketCapSubmenuHtml("Target Stop Loss MC", EXIT_TARGET_KINDS.stopLoss, stopOptions)}
+      <div class="wt-context-title">WilyTrader ${formatTargetSellPercent(targetSellPercent)} @ ${formatters.usd(currentMarketCap)}</div>
+      ${buildMarketCapSubmenuHtml("Target Exit MC", EXIT_TARGET_KINDS.takeProfit, targetOptions, targetSellPercent)}
+      ${stopLossHtml}
       <button type="button" data-action="context-clear-targets">Clear WT Targets</button>
     `;
     positionContextMenu(menu, clientX, clientY, anchorRect);
@@ -2276,9 +2287,9 @@
     return Array.from({ length: EXIT_TARGET_MENU_MAX_OPTIONS }, (_, index) => start + index * step);
   }
 
-  function buildMarketCapSubmenuHtml(label, kind, options) {
+  function buildMarketCapSubmenuHtml(label, kind, options, sellPercent = 100) {
     const rows = options
-      .map((marketCap) => `<button type="button" data-action="select-exit-target-mc" data-target-kind="${kind}" data-target-market-cap="${marketCap}">${formatters.usd(marketCap)}</button>`)
+      .map((marketCap) => `<button type="button" data-action="select-exit-target-mc" data-target-kind="${kind}" data-target-market-cap="${marketCap}" data-target-sell-percent="${sellPercent}">${formatters.usd(marketCap)}</button>`)
       .join("");
     return `
       <div class="wt-context-submenu">
@@ -3068,10 +3079,10 @@
       button.dataset.action = "sell-percent";
       button.dataset.sellPct = String(percent);
       button.textContent = `${percent}%`;
-      if (Math.round(Number(percent)) === 100) {
-        button.title = "Right-click for 100% market-cap target and stop orders";
-        button.addEventListener("contextmenu", handleSellButtonTargetContextEvent, true);
-      }
+      button.title = Math.round(Number(percent)) === 100
+        ? "Right-click for 100% market-cap target and stop orders"
+        : `Right-click for ${percent}% market-cap target orders`;
+      button.addEventListener("contextmenu", handleSellButtonTargetContextEvent, true);
       sellButtonsEl.appendChild(button);
     });
 
