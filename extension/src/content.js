@@ -10,6 +10,7 @@
   const TRACKER_BASE_HEIGHT = 76;
   const TRACKER_SCALE_MIN = 0.25;
   const TRACKER_RESIZE_DIAGNOSTICS = true;
+  const EXIT_TARGET_DIAGNOSTICS = true;
   const PULSE_AUTO_BUY_KEY = "wilytrader_axiom_pulse_auto_buy_v1";
   const PULSE_AUTO_BUY_TTL_MS = 2 * 60 * 1000;
   const AXIOM_TARGET_TRIGGER_INTERVAL_MS = 500;
@@ -176,6 +177,7 @@
   let lastAxiomExitTargetSyncKey = null;
   let lastAxiomExitTargetLineKeys = new Set();
   let targetExitInFlight = null;
+  let lastExitTargetMenuOpenedAt = 0;
   let pulseQuickBuyBound = false;
   let pendingPulseAutoBuyInFlight = false;
   let pulseQuickBuyQueuedUntil = 0;
@@ -1161,6 +1163,7 @@
     `;
     document.documentElement.appendChild(root);
     root.addEventListener("pointerdown", stopOverlayEvent, true);
+    root.addEventListener("mousedown", handleOverlayMouseDown, true);
     root.addEventListener("click", handleClick, true);
     root.addEventListener("contextmenu", handleOverlayContextMenu, true);
     root.addEventListener("change", handleChange);
@@ -1241,6 +1244,7 @@
 
   function stopOverlayEvent(event) {
     if (!root?.contains(event.target)) return;
+    logExitTargetDiagnostic("root-pointerdown", event);
     if (event.type === "pointerdown" && event.button === 2 && handleSellButtonTargetContextEvent(event)) return;
     const trackerHandle = event.target?.closest?.("[data-tracker-resize-corner]");
     if (trackerHandle) {
@@ -1249,6 +1253,13 @@
       });
     }
     event.stopPropagation();
+  }
+
+  function handleOverlayMouseDown(event) {
+    if (!root?.contains(event.target)) return;
+    if (event.button !== 2) return;
+    logExitTargetDiagnostic("root-mousedown", event);
+    handleSellButtonTargetContextEvent(event);
   }
 
   function logTrackerResizeDiagnostic(stage, event = null, extra = {}, level = "debug") {
@@ -1312,20 +1323,71 @@
   }
 
   function handleOverlayContextMenu(event) {
+    logExitTargetDiagnostic("root-contextmenu", event);
     handleSellButtonTargetContextEvent(event);
   }
 
   function handleSellButtonTargetContextEvent(event) {
     const target = event.target?.closest?.("button");
-    if (!target || !root?.contains(target)) return false;
+    if (!target || !root?.contains(target)) {
+      logExitTargetDiagnostic("target-menu-ignored-no-button", event, { target: elementSummary(target) });
+      return false;
+    }
     const sellPercent = Number(target.dataset.sellPct || 0);
     const isHundredPercentSell = Math.round(sellPercent) === 100 || target.dataset.action === "sell-all";
-    if (!isHundredPercentSell) return false;
+    if (!isHundredPercentSell) {
+      logExitTargetDiagnostic("target-menu-ignored-not-100", event, {
+        action: target.dataset.action || null,
+        sellPercent,
+        buttonText: cleanText(target.textContent),
+      });
+      return false;
+    }
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
+    const now = Date.now();
+    if (now - lastExitTargetMenuOpenedAt < 250) {
+      logExitTargetDiagnostic("target-menu-duplicate-suppressed", event, { elapsedMs: now - lastExitTargetMenuOpenedAt });
+      return true;
+    }
+    lastExitTargetMenuOpenedAt = now;
+    logExitTargetDiagnostic("target-menu-opening", event, {
+      action: target.dataset.action || null,
+      sellPercent: sellPercent || 100,
+      buttonText: cleanText(target.textContent),
+    });
     showSellButtonTargetMenu(event.clientX, event.clientY);
     return true;
+  }
+
+  function logExitTargetDiagnostic(stage, event = null, extra = {}, level = "debug") {
+    if (!EXIT_TARGET_DIAGNOSTICS) return;
+    const target = event?.target || null;
+    const button = target?.closest?.("button") || null;
+    const menu = root?.querySelector?.(`#${selectors.contextMenu}`) || null;
+    const payload = {
+      stage,
+      eventType: event?.type || null,
+      button: Number.isFinite(event?.button) ? event.button : null,
+      buttons: Number.isFinite(event?.buttons) ? event.buttons : null,
+      clientX: Number.isFinite(event?.clientX) ? event.clientX : null,
+      clientY: Number.isFinite(event?.clientY) ? event.clientY : null,
+      defaultPrevented: event?.defaultPrevented ?? null,
+      target: elementSummary(target),
+      nearestButton: elementSummary(button),
+      buttonAction: button?.dataset?.action || null,
+      buttonSellPct: button?.dataset?.sellPct || null,
+      buttonText: button ? cleanText(button.textContent) : null,
+      rootContainsTarget: Boolean(root && target && root.contains(target)),
+      activeTokenKey: activeToken?.key || null,
+      activeMarketCap: activeToken?.marketCap || null,
+      menuHidden: menu ? menu.hidden : null,
+      path: event?.composedPath ? event.composedPath().slice(0, 8).map(elementSummary) : [],
+      ...extra,
+    };
+    const log = console[level] || console.debug;
+    log.call(console, `[WilyTrader][exit-target] ${stage}`, payload);
   }
 
   function handleClick(event) {
@@ -1421,6 +1483,10 @@
       runTask(clearExitTarget(target.dataset.targetId));
     } else if (action === "select-exit-target-mc") {
       closeContextMenu();
+      logExitTargetDiagnostic("target-menu-select", event, {
+        targetKind: target.dataset.targetKind || null,
+        targetMarketCap: target.dataset.targetMarketCap || null,
+      });
       runTask(setExitTarget(target.dataset.targetKind, Number(target.dataset.targetMarketCap), 100));
     } else if (action === "context-set-stop-loss") {
       closeContextMenu();
@@ -2163,14 +2229,31 @@
 
   function showSellButtonTargetMenu(clientX, clientY) {
     const menu = root?.querySelector(`#${selectors.contextMenu}`);
-    if (!menu) return;
+    if (!menu) {
+      logExitTargetDiagnostic("target-menu-missing-root-menu", null, { clientX, clientY }, "warn");
+      return;
+    }
     updateActiveToken();
     const currentMarketCap = Number(activeToken?.marketCap || 0);
     if (!Number.isFinite(currentMarketCap) || currentMarketCap <= 0) {
+      logExitTargetDiagnostic("target-menu-market-cap-unavailable", null, {
+        clientX,
+        clientY,
+        activeTokenKey: activeToken?.key || null,
+        detectedMarketCap: activeToken?.marketCap || null,
+      }, "warn");
       return setStatus("Current market cap is unavailable.");
     }
     const targetOptions = buildMarketCapMenuOptions(EXIT_TARGET_KINDS.takeProfit, currentMarketCap);
     const stopOptions = buildMarketCapMenuOptions(EXIT_TARGET_KINDS.stopLoss, currentMarketCap);
+    logExitTargetDiagnostic("target-menu-render", null, {
+      clientX,
+      clientY,
+      currentMarketCap,
+      firstTargetOption: targetOptions[0] || null,
+      firstStopOption: stopOptions[0] || null,
+      optionCount: { target: targetOptions.length, stop: stopOptions.length },
+    });
     menu.innerHTML = `
       <div class="wt-context-title">WilyTrader 100% @ ${formatters.usd(currentMarketCap)}</div>
       ${buildMarketCapSubmenuHtml("Target Exit MC", EXIT_TARGET_KINDS.takeProfit, targetOptions)}
@@ -2214,6 +2297,12 @@
     const top = Math.min(Math.max(8, clientY), Math.max(8, window.innerHeight - rect.height - 8));
     menu.style.left = `${left}px`;
     menu.style.top = `${top}px`;
+    logExitTargetDiagnostic("target-menu-positioned", null, {
+      requested: { left: clientX, top: clientY },
+      applied: { left, top },
+      rect: rectSnapshot(menu.getBoundingClientRect()),
+      leftOpening: menu.classList.contains("wt-context-menu-left"),
+    });
   }
 
   function closeContextMenu() {
@@ -2279,6 +2368,14 @@
       updatedAt: now,
       triggeredAt: null,
     };
+    logExitTargetDiagnostic("target-order-set", null, {
+      id,
+      kind: normalizedKind,
+      sellPercent: normalizeTargetSellPercent(sellPercent),
+      marketCapUsd: Number(marketCapUsd),
+      tokenKey: token.key,
+      positionId: position.positionId,
+    });
     lastAxiomExitTargetSyncKey = null;
     await persistAndSync("exit-target");
     render();
@@ -2307,12 +2404,22 @@
   }
 
   async function handleAxiomExitTargetLineMoved(data) {
+    logExitTargetDiagnostic("chart-line-moved-message", null, data);
     const kind = data.kind === EXIT_TARGET_KINDS.takeProfit ? EXIT_TARGET_KINDS.takeProfit : data.kind === EXIT_TARGET_KINDS.stopLoss ? EXIT_TARGET_KINDS.stopLoss : null;
     const marketCapUsd = Number(data.price);
-    if (!kind || !Number.isFinite(marketCapUsd) || marketCapUsd <= 0 || !data.positionId) return;
+    if (!kind || !Number.isFinite(marketCapUsd) || marketCapUsd <= 0 || !data.positionId) {
+      logExitTargetDiagnostic("chart-line-moved-ignored-invalid", null, data, "warn");
+      return;
+    }
     const target = state.exitTargets[data.positionId] || Object.values(state.exitTargets || {}).find((item) => item?.positionId === data.positionId && item.kind === kind);
-    if (!target) return;
-    if (Math.abs(Number(target.marketCapUsd || 0) - marketCapUsd) < 1) return;
+    if (!target) {
+      logExitTargetDiagnostic("chart-line-moved-ignored-no-target", null, data, "warn");
+      return;
+    }
+    if (Math.abs(Number(target.marketCapUsd || 0) - marketCapUsd) < 1) {
+      logExitTargetDiagnostic("chart-line-moved-ignored-same-price", null, data);
+      return;
+    }
     target.marketCapUsd = marketCapUsd;
     target.updatedAt = new Date().toISOString();
     target.triggeredAt = null;
