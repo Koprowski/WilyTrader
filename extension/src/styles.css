@@ -929,33 +929,6 @@
   box-shadow: 0 0 18px rgba(255, 61, 143, 0.13), inset 0 0 0 1px rgba(255, 61, 143, 0.18);
 }
 
-.wt-sell-button-group {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 29px;
-  gap: 3px;
-  min-width: 0;
-}
-
-.wt-sell-button-group .wt-trade-button {
-  width: 100%;
-}
-
-.wt-sell-target-button {
-  min-width: 0;
-  padding: 0;
-  color: #f1f3f8;
-  border-color: rgba(31, 95, 147, 0.92);
-  background: #162133;
-  font-size: 8px;
-  letter-spacing: 0;
-  text-shadow: none;
-}
-
-.wt-sell-target-button:hover {
-  border-color: rgba(101, 184, 121, 0.85);
-  box-shadow: 0 0 18px rgba(31, 95, 147, 0.18), inset 0 0 0 1px rgba(101, 184, 121, 0.16);
-}
-
 .wt-fee-strip {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

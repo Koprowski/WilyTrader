@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "WilyTrader",
-  "version": "0.3.25",
+  "version": "0.3.26",
   "description": "Local-only paper trading overlay for Padre.gg and Axiom with execution-ledger export.",
   "permissions": ["storage", "downloads"],
   "host_permissions": [

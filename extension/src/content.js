@@ -1165,7 +1165,7 @@
     root.addEventListener("pointerdown", stopOverlayEvent, true);
     root.addEventListener("mousedown", handleOverlayMouseDown, true);
     root.addEventListener("click", handleClick, true);
-    root.addEventListener("contextmenu", handleOverlayContextMenu, true);
+    root.addEventListener("contextmenu", handleOverlayContextMenu);
     root.addEventListener("change", handleChange);
     document.removeEventListener("pointerdown", closeTrackerMenuOnOutsidePointer, true);
     document.addEventListener("pointerdown", closeTrackerMenuOnOutsidePointer, true);
@@ -1245,7 +1245,6 @@
   function stopOverlayEvent(event) {
     if (!root?.contains(event.target)) return;
     logExitTargetDiagnostic("root-pointerdown", event);
-    if (event.type === "pointerdown" && event.button === 2 && handleSellButtonTargetContextEvent(event)) return;
     const trackerHandle = event.target?.closest?.("[data-tracker-resize-corner]");
     if (trackerHandle) {
       logTrackerResizeDiagnostic("root-stop-overlay-event", event, {
@@ -1259,7 +1258,6 @@
     if (!root?.contains(event.target)) return;
     if (event.button !== 2) return;
     logExitTargetDiagnostic("root-mousedown", event);
-    handleSellButtonTargetContextEvent(event);
   }
 
   function logTrackerResizeDiagnostic(stage, event = null, extra = {}, level = "debug") {
@@ -1402,14 +1400,6 @@
     const sellPct = target.dataset.sellPct;
     const hasBuyAmount = Object.hasOwn(target.dataset, "buyAmount");
     const hasSellPct = Object.hasOwn(target.dataset, "sellPct");
-    if (action === "open-100-exit-menu") {
-      const rect = target.getBoundingClientRect();
-      logExitTargetDiagnostic("target-menu-open-button-click", event, {
-        rect: rectSnapshot(rect),
-      });
-      showSellButtonTargetMenu(rect.left, rect.bottom + 4);
-      return;
-    }
     if (hasBuyAmount || hasSellPct || action === "custom-buy" || action === "buy-default" || action === "sell-all") {
       primeTradeExecutionSound();
     }
@@ -3062,23 +3052,10 @@
       button.dataset.sellPct = String(percent);
       button.textContent = `${percent}%`;
       if (Math.round(Number(percent)) === 100) {
-        const buttonGroup = document.createElement("div");
-        buttonGroup.className = "wt-sell-button-group";
-
-        const targetButton = document.createElement("button");
-        targetButton.type = "button";
-        targetButton.className = "wt-trade-button wt-sell-button wt-sell-target-button";
-        targetButton.dataset.action = "open-100-exit-menu";
-        targetButton.textContent = "MC";
-        targetButton.title = "Open 100% market-cap target and stop orders";
-        targetButton.setAttribute("aria-label", "Open 100% market-cap target and stop orders");
-
-        buttonGroup.appendChild(button);
-        buttonGroup.appendChild(targetButton);
-        sellButtonsEl.appendChild(buttonGroup);
-      } else {
-        sellButtonsEl.appendChild(button);
+        button.title = "Right-click for 100% market-cap target and stop orders";
+        button.addEventListener("contextmenu", handleSellButtonTargetContextEvent, true);
       }
+      sellButtonsEl.appendChild(button);
     });
 
     renderExitTargets(exitTargetSummaryEl, exitTargetListEl);
