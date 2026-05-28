@@ -2,6 +2,7 @@ let mediaRecorder: MediaRecorder | null = null;
 let mediaStream: MediaStream | null = null;
 let sessionStartedAtMs: number | null = null;
 let stopping = false;
+let discarding = false;
 let audioRecordingBlobs: Blob[] = [];
 let audioChunkStream: MediaStream | null = null;
 let audioChunkRecorder: MediaRecorder | null = null;
@@ -17,6 +18,7 @@ let fetchedOpenrouterModels: Array<{ id: string; createdAtMs: number; inputCostP
 let fetchedGeminiCliModels: Array<{ id: string; createdAtMs: number }> = [];
 let finalizationTimer: number | null = null;
 let latestFinalization: WilyTraderSessionFinalization | null = null;
+let latestStatus: WilyTraderDesktopStatus | null = null;
 
 const INCREMENTAL_AUDIO_CHUNK_MS = 60_000;
 
@@ -41,6 +43,7 @@ interface WilyTraderDesktopStatus {
   sessionState: 'idle' | 'recording' | 'finalizing';
   bridgePort: number;
   sessionDir: string | null;
+  lastCompletedSessionDir: string | null;
   sessionStartedAtMs: number | null;
   elapsedMs: number;
   transcriptSegments: number;
@@ -82,6 +85,8 @@ type WilyTraderDesktopRuntimeApi = typeof window.wilyTraderDesktop & Partial<{
 
 const startButton = document.querySelector<HTMLButtonElement>('[data-action="start"]');
 const stopButton = document.querySelector<HTMLButtonElement>('[data-action="stop"]');
+const discardButton = document.querySelector<HTMLButtonElement>('[data-action="discard"]');
+const openSessionFolderButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-action="open-session-folder"]'));
 const settingsButton = document.querySelector<HTMLButtonElement>('[data-action="settings"]');
 const settingsSaveButton = document.querySelector<HTMLButtonElement>('[data-action="settings-save"]');
 const updateCheckButton = document.querySelector<HTMLButtonElement>('[data-action="check-extension-update"]');
@@ -92,6 +97,8 @@ const finalizationEtaEl = document.querySelector<HTMLElement>('[data-finalizatio
 const finalizationTrackEl = document.querySelector<HTMLElement>('[data-finalization-track]');
 const finalizationBarEl = document.querySelector<HTMLElement>('[data-finalization-bar]');
 const sessionDirEl = document.querySelector<HTMLElement>('[data-session-dir]');
+const lastCompletedSessionEl = document.querySelector<HTMLElement>('[data-last-completed-session]');
+const lastCompletedDirEl = document.querySelector<HTMLElement>('[data-last-completed-dir]');
 const bridgeEl = document.querySelector<HTMLElement>('[data-bridge]');
 const countsEl = document.querySelector<HTMLElement>('[data-counts]');
 const extensionVersionEl = document.querySelector<HTMLElement>('[data-extension-version]');
@@ -127,6 +134,10 @@ window.addEventListener('unhandledrejection', (event) => {
 
 startButton?.addEventListener('click', () => void startAudioFirstSession().catch(showError));
 stopButton?.addEventListener('click', () => void stopAudioFirstSession().catch(showError));
+discardButton?.addEventListener('click', () => void discardAudioFirstSession().catch(showError));
+for (const button of openSessionFolderButtons) {
+  button.addEventListener('click', () => void openLastCompletedSessionFolder().catch(showError));
+}
 settingsButton?.addEventListener('click', () => void openSettings());
 for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>('[data-action="settings-close"]'))) {
   button.addEventListener('click', () => closeSettings());
@@ -179,7 +190,8 @@ getSelect('geminiCliModels')?.addEventListener('change', () => {
 
 window.wilyTraderDesktop.onStatus(renderStatus);
 window.wilyTraderDesktop.onToggleSessionHotkey(() => {
-  if (sessionStartedAtMs || mediaRecorder || stopping) void stopAudioFirstSession().catch(showError);
+  if (stopping || discarding) return;
+  if (sessionStartedAtMs || mediaRecorder) void stopAudioFirstSession().catch(showError);
   else void startAudioFirstSession().catch(showError);
 });
 
@@ -191,11 +203,12 @@ void window.wilyTraderDesktop.getStatus().then(renderStatus).catch(showError);
 
 async function startAudioFirstSession(): Promise<void> {
   try {
-    setUiBusy(true, 'Starting WilyTrader trade session...');
+    setUiBusy(true, 'Starting WilyTrader recording session...');
     const session = await window.wilyTraderDesktop.startSession();
     sessionStartedAtMs = session.sessionStartedAtMs;
     currentSettings = session.settings;
     stopping = false;
+    discarding = false;
     audioRecordingBlobs = [];
 
     if (session.settings.microphoneCaptureEnabled) {
@@ -211,17 +224,18 @@ async function startAudioFirstSession(): Promise<void> {
     }
 
     renderStatus(session);
-    setUiBusy(false, session.settings.microphoneCaptureEnabled ? 'Recording microphone audio.' : 'Trade session running.');
+    setUiBusy(false, session.settings.microphoneCaptureEnabled ? 'Recording microphone audio.' : 'Recording session running.');
   } catch (error) {
     stopRollingAudioChunksSync();
     sessionStartedAtMs = null;
     stopping = false;
+    discarding = false;
     throw error;
   }
 }
 
 async function stopAudioFirstSession(): Promise<void> {
-  if (stopping) return;
+  if (stopping || discarding) return;
   stopping = true;
   setUiBusy(true, 'Stopping session...');
   showLocalFinalizationProgress('Stopping recording.', 3);
@@ -231,6 +245,46 @@ async function stopAudioFirstSession(): Promise<void> {
     return;
   }
   await finalizeRecorderStop();
+}
+
+async function discardAudioFirstSession(): Promise<void> {
+  if (stopping || discarding) return;
+  if (!sessionStartedAtMs && !mediaRecorder && !latestStatus?.active) {
+    const status = await window.wilyTraderDesktop.getStatus();
+    renderStatus(status);
+    if (!status.active) return;
+  }
+  if (!window.confirm('Discard this recording session? This stops recording and permanently deletes the active session folder instead of saving audio, transcript, or trade-log artifacts.')) return;
+
+  discarding = true;
+  setUiBusy(true, 'Discarding session...');
+  hideFinalizationProgress();
+  try {
+    await stopRollingAudioChunks(false);
+    await stopMediaRecorderForDiscard();
+    stopMediaStream();
+    audioRecordingBlobs = [];
+    mediaRecorder = null;
+    const result = await window.wilyTraderDesktop.abandonSession();
+    sessionStartedAtMs = null;
+    renderStatus(await window.wilyTraderDesktop.getStatus());
+    setUiBusy(false, result.deleted ? 'Session discarded.' : result.warning ?? `Session abandoned: ${result.sessionDir}`);
+  } finally {
+    discarding = false;
+  }
+}
+
+function stopMediaRecorderForDiscard(): Promise<void> {
+  const recorder = mediaRecorder;
+  if (!recorder || recorder.state === 'inactive') return Promise.resolve();
+  return new Promise((resolve) => {
+    recorder.onstop = () => resolve();
+    try {
+      recorder.stop();
+    } catch {
+      resolve();
+    }
+  });
 }
 
 function startRollingAudioChunks(): void {
@@ -376,9 +430,8 @@ async function finalizeRecorderStop(): Promise<void> {
   }
   audioRecordingBlobs = [];
   if (mediaStream) {
-    for (const track of mediaStream.getTracks()) track.stop();
+    stopMediaStream();
   }
-  mediaStream = null;
   mediaRecorder = null;
   showLocalFinalizationProgress('Processing transcript and trade logs.', 10);
   const result = await window.wilyTraderDesktop.stopSession();
@@ -389,13 +442,24 @@ async function finalizeRecorderStop(): Promise<void> {
   setUiBusy(false, `Session complete: ${result.sessionDir}`);
 }
 
+function stopMediaStream(): void {
+  if (!mediaStream) return;
+  for (const track of mediaStream.getTracks()) track.stop();
+  mediaStream = null;
+}
+
 function renderStatus(status: WilyTraderDesktopStatus): void {
+  latestStatus = status;
   currentSettings = status.settings;
   const finalizing = status.sessionState === 'finalizing' && status.finalization !== null;
-  if (startButton) startButton.disabled = status.active || stopping || finalizing;
+  if (startButton) startButton.disabled = status.active || stopping || discarding || finalizing;
   if (stopButton) {
-    stopButton.disabled = !status.active || stopping || finalizing;
+    stopButton.disabled = !status.active || stopping || discarding || finalizing;
     stopButton.textContent = stopping || finalizing ? 'Processing...' : 'Stop';
+  }
+  if (discardButton) {
+    discardButton.disabled = !status.active || stopping || discarding || finalizing;
+    discardButton.textContent = discarding ? 'Discarding...' : 'Discard';
   }
   if (statusEl) {
     statusEl.textContent = status.active
@@ -405,13 +469,20 @@ function renderStatus(status: WilyTraderDesktopStatus): void {
         : 'Idle';
   }
   if (sessionDirEl) sessionDirEl.textContent = status.sessionDir ?? 'No active session';
+  const hasLastCompletedSession = Boolean(status.lastCompletedSessionDir);
+  if (lastCompletedSessionEl) lastCompletedSessionEl.toggleAttribute('hidden', !hasLastCompletedSession);
+  if (lastCompletedDirEl) lastCompletedDirEl.textContent = status.lastCompletedSessionDir ?? 'No completed session yet';
+  for (const button of openSessionFolderButtons) {
+    button.hidden = !hasLastCompletedSession;
+    button.disabled = !hasLastCompletedSession;
+  }
   if (bridgeEl) bridgeEl.textContent = `Bridge: http://127.0.0.1:${status.bridgePort}/v1/wilytrader/ledger`;
   if (countsEl) {
     countsEl.textContent =
       `${finalizing ? 'Finalizing transcript and trade log' : status.active ? 'Recording audio file' : 'Audio file saved on stop'}, ${status.executionsReceived} bridge events, ${status.screenshotsReceived} screenshots`;
   }
   if (finalizing && status.finalization) showFinalizationProgress(status.finalization);
-  else if (!stopping) hideFinalizationProgress();
+  else if (!stopping && !discarding) hideFinalizationProgress();
   const installed = status.extension.runtimeInstalledVersion ?? status.extension.localManifestVersion ?? 'Not detected';
   const heartbeat = status.extension.runtimeLastSeenAt ? `, last seen ${new Date(status.extension.runtimeLastSeenAt).toLocaleTimeString()}` : '';
   if (extensionVersionEl) extensionVersionEl.textContent = `Installed: ${installed}${heartbeat}`;
@@ -427,8 +498,12 @@ function renderStatus(status: WilyTraderDesktopStatus): void {
 function setUiBusy(busy: boolean, message: string): void {
   if (startButton) startButton.disabled = busy || Boolean(sessionStartedAtMs);
   if (stopButton) {
-    stopButton.disabled = busy || !sessionStartedAtMs;
+    stopButton.disabled = busy || !sessionStartedAtMs || discarding;
     stopButton.textContent = busy && stopping ? 'Processing...' : 'Stop';
+  }
+  if (discardButton) {
+    discardButton.disabled = busy || !sessionStartedAtMs || stopping;
+    discardButton.textContent = busy && discarding ? 'Discarding...' : 'Discard';
   }
   if (statusEl) statusEl.textContent = message;
 }
@@ -683,6 +758,12 @@ async function cancelGeminiSignin(): Promise<void> {
 async function openExtensionFolder(): Promise<void> {
   const result = await window.wilyTraderDesktop.openExtensionFolder();
   setSettingsMessage(result.message, !result.ok);
+}
+
+async function openLastCompletedSessionFolder(): Promise<void> {
+  const result = await window.wilyTraderDesktop.openLastCompletedSessionFolder();
+  setSettingsMessage(result.message, !result.ok);
+  if (statusEl) statusEl.textContent = result.message;
 }
 
 async function moveExtensionLocation(): Promise<void> {

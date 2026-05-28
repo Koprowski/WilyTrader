@@ -39,6 +39,7 @@
     let mutationObserver = null;
     let symbolUnsubscribe = null;
     let symbolPollId = null;
+    let lineMovePollId = null;
     let lastSymbol = "";
     let flushScheduled = false;
 
@@ -154,6 +155,29 @@
         rebind();
       });
       mutationObserver.observe(document.body, { childList: true, subtree: true });
+    }
+
+    function startLineMovePoll() {
+      if (lineMovePollId !== null) return;
+      lineMovePollId = window.setInterval(pollMovableLinePrices, 350);
+    }
+
+    function pollMovableLinePrices() {
+      if (!bound) return;
+      desiredLines.forEach((line) => {
+        if (!isMovableLine(line)) return;
+        const price = readStoredLinePrice(bound, line);
+        if (!Number.isFinite(price) || Number(price) <= 0) return;
+        if (Math.abs(Number(line.price || 0) - Number(price)) < 1) return;
+        line.price = Number(price);
+        window.postMessage({
+          source: "wiley-chart-bridge",
+          event: "lineMoved",
+          positionId: line.positionId,
+          kind: line.kind,
+          price: line.price,
+        }, window.location.origin);
+      });
     }
 
     function rebind() {
@@ -289,9 +313,11 @@
       }
       if (boundChart.chart?.createShape) {
         const id = await createPublicShape(boundChart, line);
+        if (isMovableLine(line)) startLineMovePoll();
         return { ...line, entityId: id, mode: "public" };
       }
       const source = createInternalLineTool(boundChart, line);
+      if (isMovableLine(line)) startLineMovePoll();
       return { ...line, source, entityId: source, mode: "internal" };
     }
 
@@ -299,7 +325,7 @@
       const point = { time: resolveRightmostTime(boundChart), price: line.price };
       return boundChart.chart.createShape(point, {
         shape: "horizontal_line",
-        lock: true,
+        lock: !isMovableLine(line),
         disableSelection: false,
         disableSave: true,
         disableUndo: true,
@@ -390,9 +416,37 @@
         showPrice: style.showPrice !== false,
         horzLabelsAlign: style.labelAlign || "center",
         vertLabelsAlign: "middle",
-        lock: true,
+        lock: !style.movable,
         disableSave: true,
       };
+    }
+
+    function isMovableLine(line) {
+      return Boolean(line.style?.movable) || line.kind === "stop_loss" || line.kind === "take_profit";
+    }
+
+    function readStoredLinePrice(boundChart, line) {
+      const entity = line.entityId ? safeCall(() => boundChart.chart.getShapeById?.(line.entityId)) : null;
+      const entityPoints = entity ? readPointList(entity) : null;
+      const entityPrice = extractPointPrice(entityPoints?.[0]);
+      if (Number.isFinite(entityPrice)) return entityPrice;
+
+      const sourcePoints = line.source ? readPointList(line.source) : null;
+      const sourcePrice = extractPointPrice(sourcePoints?.[0]);
+      return Number.isFinite(sourcePrice) ? sourcePrice : null;
+    }
+
+    function readPointList(source) {
+      const points = safeCall(() => source.getPoints?.())
+        || safeCall(() => source.points?.())
+        || safeCall(() => source._points)
+        || safeCall(() => source._points?.());
+      return Array.isArray(points) ? points : null;
+    }
+
+    function extractPointPrice(point) {
+      const price = Number(point?.price ?? point?._price ?? point?.value?.price ?? point?.value?._price);
+      return Number.isFinite(price) && price > 0 ? price : null;
     }
 
     function buildMarkerOverrides(marker) {
@@ -480,11 +534,10 @@
     function normalizeMarkerStyle(side, style) {
       const color = side === "buy" ? "#22c55e" : "#ef4444";
       return {
-        color,
+        color: style.color || color,
         textColor: "#ffffff",
         fontSize: 11,
         ...style,
-        color: style.color || color,
       };
     }
 

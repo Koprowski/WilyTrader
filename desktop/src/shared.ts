@@ -35,6 +35,7 @@ export interface WilyTraderDesktopStatus {
   sessionState: 'idle' | 'recording' | 'finalizing';
   bridgePort: number;
   sessionDir: string | null;
+  lastCompletedSessionDir: string | null;
   sessionStartedAtMs: number | null;
   elapsedMs: number;
   transcriptSegments: number;
@@ -76,6 +77,13 @@ export interface StopSessionResult {
   warnings: string[];
 }
 
+export interface AbandonSessionResult {
+  ok: true;
+  sessionDir: string;
+  deleted: boolean;
+  warning?: string;
+}
+
 export interface BridgeExecutionEvent {
   type?: string | null;
   captureScreenshot?: boolean | null;
@@ -94,6 +102,7 @@ export interface BridgeScreenshotPayload {
   capturedAtMs?: number | null;
   captureRect?: Record<string, unknown> | null;
   source?: string | null;
+  error?: string | null;
 }
 
 export interface WilyTraderExtensionStatus {

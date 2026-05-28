@@ -12,6 +12,11 @@
   const TRACKER_RESIZE_DIAGNOSTICS = true;
   const PULSE_AUTO_BUY_KEY = "wilytrader_axiom_pulse_auto_buy_v1";
   const PULSE_AUTO_BUY_TTL_MS = 2 * 60 * 1000;
+  const AXIOM_TARGET_TRIGGER_INTERVAL_MS = 500;
+  const EXIT_TARGET_KINDS = {
+    stopLoss: "stop_loss",
+    takeProfit: "take_profit",
+  };
   const LEGACY_DEFAULT_BUY_AMOUNTS = [0.1, 0.2, 0.5, 1];
   const PADRE_FOUR_DEFAULT_BUY_AMOUNTS = [0.1, 0.25, 0.5, 1];
   const PADRE_EIGHT_DEFAULT_BUY_AMOUNTS = [0.1, 0.25, 0.5, 1, 3, 0.005, 5, 7];
@@ -98,6 +103,7 @@
     schemaVersion: SCHEMA_VERSION,
     balances: { SOL: 3, BNB: 1 },
     positions: {},
+    exitTargets: {},
     closedPositions: [],
     executions: [],
     sessions: [],
@@ -153,6 +159,7 @@
     logModal: "wt-log-modal",
     addModal: "wt-add-modal",
     pnlModal: "wt-pnl-modal",
+    contextMenu: "wt-context-menu",
   };
 
   let state = null;
@@ -164,6 +171,9 @@
   let extensionContextValid = true;
   let lastSyncedExecutionId = null;
   let lastAxiomChartArtifactKey = null;
+  let lastAxiomExitTargetSyncKey = null;
+  let lastAxiomExitTargetLineKeys = new Set();
+  let targetExitInFlight = null;
   let pulseQuickBuyBound = false;
   let pendingPulseAutoBuyInFlight = false;
   let pulseQuickBuyQueuedUntil = 0;
@@ -216,6 +226,7 @@
     preloadTradeExecutionSound();
     schedulePendingPulseAutoBuyCheck();
     bindRouteWatcher();
+    bindExitTargetWatcher();
     startUpdateChecks();
     runTask(sendDesktopExtensionStatus("startup"));
     if (isOverlayVisibleRoute()) void syncBridge("startup");
@@ -422,6 +433,7 @@
       schemaVersion: SCHEMA_VERSION,
       balances: { ...DEFAULT_STATE.balances, ...(stored?.balances || {}) },
       positions: { ...(stored?.positions || {}) },
+      exitTargets: normalizeExitTargets(stored?.exitTargets),
       closedPositions: Array.isArray(stored?.closedPositions) ? stored.closedPositions : [],
       executions,
       sessions: Array.isArray(stored?.sessions) ? stored.sessions : [],
@@ -447,6 +459,42 @@
       merged.settings.sellPriorityFeeNative = Number(stored.settings.feeNative) || DEFAULT_STATE.settings.sellPriorityFeeNative;
     }
     return merged;
+  }
+
+  function normalizeExitTargets(targets) {
+    if (!targets || typeof targets !== "object") return {};
+    return Object.fromEntries(
+      Object.entries(targets)
+        .map(([, target]) => normalizeExitTarget(target))
+        .filter(Boolean)
+        .map((target) => [target.id, target])
+    );
+  }
+
+  function normalizeTargetSellPercent(value) {
+    const percent = Number(value);
+    if (!Number.isFinite(percent) || percent <= 0) return 100;
+    return Math.min(100, Math.max(0.01, percent));
+  }
+
+  function normalizeExitTarget(target) {
+    const kind = target?.kind === EXIT_TARGET_KINDS.takeProfit ? EXIT_TARGET_KINDS.takeProfit : target?.kind === EXIT_TARGET_KINDS.stopLoss ? EXIT_TARGET_KINDS.stopLoss : null;
+    const marketCapUsd = Number(target?.marketCapUsd);
+    if (!kind || !Number.isFinite(marketCapUsd) || marketCapUsd <= 0) return null;
+    const id = String(target.id || createId("target"));
+    return {
+      id,
+      kind,
+      tokenKey: target.tokenKey || null,
+      tokenAddress: target.tokenAddress || null,
+      tokenName: target.tokenName || null,
+      positionId: target.positionId || null,
+      sellPercent: normalizeTargetSellPercent(target.sellPercent ?? target.requestedSellPct ?? 100),
+      marketCapUsd,
+      createdAt: target.createdAt || new Date().toISOString(),
+      updatedAt: target.updatedAt || target.createdAt || new Date().toISOString(),
+      triggeredAt: target.triggeredAt || null,
+    };
   }
 
   function migrateSettingsToCurrentDefaults(settings, storedSettings) {
@@ -626,6 +674,8 @@
     }
     if (!panelVisible) {
       lastAxiomChartArtifactKey = null;
+      lastAxiomExitTargetSyncKey = null;
+      lastAxiomExitTargetLineKeys = new Set();
       postAxiomChartBridgeMessage({ op: "clearAll" });
     }
     return panelVisible;
@@ -862,6 +912,13 @@
         <div class="wt-tracker-resize wt-tracker-resize-sw" data-tracker-resize-corner="bottom-left" title="Scale tracker" aria-hidden="true"></div>
         <div class="wt-tracker-resize wt-tracker-resize-se" data-tracker-resize-corner="bottom-right" title="Scale tracker" aria-hidden="true"></div>
       </section>
+      <div id="${selectors.contextMenu}" class="wt-context-menu" hidden>
+        <div class="wt-context-title">WilyTrader</div>
+        <button type="button" data-action="context-set-stop-loss">WT Stop Loss</button>
+        <button type="button" data-action="context-set-take-profit">WT 100% Exit</button>
+        <button type="button" data-action="context-custom-target">Custom MC Target</button>
+        <button type="button" data-action="context-clear-targets">Clear WT Targets</button>
+      </div>
       <section class="${selectors.panel}" aria-label="WilyTrader paper trading panel">
         <header class="wt-header">
           <button type="button" class="wt-icon-btn" data-action="toggle" title="Minimize" aria-label="Minimize">-</button>
@@ -938,6 +995,18 @@
                 <input data-quick-setting="sellBribeFeeNative" type="number" min="0" step="0.0001" />
               </label>
             </div>
+          </div>
+          <div class="wt-section wt-exit-section">
+            <div class="wt-trade-header">
+              <div class="wt-trade-title wt-exit-title">Exit Orders</div>
+              <div class="wt-muted" data-exit-target-summary>None</div>
+            </div>
+            <div class="wt-target-row">
+              <input class="wt-input wt-target-input" data-exit-target-mc type="text" placeholder="$120K or 120000" />
+              <button type="button" class="wt-button wt-button-secondary" data-action="set-stop-loss">SL</button>
+              <button type="button" class="wt-button" data-action="set-take-profit">TP</button>
+            </div>
+            <div class="wt-target-list" data-exit-target-list></div>
           </div>
         </div>
         <div class="wt-resize-handle wt-resize-nw" data-resize-corner="top-left" title="Scale panel" aria-hidden="true"></div>
@@ -1091,9 +1160,14 @@
     document.documentElement.appendChild(root);
     root.addEventListener("pointerdown", stopOverlayEvent, true);
     root.addEventListener("click", handleClick, true);
+    root.addEventListener("contextmenu", handleOverlayContextMenu, true);
     root.addEventListener("change", handleChange);
     document.removeEventListener("pointerdown", closeTrackerMenuOnOutsidePointer, true);
     document.addEventListener("pointerdown", closeTrackerMenuOnOutsidePointer, true);
+    document.removeEventListener("pointerdown", closeContextMenuOnOutsidePointer, true);
+    document.addEventListener("pointerdown", closeContextMenuOnOutsidePointer, true);
+    document.removeEventListener("contextmenu", handleAxiomContextMenu, true);
+    document.addEventListener("contextmenu", handleAxiomContextMenu, true);
     window.addEventListener("unhandledrejection", handleUnhandledRejection);
     window.addEventListener("error", handleWindowError);
     window.addEventListener("message", handleAxiomChartBridgeEvent);
@@ -1131,8 +1205,11 @@
     const data = event.data || {};
     if (data.source !== "wiley-chart-bridge") return;
     if (data.event === "chartRebound" || data.event === "symbolChange") {
+      lastAxiomExitTargetSyncKey = null;
       injectAxiomChartBridgeScript();
       render();
+    } else if (data.event === "lineMoved") {
+      runTask(handleAxiomExitTargetLineMoved(data));
     }
   }
 
@@ -1231,6 +1308,15 @@
     };
   }
 
+  function handleOverlayContextMenu(event) {
+    const target = event.target?.closest?.("[data-sell-pct]");
+    if (!target || !root?.contains(target)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+    showSellButtonTargetMenu(event.clientX, event.clientY, Number(target.dataset.sellPct || 100));
+  }
+
   function handleClick(event) {
     const target = event.target.closest("button");
     if (!target || !root?.contains(target)) return;
@@ -1316,6 +1402,27 @@
         confirmMessage: "Reset session P&L and start a new session? Current trades and notes will be archived as a previous session summary.",
         statusMessage: "Session P&L reset.",
       }));
+    } else if (action === "set-stop-loss") {
+      runTask(setExitTargetFromPanel(EXIT_TARGET_KINDS.stopLoss));
+    } else if (action === "set-take-profit") {
+      runTask(setExitTargetFromPanel(EXIT_TARGET_KINDS.takeProfit));
+    } else if (action === "clear-exit-target") {
+      runTask(clearExitTarget(target.dataset.targetId));
+    } else if (action === "add-exit-target-order") {
+      closeContextMenu();
+      runTask(promptForExitTarget(target.dataset.targetKind, Number(target.dataset.targetSellPct || 100)));
+    } else if (action === "context-set-stop-loss") {
+      closeContextMenu();
+      runTask(setExitTargetAtCurrentMarketCap(EXIT_TARGET_KINDS.stopLoss, 100));
+    } else if (action === "context-set-take-profit") {
+      closeContextMenu();
+      runTask(setExitTargetAtCurrentMarketCap(EXIT_TARGET_KINDS.takeProfit, 100));
+    } else if (action === "context-custom-target") {
+      closeContextMenu();
+      runTask(promptForExitTarget(null, 100));
+    } else if (action === "context-clear-targets") {
+      closeContextMenu();
+      runTask(clearAllExitTargetsForActivePosition());
     } else if (action === "bridge-sync") {
       runTask(syncBridge("manual"));
     } else if (action === "export") {
@@ -2022,6 +2129,181 @@
     setStatus("Note added.");
   }
 
+  function handleAxiomContextMenu(event) {
+    if (!isAxiomMemeRoute(new URL(window.location.href))) return;
+    if (isWilyTraderUiTarget(event.target) || isWilyTraderModalOpen()) return;
+    const token = (updateActiveToken(), activeToken);
+    if (!token?.key || !state.positions[token.key]) return;
+    showContextMenu(event.clientX, event.clientY);
+  }
+
+  function showContextMenu(clientX, clientY) {
+    const menu = root?.querySelector(`#${selectors.contextMenu}`);
+    if (!menu) return;
+    menu.innerHTML = `
+      <div class="wt-context-title">WilyTrader</div>
+      <button type="button" data-action="context-set-stop-loss">WT Stop Loss @ current MC</button>
+      <button type="button" data-action="context-set-take-profit">WT 100% Exit @ current MC</button>
+      <button type="button" data-action="context-custom-target">Custom MC Target</button>
+      <button type="button" data-action="context-clear-targets">Clear WT Targets</button>
+    `;
+    positionContextMenu(menu, clientX, clientY);
+  }
+
+  function showSellButtonTargetMenu(clientX, clientY, sellPercent) {
+    const menu = root?.querySelector(`#${selectors.contextMenu}`);
+    if (!menu) return;
+    const percent = normalizeTargetSellPercent(sellPercent);
+    menu.innerHTML = `
+      <div class="wt-context-title">WilyTrader ${formatTargetSellPercent(percent)}</div>
+      <button type="button" data-action="add-exit-target-order" data-target-kind="${EXIT_TARGET_KINDS.takeProfit}" data-target-sell-pct="${percent}">Target sell ${formatTargetSellPercent(percent)}</button>
+      <button type="button" data-action="add-exit-target-order" data-target-kind="${EXIT_TARGET_KINDS.stopLoss}" data-target-sell-pct="${percent}">Stop sell ${formatTargetSellPercent(percent)}</button>
+      <button type="button" data-action="context-clear-targets">Clear WT Targets</button>
+    `;
+    positionContextMenu(menu, clientX, clientY);
+  }
+
+  function positionContextMenu(menu, clientX, clientY) {
+    menu.hidden = false;
+    const rect = menu.getBoundingClientRect();
+    const left = Math.min(Math.max(8, clientX), Math.max(8, window.innerWidth - rect.width - 8));
+    const top = Math.min(Math.max(8, clientY), Math.max(8, window.innerHeight - rect.height - 8));
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+  }
+
+  function closeContextMenu() {
+    const menu = root?.querySelector(`#${selectors.contextMenu}`);
+    if (menu) menu.hidden = true;
+  }
+
+  function closeContextMenuOnOutsidePointer(event) {
+    const menu = root?.querySelector(`#${selectors.contextMenu}`);
+    if (!menu || menu.hidden || menu.contains(event.target)) return;
+    closeContextMenu();
+  }
+
+  async function setExitTargetFromPanel(kind) {
+    const input = root.querySelector("[data-exit-target-mc]");
+    const marketCapUsd = parseMarketCapInput(input?.value);
+    if (!marketCapUsd) return setStatus("Enter a valid market cap target.");
+    await setExitTarget(kind, marketCapUsd, 100);
+    if (input) input.value = "";
+  }
+
+  async function setExitTargetAtCurrentMarketCap(kind, sellPercent = 100) {
+    updateActiveToken();
+    const marketCapUsd = Number(activeToken?.marketCap || 0);
+    if (!Number.isFinite(marketCapUsd) || marketCapUsd <= 0) {
+      return setStatus("Current market cap is unavailable.");
+    }
+    await setExitTarget(kind, marketCapUsd, sellPercent);
+  }
+
+  async function promptForExitTarget(kind = null, sellPercent = 100) {
+    updateActiveToken();
+    const current = Number(activeToken?.marketCap || 0);
+    const defaultValue = current > 0 ? formatters.usd(current) : "";
+    const percent = normalizeTargetSellPercent(sellPercent);
+    const label = kind ? `${formatExitTargetKind(kind)} ${formatTargetSellPercent(percent)}` : `WT market cap target ${formatTargetSellPercent(percent)}`;
+    const raw = window.prompt(label, defaultValue);
+    if (raw === null) return;
+    const marketCapUsd = parseMarketCapInput(raw);
+    if (!marketCapUsd) return setStatus("Enter a valid market cap target.");
+    const resolvedKind = kind || (current > 0 && marketCapUsd >= current ? EXIT_TARGET_KINDS.takeProfit : EXIT_TARGET_KINDS.stopLoss);
+    await setExitTarget(resolvedKind, marketCapUsd, percent);
+  }
+
+  async function setExitTarget(kind, marketCapUsd, sellPercent = 100) {
+    updateActiveToken();
+    const token = activeToken;
+    const position = token?.key ? state.positions[token.key] : null;
+    if (!token?.key || !position) return setStatus("Open a paper position before setting an exit target.");
+    const normalizedKind = kind === EXIT_TARGET_KINDS.takeProfit ? EXIT_TARGET_KINDS.takeProfit : EXIT_TARGET_KINDS.stopLoss;
+    const now = new Date().toISOString();
+    const id = createId("target");
+    state.exitTargets[id] = {
+      id,
+      kind: normalizedKind,
+      tokenKey: token.key,
+      tokenAddress: token.address,
+      tokenName: token.name,
+      positionId: position.positionId,
+      sellPercent: normalizeTargetSellPercent(sellPercent),
+      marketCapUsd: Number(marketCapUsd),
+      createdAt: now,
+      updatedAt: now,
+      triggeredAt: null,
+    };
+    lastAxiomExitTargetSyncKey = null;
+    await persistAndSync("exit-target");
+    render();
+    setStatus(`${formatExitTargetKind(normalizedKind)} ${formatTargetSellPercent(sellPercent)} set at ${formatters.usd(marketCapUsd)}.`);
+  }
+
+  async function clearExitTarget(targetId) {
+    const target = state.exitTargets?.[targetId];
+    if (!target) return;
+    delete state.exitTargets[target.id];
+    lastAxiomExitTargetSyncKey = null;
+    await persistAndSync("exit-target-clear");
+    render();
+    setStatus(`${formatExitTargetKind(target.kind)} ${formatTargetSellPercent(target.sellPercent)} cleared.`);
+  }
+
+  async function clearAllExitTargetsForActivePosition() {
+    const targets = getActiveExitTargets();
+    targets.forEach((target) => {
+      delete state.exitTargets[target.id];
+    });
+    lastAxiomExitTargetSyncKey = null;
+    await persistAndSync("exit-target-clear");
+    render();
+    setStatus(targets.length ? "WT exit targets cleared." : "No WT exit targets to clear.");
+  }
+
+  async function handleAxiomExitTargetLineMoved(data) {
+    const kind = data.kind === EXIT_TARGET_KINDS.takeProfit ? EXIT_TARGET_KINDS.takeProfit : data.kind === EXIT_TARGET_KINDS.stopLoss ? EXIT_TARGET_KINDS.stopLoss : null;
+    const marketCapUsd = Number(data.price);
+    if (!kind || !Number.isFinite(marketCapUsd) || marketCapUsd <= 0 || !data.positionId) return;
+    const target = state.exitTargets[data.positionId] || Object.values(state.exitTargets || {}).find((item) => item?.positionId === data.positionId && item.kind === kind);
+    if (!target) return;
+    if (Math.abs(Number(target.marketCapUsd || 0) - marketCapUsd) < 1) return;
+    target.marketCapUsd = marketCapUsd;
+    target.updatedAt = new Date().toISOString();
+    target.triggeredAt = null;
+    lastAxiomExitTargetSyncKey = null;
+    await persistAndSync("exit-target-moved");
+    render();
+    setStatus(`${formatExitTargetKind(kind)} moved to ${formatters.usd(marketCapUsd)}.`);
+  }
+
+  function parseMarketCapInput(value) {
+    const text = String(value || "").trim();
+    const match = text.match(/\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*([KMB])?/i);
+    if (!match) return null;
+    const parsed = parseCompactNumber(match[1], match[2]);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  function getActiveExitTargets() {
+    updateActiveToken();
+    const token = activeToken;
+    const position = token?.key ? state.positions[token.key] : null;
+    if (!position) return [];
+    return Object.values(state.exitTargets || {})
+      .filter((target) => target?.positionId === position.positionId && !target.triggeredAt)
+      .sort((a, b) => Number(a.marketCapUsd || 0) - Number(b.marketCapUsd || 0));
+  }
+
+  function formatExitTargetKind(kind) {
+    return kind === EXIT_TARGET_KINDS.takeProfit ? "WT target" : "WT stop";
+  }
+
+  function formatTargetSellPercent(percent) {
+    return `${Number(normalizeTargetSellPercent(percent)).toFixed(0)}%`;
+  }
+
   async function buy(amountNative, tokenOverride = null, options = {}) {
     if (tradeInFlight) return setStatus("Execution already pending.");
     if (!Number.isFinite(amountNative) || amountNative <= 0) return setStatus("Enter a valid buy amount.");
@@ -2163,6 +2445,7 @@
     if (!after) {
       const summary = buildPositionSummary(position.positionId, "closed");
       if (summary) state.closedPositions.push(summary);
+      removeExitTargetsForPosition(position.positionId);
     }
 
     await persistAndSync("sell");
@@ -2182,6 +2465,13 @@
     if (sellRatio >= 1) return true;
     const relativeDustThreshold = Math.max(Number(originalTokenAmount || 0) * 1e-9, Number.EPSILON);
     return remainingTokenAmount <= relativeDustThreshold;
+  }
+
+  function removeExitTargetsForPosition(positionId) {
+    Object.keys(state.exitTargets || {}).forEach((key) => {
+      if (state.exitTargets[key]?.positionId === positionId) delete state.exitTargets[key];
+    });
+    lastAxiomExitTargetSyncKey = null;
   }
 
   function createEmptyPosition(token) {
@@ -2370,6 +2660,10 @@
     const netReceivedNative = sum(sells, "netNative");
     const sellFeesNative = sum(sells, "feeNative");
     const totalFeesNative = buyFeesNative + sellFeesNative;
+    const totalPlatformFeesNative = sum(executions, "platformFeeNative");
+    const totalGasFeesNative = sum(executions, "gasFeeNative");
+    const totalPriorityFeesNative = sum(executions, "priorityFeeNative");
+    const totalBribeFeesNative = sum(executions, "bribeFeeNative");
     const pnlPreFeeNative = grossReceivedNative - investedNative;
     const pnlPostFeeNative = netReceivedNative - investedNative - buyFeesNative;
     const basisNative = investedNative + buyFeesNative;
@@ -2407,6 +2701,10 @@
       buyFeesNative: round(buyFeesNative),
       sellFeesNative: round(sellFeesNative),
       totalFeesNative: round(totalFeesNative),
+      totalPlatformFeesNative: round(totalPlatformFeesNative),
+      totalGasFeesNative: round(totalGasFeesNative),
+      totalPriorityFeesNative: round(totalPriorityFeesNative),
+      totalBribeFeesNative: round(totalBribeFeesNative),
       pnlPreFeeNative: round(pnlPreFeeNative),
       pnlPostFeeNative: round(pnlPostFeeNative),
       pnlPct: round(pnlPct, 4),
@@ -2507,6 +2805,8 @@
     const sellButtonsEl = root.querySelector("[data-sell-buttons]");
     const buyChainEl = root.querySelector("[data-buy-chain]");
     const sellAssetsEl = root.querySelector("[data-sell-assets]");
+    const exitTargetSummaryEl = root.querySelector("[data-exit-target-summary]");
+    const exitTargetListEl = root.querySelector("[data-exit-target-list]");
     const logEl = root.querySelector(`#${selectors.log}`);
 
     if (!tokenEl || !balanceEl || !positionEl || !buyButtonsEl || !sellButtonsEl) {
@@ -2596,6 +2896,8 @@
       sellButtonsEl.appendChild(button);
     });
 
+    renderExitTargets(exitTargetSummaryEl, exitTargetListEl);
+
     if (logEl) {
       logEl.innerHTML = "";
       const recent = state.executions.slice(-1).reverse();
@@ -2607,6 +2909,36 @@
       });
     }
     syncAxiomNativeChartLines(chartSummary, token);
+    syncAxiomExitTargetLines(token);
+  }
+
+  function renderExitTargets(summaryEl, listEl) {
+    const targets = getActiveExitTargets();
+    if (summaryEl) summaryEl.textContent = targets.length ? `${targets.length} armed` : "None";
+    if (!listEl) return;
+    listEl.innerHTML = "";
+    if (targets.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "wt-muted";
+      empty.textContent = "No active target";
+      listEl.appendChild(empty);
+      return;
+    }
+    targets.forEach((target) => {
+      const row = document.createElement("div");
+      row.className = `wt-target-chip wt-${target.kind.replace("_", "-")}`;
+      const label = document.createElement("span");
+      label.textContent = `${target.kind === EXIT_TARGET_KINDS.takeProfit ? "TP" : "SL"} ${formatTargetSellPercent(target.sellPercent)} ${formatters.usd(target.marketCapUsd)}`;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.action = "clear-exit-target";
+      button.dataset.targetId = target.id;
+      button.title = `Clear ${formatExitTargetKind(target.kind)} ${formatTargetSellPercent(target.sellPercent)}`;
+      button.setAttribute("aria-label", `Clear ${formatExitTargetKind(target.kind)} ${formatTargetSellPercent(target.sellPercent)}`);
+      button.textContent = "x";
+      row.append(label, button);
+      listEl.appendChild(row);
+    });
   }
 
   function renderFloatingTracker() {
@@ -2803,6 +3135,53 @@
     syncAxiomExecutionMarkers(summary, token);
   }
 
+  function syncAxiomExitTargetLines(token) {
+    if (token?.platform !== "axiom") return;
+    const targets = getActiveExitTargets();
+    const syncKey = targets
+      .map((target) => `${target.id}:${target.kind}:${round(target.marketCapUsd, 2)}:${round(target.sellPercent, 2)}`)
+      .sort()
+      .join("|");
+    if (lastAxiomExitTargetSyncKey === syncKey) return;
+    lastAxiomExitTargetSyncKey = syncKey;
+
+    const nextLineKeys = new Set(targets.map((target) => axiomExitTargetLineKey(target)));
+    lastAxiomExitTargetLineKeys.forEach((key) => {
+      if (nextLineKeys.has(key)) return;
+      const [positionId, kind] = key.split("|");
+      if (positionId && kind) postAxiomChartBridgeMessage({ op: "remove", positionId, kind });
+    });
+
+    targets.forEach((target) => {
+      postAxiomChartBridgeMessage({
+        op: "upsert",
+        positionId: target.id,
+        kind: target.kind,
+        price: target.marketCapUsd,
+        style: buildAxiomExitTargetLineStyle(target),
+      });
+    });
+    lastAxiomExitTargetLineKeys = nextLineKeys;
+  }
+
+  function axiomExitTargetLineKey(target) {
+    return `${target.id}|${target.kind}`;
+  }
+
+  function buildAxiomExitTargetLineStyle(target) {
+    const isTakeProfit = target.kind === EXIT_TARGET_KINDS.takeProfit;
+    return {
+      color: isTakeProfit ? "#31e6ba" : "#ff3d8f",
+      lineWidth: 2,
+      lineStyle: "solid",
+      labelText: `${isTakeProfit ? "WT TARGET" : "WT STOP"} ${formatTargetSellPercent(target.sellPercent)} ${formatters.usd(target.marketCapUsd)}`,
+      labelBackground: isTakeProfit ? "rgba(49, 230, 186, 0.86)" : "rgba(255, 61, 143, 0.86)",
+      labelAlign: isTakeProfit ? "right" : "left",
+      showPrice: true,
+      movable: true,
+    };
+  }
+
   function syncAxiomExecutionMarkers(summary, token) {
     const executionIds = new Set(summary.executionIds || []);
     const cutoffMs = getChartArtifactCutoffMs();
@@ -2851,7 +3230,7 @@
       lineStyle: "dashed",
       labelText: `${isEntry ? "AVG ENTRY" : "AVG EXIT"} ${formatters.usd(price)}`,
       labelBackground: isEntry ? "rgba(34, 197, 94, 0.86)" : "rgba(239, 68, 68, 0.86)",
-      labelAlign: isEntry ? "left" : "right",
+      labelAlign: isEntry ? "left" : "center",
       showPrice: true,
     };
   }
@@ -2901,12 +3280,12 @@
       ["Executions", String(summary.executionCount)],
       ["Realized", formatters.native(summary.realizedPnlNative, summary.chain, 3)],
       ["Active Open", formatters.native(summary.activeOpenPnlNative, summary.chain, 3)],
-      ["SOL In", formatters.native(summary.totalInvestedNative, summary.chain, 3)],
-      ["SOL Out", formatters.native(summary.totalReceivedNative, summary.chain, 3)],
+      ["Buy Gross", formatters.native(summary.totalInvestedNative, summary.chain, 3)],
+      ["Sell Net", formatters.native(summary.totalReceivedNative, summary.chain, 3)],
       ["Entry MC", summary.entryMarketCapVwapUsd ? formatters.usd(summary.entryMarketCapVwapUsd) : "-"],
       ["Exit MC", summary.exitMarketCapVwapUsd ? formatters.usd(summary.exitMarketCapVwapUsd) : "-"],
       ["Fees", formatters.native(summary.totalFeesNative, summary.chain)],
-      ["Total", formatters.native(summary.totalPnlNative, summary.chain, 3)],
+      ["Net P&L", formatters.native(summary.totalPnlNative, summary.chain, 3)],
     ];
     summaryEl.innerHTML = "";
     rows.forEach(([label, value]) => {
@@ -2943,7 +3322,7 @@
     const pnlNative = Number(summary.pnlPostFeeNative || 0);
     const directionClass = getPnlDirectionClass(pnlNative);
     const executions = getSummaryExecutions(summary);
-    const sellLegs = executions.filter((execution) => execution.side === "sell");
+    const ledger = buildRoundTripLedger(summary, executions, chain);
 
     if (tokenEl) {
       tokenEl.textContent = [
@@ -2961,36 +3340,56 @@
     hero.appendChild(pnlValue);
 
     const pnlMeta = document.createElement("span");
-    pnlMeta.textContent = `${formatters.pct(summary.pnlPct || 0)} post-fee P&L`;
+    pnlMeta.textContent = `${formatters.pct(summary.pnlPct || 0)} net wallet P&L after fees`;
     hero.appendChild(pnlMeta);
     container.appendChild(hero);
 
     const stats = document.createElement("div");
     stats.className = "wt-pnl-stats";
     [
-      ["Bought", formatters.native(summary.investedNative || 0, chain, 4)],
-      ["Sold", formatters.native(summary.netReceivedNative || 0, chain, 4)],
+      ["Buy gross exposure", formatters.native(summary.investedNative || 0, chain, 4)],
+      ["Buy wallet debit", formatters.native(ledger.buyWalletDebitNative, chain, 4)],
+      ["Sell gross value", formatters.native(summary.grossReceivedNative || 0, chain, 4)],
+      ["Sell net received", formatters.native(summary.netReceivedNative || 0, chain, 4)],
+      ["Entry fees", formatters.native(summary.buyFeesNative || 0, chain, 4)],
+      ["Exit fees", formatters.native(summary.sellFeesNative || 0, chain, 4)],
+      ["Platform fees", formatters.native(summary.totalPlatformFeesNative || 0, chain, 4)],
+      ["Fixed fees", formatters.native(
+        Number(summary.totalGasFeesNative || 0) +
+        Number(summary.totalPriorityFeesNative || 0) +
+        Number(summary.totalBribeFeesNative || 0),
+        chain,
+        4
+      )],
+      ["Gross price P&L", formatters.signedNative(summary.pnlPreFeeNative || 0, chain, 4)],
+      ["Fee drag", formatters.signedNative(-ledger.totalFeesNative, chain, 4)],
       ["Hold Time", formatClosedPositionHoldTime(summary)],
-      ["Trades", `${summary.buyCount || 0} buys / ${summary.sellCount || 0} sells`],
+      ["Legs", `${summary.buyCount || 0} buys / ${summary.sellCount || 0} sells`],
     ].forEach(([label, value]) => stats.appendChild(createPnlStat(label, value)));
     container.appendChild(stats);
 
+    const feeNote = document.createElement("div");
+    feeNote.className = "wt-pnl-note";
+    feeNote.textContent = [
+      `Current simulator model: buy buttons create ${formatters.native(summary.investedNative || 0, chain, 4)} of token exposure, then fees are charged on top as wallet debit.`,
+      `Break-even gross exit value for this exact round trip was ${formatters.native(ledger.breakEvenGrossExitNative, chain, 4)} before profit.`,
+    ].join(" ");
+    container.appendChild(feeNote);
+
     const title = document.createElement("div");
     title.className = "wt-pnl-subtitle";
-    title.textContent = "Sell Leg P&L";
+    title.textContent = "Round Trip Cash-Flow Ledger";
     container.appendChild(title);
 
     const legList = document.createElement("div");
     legList.className = "wt-pnl-leg-list";
-    if (sellLegs.length === 0) {
+    if (ledger.rows.length === 0) {
       const empty = document.createElement("div");
       empty.className = "wt-muted";
-      empty.textContent = "No sell legs recorded for this position.";
+      empty.textContent = "No execution legs recorded for this position.";
       legList.appendChild(empty);
     } else {
-      sellLegs.forEach((execution, index) => {
-        legList.appendChild(createSellLegPnlRow(execution, index, chain));
-      });
+      ledger.rows.forEach((row) => legList.appendChild(createExecutionLedgerRow(row, chain)));
     }
     container.appendChild(legList);
   }
@@ -3006,30 +3405,103 @@
     return item;
   }
 
-  function createSellLegPnlRow(execution, index, chain) {
-    const pnlNative = Number(execution.pnlNative || 0);
+  function createExecutionLedgerRow(ledgerRow, chain) {
+    const execution = ledgerRow.execution;
+    const pnlNative = Number(ledgerRow.runningPnlNative || 0);
     const row = document.createElement("div");
     row.className = `wt-pnl-leg ${getPnlDirectionClass(pnlNative)}`;
 
     const header = document.createElement("div");
     header.className = "wt-pnl-leg-header";
     const title = document.createElement("strong");
-    title.textContent = `Sell ${index + 1}${execution.requestedSellPct ? ` - ${Number(execution.requestedSellPct).toFixed(0)}%` : ""}`;
+    title.textContent = formatLedgerLegTitle(ledgerRow);
     const pnl = document.createElement("span");
-    pnl.textContent = `${formatters.signedNative(pnlNative, chain, 4)} (${formatters.pct(execution.pnlPct || 0)})`;
+    pnl.textContent = `Run P&L ${formatters.signedNative(ledgerRow.runningPnlNative, chain, 4)}`;
     header.append(title, pnl);
 
     const details = document.createElement("div");
     details.className = "wt-pnl-leg-details";
-    [
-      ["Sold", formatters.native(execution.netNative || execution.solReceivedNative || 0, chain, 4)],
-      ["Basis", formatters.native(execution.costBasisNative || 0, chain, 4)],
-      ["Tokens", round(execution.tokenAmount || 0, 6).toLocaleString()],
-      ["Time", execution.timestamp ? new Date(execution.timestamp).toLocaleTimeString() : "-"],
-    ].forEach(([label, value]) => details.appendChild(createPnlStat(label, value)));
+    getLedgerLegStats(ledgerRow, chain).forEach(([label, value]) => {
+      details.appendChild(createPnlStat(label, value));
+    });
 
     row.append(header, details);
     return row;
+  }
+
+  function buildRoundTripLedger(summary, executions, chain) {
+    let runningPnlNative = 0;
+    let buyWalletDebitNative = 0;
+    const sideCounts = { buy: 0, sell: 0 };
+    const rows = executions.map((execution, index) => {
+      const feeNative = Number(execution.feeNative || 0);
+      sideCounts[execution.side] = (sideCounts[execution.side] || 0) + 1;
+      if (execution.side === "buy") {
+        buyWalletDebitNative += Math.abs(Number(execution.netNative || execution.solDebitedNative || 0));
+        runningPnlNative -= feeNative;
+      } else {
+        runningPnlNative += Number(execution.pnlNative || 0);
+      }
+      return {
+        execution,
+        index,
+        sideIndex: sideCounts[execution.side],
+        runningPnlNative: round(runningPnlNative),
+        fixedFeeNative: round(
+          Number(execution.gasFeeNative || 0) +
+          Number(execution.priorityFeeNative || 0) +
+          Number(execution.bribeFeeNative || 0)
+        ),
+      };
+    });
+    const totalFeesNative = Number(summary.totalFeesNative || 0);
+    const investedNative = Number(summary.investedNative || 0);
+    const breakEvenGrossExitNative = investedNative + totalFeesNative;
+    return {
+      chain,
+      rows,
+      buyWalletDebitNative: round(buyWalletDebitNative),
+      totalFeesNative: round(totalFeesNative),
+      breakEvenGrossExitNative: round(breakEvenGrossExitNative),
+    };
+  }
+
+  function formatLedgerLegTitle(ledgerRow) {
+    const execution = ledgerRow.execution;
+    const side = execution.side === "buy" ? "Buy" : "Sell";
+    const pct = execution.side === "sell" && execution.requestedSellPct ? ` ${Number(execution.requestedSellPct).toFixed(0)}%` : "";
+    const time = execution.timestamp ? ` - ${new Date(execution.timestamp).toLocaleTimeString()}` : "";
+    return `${side} ${ledgerRow.sideIndex || ledgerRow.index + 1}${pct}${time}`;
+  }
+
+  function getLedgerLegStats(ledgerRow, chain) {
+    const execution = ledgerRow.execution;
+    const feeStats = [
+      ["Platform fee", formatters.native(execution.platformFeeNative || 0, chain, 4)],
+      ["Fixed fees", formatters.native(ledgerRow.fixedFeeNative || 0, chain, 4)],
+      ["Gas / prio / bribe", [
+        formatters.native(execution.gasFeeNative || 0, chain, 4),
+        formatters.native(execution.priorityFeeNative || 0, chain, 4),
+        formatters.native(execution.bribeFeeNative || 0, chain, 4),
+      ].join(" / ")],
+      ["Total fee", formatters.native(execution.feeNative || 0, chain, 4)],
+    ];
+    if (execution.side === "buy") {
+      return [
+        ["Token exposure", formatters.native(execution.grossNative || execution.solInvestedNative || 0, chain, 4)],
+        ["Wallet debit", formatters.native(Math.abs(Number(execution.netNative || execution.solDebitedNative || 0)), chain, 4)],
+        ...feeStats,
+        ["Fill", formatMarketCapFill(execution)],
+      ];
+    }
+    return [
+      ["Gross sell value", formatters.native(execution.grossNative || 0, chain, 4)],
+      ["Wallet received", formatters.native(execution.netNative || execution.solReceivedNative || 0, chain, 4)],
+      ["Cost basis", formatters.native(execution.costBasisNative || 0, chain, 4)],
+      ["Leg P&L", `${formatters.signedNative(execution.pnlNative || 0, chain, 4)} (${formatters.pct(execution.pnlPct || 0)})`],
+      ...feeStats,
+      ["Fill", formatMarketCapFill(execution)],
+    ];
   }
 
   function getSummaryExecutions(summary) {
@@ -3192,6 +3664,7 @@
       openPositions: positions.filter((position) => position.status === "open"),
       closedPositions: positions.filter((position) => position.status === "closed"),
       positions,
+      exitTargets: state.exitTargets,
       executions: state.executions,
       currentSessionSummary: buildCurrentSessionSummary(),
       previousSessions: state.sessions,
@@ -3232,11 +3705,21 @@
 
   async function captureBridgeScreenshot(captureScreenshot) {
     if (!captureScreenshot) return null;
+    const captureRect = detectBestChartCaptureRect();
     const response = await sendRuntimeMessage({
       type: "WILYTRADER_CAPTURE_SCREENSHOT",
-      captureRect: detectBestChartCaptureRect(),
+      captureRect,
     });
-    if (!response?.ok || !response.dataUrl) return null;
+    if (!response?.ok || !response.dataUrl) {
+      return {
+        dataUrl: null,
+        capturedAt: new Date().toISOString(),
+        capturedAtMs: Date.now(),
+        captureRect,
+        source: "chrome-tabs-captureVisibleTab",
+        error: response?.error || "Chrome screenshot capture returned no image data.",
+      };
+    }
     return {
       dataUrl: response.dataUrl,
       capturedAt: response.capturedAt,
@@ -3460,7 +3943,9 @@
     state.executions = [];
     state.closedPositions = [];
     state.positions = {};
+    state.exitTargets = {};
     state.notes = [];
+    lastAxiomExitTargetSyncKey = null;
     state.sessionStartedAt = new Date().toISOString();
     await persistAndSync("new-session");
     renderFullLog();
@@ -3474,7 +3959,9 @@
     state.executions = [];
     state.closedPositions = [];
     state.positions = {};
+    state.exitTargets = {};
     state.notes = [];
+    lastAxiomExitTargetSyncKey = null;
     state.sessionStartedAt = new Date().toISOString();
     await persistAndSync("clear");
     renderFullLog();
@@ -3494,6 +3981,60 @@
         schedulePendingPulseAutoBuyCheck();
       }
     }, 1000);
+  }
+
+  function bindExitTargetWatcher() {
+    window.setInterval(() => {
+      if (!extensionContextValid) return;
+      runTask(evaluateExitTargets());
+    }, AXIOM_TARGET_TRIGGER_INTERVAL_MS);
+  }
+
+  async function evaluateExitTargets() {
+    if (targetExitInFlight || tradeInFlight) return;
+    if (!isAxiomMemeRoute(new URL(window.location.href))) return;
+    updateActiveToken();
+    const token = activeToken;
+    const marketCapUsd = Number(token?.marketCap || 0);
+    if (!token?.key || !Number.isFinite(marketCapUsd) || marketCapUsd <= 0) return;
+    const position = state.positions[token.key];
+    if (!position) return;
+    const targets = Object.values(state.exitTargets || {})
+      .filter((target) => target?.positionId === position.positionId && !target.triggeredAt)
+      .sort((a, b) => targetTriggerPriority(a, b, marketCapUsd));
+    const triggered = targets.find((target) => isExitTargetTriggered(target, marketCapUsd));
+    if (!triggered) return;
+    targetExitInFlight = triggered.id;
+    triggered.triggeredAt = new Date().toISOString();
+    try {
+      await persistAndSync("exit-target-triggered");
+      const sellPercent = normalizeTargetSellPercent(triggered.sellPercent);
+      setStatus(`${formatExitTargetKind(triggered.kind)} ${formatTargetSellPercent(sellPercent)} touched ${formatters.usd(triggered.marketCapUsd)}.`);
+      const execution = await sell(sellPercent);
+      if (!execution && state.exitTargets[targetExitInFlight]) {
+        state.exitTargets[targetExitInFlight].triggeredAt = null;
+        await persistAndSync("exit-target-rearmed");
+      } else if (execution && state.exitTargets[triggered.id]) {
+        delete state.exitTargets[triggered.id];
+        lastAxiomExitTargetSyncKey = null;
+        await persistAndSync("exit-target-filled");
+        render();
+      }
+    } finally {
+      targetExitInFlight = null;
+    }
+  }
+
+  function isExitTargetTriggered(target, marketCapUsd) {
+    if (target.kind === EXIT_TARGET_KINDS.takeProfit) return marketCapUsd >= Number(target.marketCapUsd || 0);
+    if (target.kind === EXIT_TARGET_KINDS.stopLoss) return marketCapUsd <= Number(target.marketCapUsd || 0);
+    return false;
+  }
+
+  function targetTriggerPriority(a, b, marketCapUsd) {
+    const aDistance = Math.abs(Number(a.marketCapUsd || 0) - marketCapUsd);
+    const bDistance = Math.abs(Number(b.marketCapUsd || 0) - marketCapUsd);
+    return aDistance - bDistance;
   }
 
   function applyPanelPosition(panel) {

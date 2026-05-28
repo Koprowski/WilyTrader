@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
+  AbandonSessionResult,
   StartSessionResult,
   StopSessionResult,
   WilyTraderDesktopAppInfo,
@@ -11,6 +12,9 @@ const api = {
   getAppInfo: () => ipcRenderer.invoke('app:info') as Promise<WilyTraderDesktopAppInfo>,
   startSession: () => ipcRenderer.invoke('session:start') as Promise<StartSessionResult>,
   stopSession: () => ipcRenderer.invoke('session:stop') as Promise<StopSessionResult>,
+  abandonSession: () => ipcRenderer.invoke('session:abandon') as Promise<AbandonSessionResult>,
+  openLastCompletedSessionFolder: () =>
+    ipcRenderer.invoke('session:open-last-completed-folder') as Promise<{ ok: boolean; message: string; path?: string | null }>,
   getStatus: () => ipcRenderer.invoke('session:status') as Promise<WilyTraderDesktopStatus>,
   getSettings: () => ipcRenderer.invoke('settings:get') as Promise<WilyTraderDesktopSettings>,
   saveSettings: (payload: Partial<WilyTraderDesktopSettings>) =>

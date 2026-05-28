@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, clipboard, desktopCapturer, dialog, globalShortcut, ipcMain, shell } from 'electron';
 import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as os from 'node:os';
@@ -7,6 +7,7 @@ import { execSync, spawn } from 'node:child_process';
 import JSZip from 'jszip';
 import { resolveGeminiCliExecutable } from './gemini-cli-exec';
 import type {
+  AbandonSessionResult,
   AudioChunkMeta,
   AudioRecordingMeta,
   BridgeExecutionEvent,
@@ -86,6 +87,7 @@ let settings: WilyTraderDesktopSettings = fallbackSettings();
 let extensionStatus: WilyTraderExtensionStatus = defaultExtensionStatus();
 let registeredTradeSessionHotkey: string | null = null;
 let activeGeminiSigninChild: ReturnType<typeof spawn> | null = null;
+let lastCompletedSessionDir: string | null = null;
 
 function createWindow(): void {
   const preloadPath = path.join(__dirname, '..', 'preload.js');
@@ -125,6 +127,7 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   settings = loadSettings();
+  lastCompletedSessionDir = findLastCompletedSessionDir(settings.outputDir);
   extensionStatus = {
     ...extensionStatus,
     ...detectLocalExtensionManifest(),
@@ -161,6 +164,8 @@ function registerIpc(): void {
   }));
   ipcMain.handle('session:start', async () => startSession());
   ipcMain.handle('session:stop', async () => stopSession());
+  ipcMain.handle('session:abandon', async () => abandonSession());
+  ipcMain.handle('session:open-last-completed-folder', async () => openLastCompletedSessionFolder());
   ipcMain.handle('session:status', async () => getStatus());
   ipcMain.handle('session:audio-chunk', async (_event, payload) => saveAudioChunk(payload));
   ipcMain.handle('session:audio-recording', async (_event, payload) => saveAudioRecording(payload));
@@ -356,7 +361,7 @@ function startSession(): WilyTraderDesktopStatus {
   if (finalizingSession) return getStatus();
 
   const sessionStartedAtMs = Date.now();
-  const sessionDir = path.join(settings.outputDir, `${formatSessionStamp(new Date(sessionStartedAtMs))} wilytrader-trade`);
+  const sessionDir = nextSessionDir(settings.outputDir, new Date(sessionStartedAtMs));
   const inputsDir = path.join(sessionDir, 'Inputs');
   const audioDir = path.join(inputsDir, 'audio');
   const screenshotDir = path.join(inputsDir, 'trade-screenshots');
@@ -427,9 +432,9 @@ async function stopSession(): Promise<StopSessionResult> {
   const transcriptJsonPath = writeTranscriptJson(session);
   const transcriptMdPath = writeTranscriptMd(session);
   updateFinalizationProgress(session, 'trade-log', 'Building trade log artifacts.', 90);
-  const trades = loadTradesFromSession(session);
+  const trades = loadTradesFromSession(session, stoppedAtMs);
   const tradeLogMdPath = settings.generateTradeLogOnStop ? writeTradeLogMd(session, trades) : '';
-  const tradeLogXlsxPath = settings.generateTradeLogOnStop ? await writeTradeLogXlsx(session, trades) : '';
+  const tradeLogXlsxPath = settings.generateTradeLogOnStop ? await writeTradeLogXlsx(session, trades, stoppedAtMs) : '';
   updateFinalizationProgress(session, 'complete', 'Session finalized.', 100);
   writeStatusFileForSession(session, 'complete', {
     durationMs: stoppedAtMs - session.sessionStartedAtMs,
@@ -443,6 +448,7 @@ async function stopSession(): Promise<StopSessionResult> {
     tradeLogMdPath,
     tradeLogXlsxPath,
   }, 'success');
+  lastCompletedSessionDir = session.sessionDir;
   broadcastStatus();
   finalizingSession = null;
   broadcastStatus();
@@ -454,6 +460,47 @@ async function stopSession(): Promise<StopSessionResult> {
     tradeLogXlsxPath,
     tradeLogMdPath,
     warnings: transcriptionWarnings,
+  };
+}
+
+async function abandonSession(): Promise<AbandonSessionResult> {
+  const session = activeSession;
+  if (!session) throw new Error('No active WilyTrader trade session.');
+
+  activeSession = null;
+  stopBridge('session abandoned');
+
+  const abandonedAtMs = Date.now();
+  appendSessionLogForSession(session, 'session', 'abandoned', {
+    sessionDir: session.sessionDir,
+    sessionStartedAtMs: session.sessionStartedAtMs,
+    sessionAbandonedAtMs: abandonedAtMs,
+    durationMs: abandonedAtMs - session.sessionStartedAtMs,
+    audioChunks: session.audioChunks.length,
+    executionsReceived: session.executionsReceived,
+    screenshotsReceived: session.screenshotsReceived,
+  }, 'warning');
+  writeStatusFileForSession(session, 'abandoned', {
+    sessionAbandonedAt: new Date(abandonedAtMs).toISOString(),
+    sessionAbandonedAtMs: abandonedAtMs,
+    durationMs: abandonedAtMs - session.sessionStartedAtMs,
+  });
+
+  let deleted = false;
+  let warning: string | undefined;
+  try {
+    fs.rmSync(session.sessionDir, { recursive: true, force: true });
+    deleted = true;
+  } catch (err) {
+    warning = `Session was abandoned, but the folder could not be deleted: ${(err as Error).message}`;
+  }
+
+  broadcastStatus();
+  return {
+    ok: true,
+    sessionDir: session.sessionDir,
+    deleted,
+    warning,
   };
 }
 
@@ -532,6 +579,7 @@ function getStatus(): WilyTraderDesktopStatus {
     sessionState: activeSession ? 'recording' : finalizingSession ? 'finalizing' : 'idle',
     bridgePort: BRIDGE_PORT,
     sessionDir: activeSession?.sessionDir ?? finalizingSession?.sessionDir ?? null,
+    lastCompletedSessionDir,
     sessionStartedAtMs: activeSession?.sessionStartedAtMs ?? finalizingSession?.sessionStartedAtMs ?? null,
     elapsedMs: activeSession
       ? now - activeSession.sessionStartedAtMs
@@ -734,7 +782,7 @@ async function handleBridgeRequest(req: http.IncomingMessage, res: http.ServerRe
   if (req.method === 'POST' && url.pathname === '/v1/wilytrader/ledger') {
     try {
       const payload = await readJsonBody(req);
-      receiveLedger(payload, res);
+      await receiveLedger(payload, res);
     } catch (err) {
       writeBridgeJson(res, 400, { ok: false, error: (err as Error).message });
     }
@@ -744,7 +792,7 @@ async function handleBridgeRequest(req: http.IncomingMessage, res: http.ServerRe
   writeBridgeJson(res, 404, { ok: false, error: 'Not found' });
 }
 
-function receiveLedger(payload: unknown, res: http.ServerResponse): void {
+async function receiveLedger(payload: unknown, res: http.ServerResponse): Promise<void> {
   const session = activeSession;
   if (!session) {
     writeBridgeJson(res, 409, { ok: false, error: 'No active WilyTrader trade session.' });
@@ -754,9 +802,22 @@ function receiveLedger(payload: unknown, res: http.ServerResponse): void {
   const receivedAtMs = Date.now();
   const event = extractExecutionEvent(payload);
   const screenshot = extractScreenshotPayload(payload);
-  const screenshotPath = settings.saveBrowserScreenshots && screenshot
+  const screenshotRequested = Boolean(event?.captureScreenshot);
+  const screenshotDiagnostics: Record<string, unknown> = {
+    saveBrowserScreenshots: settings.saveBrowserScreenshots,
+    requested: screenshotRequested,
+    payloadPresent: Boolean(screenshot),
+    payloadHasDataUrl: Boolean(screenshot?.dataUrl),
+    payloadSource: screenshot?.source ?? null,
+    payloadError: screenshot?.error ?? null,
+  };
+  let screenshotPath = settings.saveBrowserScreenshots && screenshot
     ? saveBridgeScreenshot(session, screenshot, event, receivedAtMs)
     : null;
+  if (settings.saveBrowserScreenshots && screenshotRequested && !screenshotPath) {
+    screenshotPath = await saveDesktopTradeScreenshot(session, event, receivedAtMs);
+    screenshotDiagnostics.desktopFallbackPath = screenshotPath;
+  }
   const eventTimestampMs = parseTimestampMs(event?.timestampMs ?? event?.timestamp) ?? receivedAtMs;
   const enrichedEvent = event
     ? {
@@ -778,6 +839,7 @@ function receiveLedger(payload: unknown, res: http.ServerResponse): void {
     },
     event: enrichedEvent,
     screenshotPath,
+    screenshotDiagnostics,
     payload,
   };
   session.lastLedgerPayload = payload;
@@ -790,6 +852,7 @@ function receiveLedger(payload: unknown, res: http.ServerResponse): void {
       receivedAt: enriched.receivedAt,
       event: enrichedEvent,
       screenshotPath,
+      screenshotDiagnostics,
     });
   }
   const compatible = extractMockApeCompatibleTrades(payload);
@@ -799,6 +862,7 @@ function receiveLedger(payload: unknown, res: http.ServerResponse): void {
   appendSessionLog('bridge', 'ledger received', {
     event: enrichedEvent,
     screenshotPath,
+    screenshotDiagnostics,
     compatibleTrades: compatible.length,
   }, 'success');
   broadcastStatus();
@@ -838,6 +902,71 @@ function saveBridgeScreenshot(
   });
   session.screenshotsReceived += 1;
   return filePath;
+}
+
+async function saveDesktopTradeScreenshot(
+  session: ActiveTradeSession,
+  event: BridgeExecutionEvent | null,
+  receivedAtMs: number
+): Promise<string | null> {
+  try {
+    const source = await selectDesktopScreenshotSource();
+    if (!source || source.thumbnail.isEmpty()) {
+      appendSessionLogForSession(session, 'screenshot', 'desktop fallback screenshot unavailable', {
+        event,
+        sourceFound: Boolean(source),
+      }, 'warning');
+      return null;
+    }
+    const capturedAtMs = receivedAtMs;
+    const token = sanitizeFilePart(event?.tokenName || event?.tokenAddress || 'token').slice(0, 48);
+    const side = sanitizeFilePart(event?.side || 'trade');
+    const execution = sanitizeFilePart(event?.executionId || String(receivedAtMs)).slice(0, 64);
+    const fileName = `${formatSessionStamp(new Date(capturedAtMs))}-${side}-${token}-${execution}-desktop.png`;
+    const filePath = path.join(session.screenshotDir, fileName);
+    fs.writeFileSync(filePath, source.thumbnail.toPNG());
+    writeJson(`${filePath}.json`, {
+      capturedAt: new Date(capturedAtMs).toISOString(),
+      capturedAtMs,
+      capturedOffsetMs: capturedAtMs - session.sessionStartedAtMs,
+      event,
+      source: 'electron-desktop-capturer',
+      desktopSource: {
+        id: source.id,
+        name: source.name,
+        displayId: source.display_id,
+      },
+      reason: 'Extension screenshot payload was missing or unusable.',
+    });
+    session.screenshotsReceived += 1;
+    appendSessionLogForSession(session, 'screenshot', 'desktop fallback screenshot saved', {
+      filePath,
+      sourceName: source.name,
+      event,
+    }, 'success');
+    return filePath;
+  } catch (err) {
+    appendSessionLogForSession(session, 'screenshot', 'desktop fallback screenshot failed', {
+      error: (err as Error).message,
+      event,
+    }, 'error');
+    return null;
+  }
+}
+
+async function selectDesktopScreenshotSource(): Promise<Electron.DesktopCapturerSource | null> {
+  const sources = await desktopCapturer.getSources({
+    types: ['window', 'screen'],
+    thumbnailSize: { width: 1920, height: 1080 },
+    fetchWindowIcons: false,
+  });
+  return (
+    sources.find((source) => /axiom/i.test(source.name)) ??
+    sources.find((source) => /(google chrome|chrome|padre)/i.test(source.name)) ??
+    sources.find((source) => source.id.startsWith('screen:')) ??
+    sources[0] ??
+    null
+  );
 }
 
 function writeWilyTraderSnapshots(inputsDir: string, payload: unknown): void {
@@ -1244,16 +1373,39 @@ function mergeDesktopTranscriptSegments(segments: TranscriptSegment[]): Transcri
   return [...segments].sort((a, b) => a.offsetMs - b.offsetMs || a.offsetEndMs - b.offsetEndMs);
 }
 
-function loadTradesFromSession(session: ActiveTradeSession): NormalizedTrade[] {
+function loadTradesFromSession(session: ActiveTradeSession, stoppedAtMs: number): NormalizedTrade[] {
   const ledgerPath = path.join(session.inputsDir, 'wilytrader.json');
   if (!fs.existsSync(ledgerPath)) return [];
   try {
     const parsed = JSON.parse(fs.readFileSync(ledgerPath, 'utf-8'));
-    return normalizeWilyTraderTrades(parsed);
+    const allTrades = normalizeWilyTraderTrades(parsed);
+    const recordingTrades = filterTradesForRecordingWindow(allTrades, session.sessionStartedAtMs, stoppedAtMs);
+    if (recordingTrades.length !== allTrades.length) {
+      appendSessionLogForSession(session, 'trade-log', 'filtered trades to recording window', {
+        before: allTrades.length,
+        after: recordingTrades.length,
+        recordingStartedAtMs: session.sessionStartedAtMs,
+        recordingStoppedAtMs: stoppedAtMs,
+      }, 'info');
+    }
+    return recordingTrades;
   } catch (err) {
     appendSessionLogForSession(session, 'trade-log', 'ledger parse failed', { error: (err as Error).message }, 'error');
     return [];
   }
+}
+
+function filterTradesForRecordingWindow(
+  trades: NormalizedTrade[],
+  startedAtMs: number,
+  stoppedAtMs: number
+): NormalizedTrade[] {
+  return trades.filter((trade) => {
+    const enteredAtMs = trade.entryTimestampMs;
+    if (enteredAtMs !== null) return enteredAtMs >= startedAtMs && enteredAtMs <= stoppedAtMs;
+    const exitedAtMs = trade.timestampMs;
+    return exitedAtMs !== null && exitedAtMs >= startedAtMs && exitedAtMs <= stoppedAtMs;
+  });
 }
 
 function normalizeWilyTraderTrades(parsed: unknown): NormalizedTrade[] {
@@ -1414,9 +1566,9 @@ const XLSX_COLUMNS = [
   'llm_grade_notes',
 ] as const;
 
-async function writeTradeLogXlsx(session: ActiveTradeSession, trades: NormalizedTrade[]): Promise<string> {
+async function writeTradeLogXlsx(session: ActiveTradeSession, trades: NormalizedTrade[], stoppedAtMs: number): Promise<string> {
   const xlsxPath = path.join(session.sessionDir, 'trade_log.xlsx');
-  const rows = trades.map((trade, index) => buildTradeRow(session, trade, index + 1));
+  const rows = trades.map((trade, index) => buildTradeRow(session, trade, index + 1, stoppedAtMs));
   const zip = new JSZip();
   zip.file('[Content_Types].xml', xmlContentTypes());
   zip.folder('_rels')?.file('.rels', xmlRootRels());
@@ -1432,10 +1584,19 @@ async function writeTradeLogXlsx(session: ActiveTradeSession, trades: Normalized
   return xlsxPath;
 }
 
-function buildTradeRow(session: ActiveTradeSession, trade: NormalizedTrade, index: number): Record<string, string> {
+function buildTradeRow(
+  session: ActiveTradeSession,
+  trade: NormalizedTrade,
+  index: number,
+  stoppedAtMs: number
+): Record<string, string> {
   const entry = trade.entryTimestampMs ? new Date(trade.entryTimestampMs) : null;
   const exit = trade.timestampMs ? new Date(trade.timestampMs) : null;
   const hour = entry?.getHours();
+  const tradeDate = exit ?? entry;
+  const timeInTradeSeconds =
+    trade.timeInTradeSeconds ??
+    (entry && exit ? Math.max(0, Math.round((exit.getTime() - entry.getTime()) / 1000)) : null);
   return {
     source_session: path.basename(session.sessionDir),
     source_log_type: 'wilytrader-desktop-audio',
@@ -1443,14 +1604,14 @@ function buildTradeRow(session: ActiveTradeSession, trade: NormalizedTrade, inde
     processed_at: new Date().toISOString(),
     trade_id: String(index),
     token_name: trade.tokenName,
-    trade_date: entry ? entry.toLocaleDateString('en-US') : '',
+    trade_date: formatTradeDate(tradeDate),
     video_start_time: formatTradeTime(session.sessionStartedAtMs),
     entry_commentary_time: '',
     entry_time_inferred: formatTradeTime(trade.entryTimestampMs),
     exit_commentary_time: '',
     exit_time_actual: formatTradeTime(trade.timestampMs),
-    time_in_trade_seconds: trade.timeInTradeSeconds === null ? '' : String(trade.timeInTradeSeconds),
-    video_end_time: '',
+    time_in_trade_seconds: timeInTradeSeconds === null ? '' : String(timeInTradeSeconds),
+    video_end_time: formatTradeTime(stoppedAtMs),
     entry_mc_actual: formatNumber(trade.entryMarketCap),
     target_exit_low_mc: '',
     target_exit_high_mc: '',
@@ -1464,7 +1625,7 @@ function buildTradeRow(session: ActiveTradeSession, trade: NormalizedTrade, inde
     pre_transcript_excerpt: '',
     post_transcript_excerpt: '',
     adherence_self_assessment: '',
-    notes: trade.tokenAddress ? `tokenAddress=${trade.tokenAddress}` : '',
+    notes: buildTradeNotes(trade, entry, exit),
     needs_review: '',
     mockape_trade_id: trade.id,
     Hour: hour === undefined ? '' : String(hour),
@@ -1716,10 +1877,12 @@ function loadSettings(): WilyTraderDesktopSettings {
 
 function saveSettings(payload: Partial<WilyTraderDesktopSettings>): WilyTraderDesktopSettings {
   const previousHotkey = settings.tradeSessionHotkey;
+  const previousOutputDir = settings.outputDir;
   settings = sanitizeSettings({ ...settings, ...payload });
   fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
   fs.writeFileSync(settingsPath(), JSON.stringify(settings, null, 2), 'utf-8');
   if (settings.tradeSessionHotkey !== previousHotkey) registerTradeSessionHotkey();
+  if (settings.outputDir !== previousOutputDir) lastCompletedSessionDir = findLastCompletedSessionDir(settings.outputDir);
   broadcastStatus();
   return settings;
 }
@@ -2577,23 +2740,126 @@ async function openWilyTraderExtensionFolder(): Promise<{ ok: boolean; message: 
   return { ok: true, message: `Opened WilyTrader extension folder: ${install.extensionPath}`, path: install.extensionPath };
 }
 
+async function openLastCompletedSessionFolder(): Promise<{ ok: boolean; message: string; path?: string | null }> {
+  const sessionDir = lastCompletedSessionDir ?? findLastCompletedSessionDir(settings.outputDir);
+  if (!sessionDir) {
+    return { ok: false, message: 'No completed WilyTrader session folder was found.', path: null };
+  }
+  if (!fs.existsSync(sessionDir)) {
+    lastCompletedSessionDir = findLastCompletedSessionDir(settings.outputDir);
+    return {
+      ok: false,
+      message: `Last completed session folder no longer exists: ${sessionDir}`,
+      path: sessionDir,
+    };
+  }
+  lastCompletedSessionDir = sessionDir;
+  const openError = await shell.openPath(sessionDir);
+  if (openError) return { ok: false, message: `Could not open session folder: ${openError}`, path: sessionDir };
+  return { ok: true, message: `Opened session folder: ${sessionDir}`, path: sessionDir };
+}
+
 async function openChromeExtensionsPage(): Promise<{ ok: boolean; message: string }> {
   const target = chromeExtensionsTarget();
   if (process.platform === 'win32') {
     try {
-      const chrome = chromeExecutableCandidates()[0];
-      if (chrome) {
-        const args = target.profileName ? [`--profile-directory=${target.profileName}`, target.url] : [target.url];
-        const child = spawn(chrome, args, { detached: true, stdio: 'ignore', windowsHide: true });
-        child.unref();
+      const marker = `WilyTraderChromeHandoff${process.pid}${Date.now()}`;
+      const args = [
+        ...(target.profileName ? [`--profile-directory=${target.profileName}`] : []),
+        createChromeHandoffUrl(marker),
+      ];
+      debugLog('chrome-handoff', 'opening chrome extensions page', {
+        url: target.url,
+        profileName: target.profileName,
+        extensionId: target.extensionId,
+        args,
+      });
+      startChromeDetached(args);
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      if (await navigateChromeHandoffWindowWithClipboard(marker, target.url)) {
         return { ok: true, message: 'Opened Chrome Extensions for WilyTrader. Use Reload if needed.' };
       }
-    } catch {
-      // fall back to shell.openExternal
+      clipboard.writeText(target.url);
+      return {
+        ok: true,
+        message: 'Opened Chrome and copied the Chrome Extensions URL. If it did not navigate, paste into the Chrome address bar.',
+      };
+    } catch (err) {
+      debugLog('chrome-handoff', 'chrome handoff failed, falling back to shell.openExternal', { error: (err as Error).message });
     }
   }
   await shell.openExternal(target.url);
   return { ok: true, message: 'Opened chrome://extensions/. Use Developer mode and Load unpacked for WilyTrader.' };
+}
+
+function startChromeDetached(args: string[]): void {
+  const chrome = chromeExecutableCandidates()[0];
+  const child = chrome
+    ? spawn(chrome, args, { detached: true, stdio: 'ignore', windowsHide: true })
+    : spawn('cmd.exe', ['/d', '/c', 'start', '""', 'chrome', ...args], { detached: true, stdio: 'ignore', windowsHide: true });
+  child.unref();
+}
+
+function createChromeHandoffUrl(marker: string): string {
+  const html = [
+    '<!doctype html>',
+    '<html>',
+    '<head>',
+    `<title>${marker}</title>`,
+    '<meta charset="utf-8">',
+    '</head>',
+    '<body></body>',
+    '</html>',
+  ].join('');
+  return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+}
+
+function navigateChromeHandoffWindowWithClipboard(marker: string, url: string): Promise<boolean> {
+  const previousClipboardText = clipboard.readText();
+  clipboard.writeText(url);
+  const script = [
+    '$ErrorActionPreference = \'Stop\'',
+    'Add-Type -AssemblyName System.Windows.Forms',
+    `$marker = '${marker}'`,
+    '$ws = New-Object -ComObject WScript.Shell',
+    '$deadline = (Get-Date).AddSeconds(6)',
+    'do {',
+    '  if ($ws.AppActivate($marker) -or $ws.AppActivate("$marker - Google Chrome")) {',
+    '    Start-Sleep -Milliseconds 250',
+    '    [System.Windows.Forms.SendKeys]::SendWait(\'^l\')',
+    '    Start-Sleep -Milliseconds 80',
+    '    [System.Windows.Forms.SendKeys]::SendWait(\'^v\')',
+    '    Start-Sleep -Milliseconds 80',
+    '    [System.Windows.Forms.SendKeys]::SendWait(\'{ENTER}\')',
+    '    exit 0',
+    '  }',
+    '  Start-Sleep -Milliseconds 150',
+    '} while ((Get-Date) -lt $deadline)',
+    'exit 1',
+  ].join('; ');
+
+  return new Promise((resolve) => {
+    const child = spawn('powershell.exe', [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      script,
+    ], {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    child.on('error', (err) => {
+      debugLog('chrome-handoff', 'navigation process failed to start', { marker, error: err.message });
+      clipboard.writeText(previousClipboardText);
+      resolve(false);
+    });
+    child.on('exit', (code) => {
+      clipboard.writeText(previousClipboardText);
+      if (code !== 0) debugLog('chrome-handoff', 'navigation failed', { marker, code });
+      resolve(code === 0);
+    });
+  });
 }
 
 async function moveWilyTraderExtensionLocation(): Promise<{
@@ -2851,13 +3117,79 @@ function formatSessionStamp(date: Date): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}_${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`;
 }
 
+function nextSessionDir(outputDir: string, startedAt: Date): string {
+  const baseName = formatSessionFolderName(startedAt);
+  let candidate = path.join(outputDir, baseName);
+  let suffix = 2;
+  while (fs.existsSync(candidate)) {
+    candidate = path.join(outputDir, `${baseName} ${suffix}`);
+    suffix += 1;
+  }
+  return candidate;
+}
+
+function findLastCompletedSessionDir(outputDir: string): string | null {
+  if (!fs.existsSync(outputDir)) return null;
+  const completed = fs.readdirSync(outputDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => {
+      const sessionDir = path.join(outputDir, entry.name);
+      const statusPath = path.join(sessionDir, 'session_status.json');
+      if (!fs.existsSync(statusPath)) return null;
+      try {
+        const status = JSON.parse(fs.readFileSync(statusPath, 'utf-8')) as {
+          status?: unknown;
+          updatedAt?: unknown;
+          sessionDir?: unknown;
+          sessionStartedAtMs?: unknown;
+        };
+        if (status.status !== 'complete') return null;
+        const updatedAtMs = typeof status.updatedAt === 'string' ? Date.parse(status.updatedAt) : 0;
+        const startedAtMs = typeof status.sessionStartedAtMs === 'number' ? status.sessionStartedAtMs : 0;
+        const statMs = fs.statSync(statusPath).mtimeMs;
+        const sortMs = Math.max(updatedAtMs || 0, startedAtMs || 0, statMs || 0);
+        const recordedDir = typeof status.sessionDir === 'string' && fs.existsSync(status.sessionDir)
+          ? status.sessionDir
+          : sessionDir;
+        return { sessionDir: recordedDir, sortMs };
+      } catch {
+        return null;
+      }
+    })
+    .filter((item): item is { sessionDir: string; sortMs: number } => item !== null)
+    .sort((a, b) => b.sortMs - a.sortMs);
+  return completed[0]?.sessionDir ?? null;
+}
+
+function formatSessionFolderName(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}.${pad(date.getHours())}${pad(date.getMinutes())} Trade`;
+}
+
 function formatOffset(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
+function formatTradeDate(date: Date | null): string {
+  return date
+    ? new Intl.DateTimeFormat('en-US', {
+        month: '2-digit',
+        day: '2-digit',
+        year: '2-digit',
+      }).format(date)
+    : '';
+}
+
 function formatTradeTime(ms: number | null): string {
-  return ms ? new Date(ms).toLocaleString('en-US') : '';
+  return ms
+    ? new Intl.DateTimeFormat('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true,
+      }).format(new Date(ms))
+    : '';
 }
 
 function formatDollars(value: number | null): string {
@@ -2874,6 +3206,15 @@ function formatPercent(value: number | null): string {
 
 function formatNumber(value: number | null): string {
   return value === null ? '' : String(value);
+}
+
+function buildTradeNotes(trade: NormalizedTrade, entry: Date | null, exit: Date | null): string {
+  const notes: string[] = [];
+  if (trade.tokenAddress) notes.push(`tokenAddress=${trade.tokenAddress}`);
+  if (entry && exit && formatTradeDate(entry) !== formatTradeDate(exit)) {
+    notes.push(`overnight_entry_date=${formatTradeDate(entry)}`);
+  }
+  return notes.join('; ');
 }
 
 function markdownPath(value: string): string {

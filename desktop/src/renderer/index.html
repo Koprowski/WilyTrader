@@ -26,14 +26,24 @@
           <button class="icon-button" data-action="settings" title="Settings" aria-label="Settings">
             <span aria-hidden="true">&#9881;</span>
           </button>
-          <button data-action="start">Start Trade Session</button>
+          <button data-action="start">Record Trading Session</button>
           <button data-action="stop" disabled>Stop</button>
+          <button class="danger" data-action="discard" disabled>Discard</button>
+          <button class="secondary-button" data-action="open-session-folder" type="button" hidden disabled>Open Session Folder</button>
         </div>
       </section>
 
       <section class="panel">
         <div class="label">Session Folder</div>
         <div class="path" data-session-dir>No active session</div>
+      </section>
+
+      <section class="panel last-completed-session" data-last-completed-session hidden>
+        <div class="panel-heading">
+          <div class="label">Last Completed Session</div>
+          <button class="small-button" data-action="open-session-folder" type="button">Open Folder</button>
+        </div>
+        <div class="path" data-last-completed-dir>No completed session yet</div>
       </section>
 
       <section class="grid">
@@ -71,13 +81,13 @@
 
           <div class="settings-scroll">
             <section class="settings-section">
-              <div class="section-title">Trade Session</div>
+              <div class="section-title">Recording Session</div>
               <label class="field">
                 <span>Session output folder</span>
                 <input data-setting="outputDir" type="text" />
               </label>
               <label class="field">
-                <span>Start / stop trade session hotkey</span>
+                <span>Record / stop trading session hotkey</span>
                 <input data-setting="tradeSessionHotkey" type="text" spellcheck="false" autocomplete="off" />
               </label>
               <label class="check-row">
