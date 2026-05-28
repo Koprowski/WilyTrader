@@ -30,7 +30,7 @@
   position: fixed;
   right: 18px;
   bottom: 18px;
-  z-index: 2147483647;
+  z-index: 2147483646;
   pointer-events: auto;
   width: min(320px, calc(100vw - 24px));
   max-height: min(760px, calc(100vh - 24px));
@@ -122,7 +122,7 @@
   position: fixed;
   top: 28px;
   left: max(12px, calc(50vw - 240px));
-  z-index: 2147483647;
+  z-index: 2147483646;
   pointer-events: auto;
   width: 480px;
   height: 76px;
