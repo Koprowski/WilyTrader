@@ -501,7 +501,7 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
   }
 
   function isMovableLine(line: StoredLine) {
-    return Boolean(line.style?.movable) || line.kind === "stop_loss" || line.kind === "take_profit";
+    return Boolean(line.style?.movable);
   }
 
   function readStoredLinePrice(boundChart: BoundChart, line: StoredLine): number | null {

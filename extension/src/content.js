@@ -13,6 +13,8 @@
   const PULSE_AUTO_BUY_KEY = "wilytrader_axiom_pulse_auto_buy_v1";
   const PULSE_AUTO_BUY_TTL_MS = 2 * 60 * 1000;
   const AXIOM_TARGET_TRIGGER_INTERVAL_MS = 500;
+  const EXIT_TARGET_MARKET_CAP_STEP = 1000;
+  const EXIT_TARGET_MENU_MAX_OPTIONS = 60;
   const EXIT_TARGET_KINDS = {
     stopLoss: "stop_loss",
     takeProfit: "take_profit",
@@ -1311,10 +1313,12 @@
   function handleOverlayContextMenu(event) {
     const target = event.target?.closest?.("[data-sell-pct]");
     if (!target || !root?.contains(target)) return;
+    const sellPercent = Number(target.dataset.sellPct || 0);
+    if (Math.round(sellPercent) !== 100) return;
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
-    showSellButtonTargetMenu(event.clientX, event.clientY, Number(target.dataset.sellPct || 100));
+    showSellButtonTargetMenu(event.clientX, event.clientY);
   }
 
   function handleClick(event) {
@@ -1408,9 +1412,9 @@
       runTask(setExitTargetFromPanel(EXIT_TARGET_KINDS.takeProfit));
     } else if (action === "clear-exit-target") {
       runTask(clearExitTarget(target.dataset.targetId));
-    } else if (action === "add-exit-target-order") {
+    } else if (action === "select-exit-target-mc") {
       closeContextMenu();
-      runTask(promptForExitTarget(target.dataset.targetKind, Number(target.dataset.targetSellPct || 100)));
+      runTask(setExitTarget(target.dataset.targetKind, Number(target.dataset.targetMarketCap), 100));
     } else if (action === "context-set-stop-loss") {
       closeContextMenu();
       runTask(setExitTargetAtCurrentMarketCap(EXIT_TARGET_KINDS.stopLoss, 100));
@@ -2150,21 +2154,54 @@
     positionContextMenu(menu, clientX, clientY);
   }
 
-  function showSellButtonTargetMenu(clientX, clientY, sellPercent) {
+  function showSellButtonTargetMenu(clientX, clientY) {
     const menu = root?.querySelector(`#${selectors.contextMenu}`);
     if (!menu) return;
-    const percent = normalizeTargetSellPercent(sellPercent);
+    updateActiveToken();
+    const currentMarketCap = Number(activeToken?.marketCap || 0);
+    if (!Number.isFinite(currentMarketCap) || currentMarketCap <= 0) {
+      return setStatus("Current market cap is unavailable.");
+    }
+    const targetOptions = buildMarketCapMenuOptions(EXIT_TARGET_KINDS.takeProfit, currentMarketCap);
+    const stopOptions = buildMarketCapMenuOptions(EXIT_TARGET_KINDS.stopLoss, currentMarketCap);
     menu.innerHTML = `
-      <div class="wt-context-title">WilyTrader ${formatTargetSellPercent(percent)}</div>
-      <button type="button" data-action="add-exit-target-order" data-target-kind="${EXIT_TARGET_KINDS.takeProfit}" data-target-sell-pct="${percent}">Target sell ${formatTargetSellPercent(percent)}</button>
-      <button type="button" data-action="add-exit-target-order" data-target-kind="${EXIT_TARGET_KINDS.stopLoss}" data-target-sell-pct="${percent}">Stop sell ${formatTargetSellPercent(percent)}</button>
+      <div class="wt-context-title">WilyTrader 100% @ ${formatters.usd(currentMarketCap)}</div>
+      ${buildMarketCapSubmenuHtml("Target Exit MC", EXIT_TARGET_KINDS.takeProfit, targetOptions)}
+      ${buildMarketCapSubmenuHtml("Target Stop Loss MC", EXIT_TARGET_KINDS.stopLoss, stopOptions)}
       <button type="button" data-action="context-clear-targets">Clear WT Targets</button>
     `;
     positionContextMenu(menu, clientX, clientY);
   }
 
+  function buildMarketCapMenuOptions(kind, currentMarketCap) {
+    const step = EXIT_TARGET_MARKET_CAP_STEP;
+    if (kind === EXIT_TARGET_KINDS.stopLoss) {
+      const start = Math.floor((currentMarketCap - 1) / step) * step;
+      const options = [];
+      for (let value = start; value >= step && options.length < EXIT_TARGET_MENU_MAX_OPTIONS; value -= step) {
+        options.push(value);
+      }
+      return options;
+    }
+    const start = Math.floor(currentMarketCap / step) * step + step;
+    return Array.from({ length: EXIT_TARGET_MENU_MAX_OPTIONS }, (_, index) => start + index * step);
+  }
+
+  function buildMarketCapSubmenuHtml(label, kind, options) {
+    const rows = options
+      .map((marketCap) => `<button type="button" data-action="select-exit-target-mc" data-target-kind="${kind}" data-target-market-cap="${marketCap}">${formatters.usd(marketCap)}</button>`)
+      .join("");
+    return `
+      <div class="wt-context-submenu">
+        <button type="button" class="wt-context-submenu-trigger" aria-haspopup="true">${label}</button>
+        <div class="wt-context-submenu-panel">${rows}</div>
+      </div>
+    `;
+  }
+
   function positionContextMenu(menu, clientX, clientY) {
     menu.hidden = false;
+    menu.classList.toggle("wt-context-menu-left", clientX > window.innerWidth - 360);
     const rect = menu.getBoundingClientRect();
     const left = Math.min(Math.max(8, clientX), Math.max(8, window.innerWidth - rect.width - 8));
     const top = Math.min(Math.max(8, clientY), Math.max(8, window.innerHeight - rect.height - 8));
@@ -3178,7 +3215,7 @@
       labelBackground: isTakeProfit ? "rgba(49, 230, 186, 0.86)" : "rgba(255, 61, 143, 0.86)",
       labelAlign: isTakeProfit ? "right" : "left",
       showPrice: true,
-      movable: true,
+      movable: false,
     };
   }
 
