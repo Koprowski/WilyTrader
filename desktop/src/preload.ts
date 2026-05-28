@@ -52,6 +52,8 @@ const api = {
     ipcRenderer.invoke('settings:gemini-cli-signin-cancel') as Promise<{ ok: boolean; message?: string }>,
   geminiCliSignout: () =>
     ipcRenderer.invoke('settings:gemini-cli-signout') as Promise<{ ok: boolean; message?: string }>,
+  logDebug: (scope: string, message: string, details?: unknown) =>
+    ipcRenderer.invoke('debug:log', { scope, message, details }) as Promise<{ ok: true }>,
   checkExtensionUpdates: () => ipcRenderer.invoke('extension:check-updates') as Promise<WilyTraderDesktopStatus>,
   openExtensionFolder: () =>
     ipcRenderer.invoke('extension:open-folder') as Promise<{ ok: boolean; message: string; path?: string | null }>,

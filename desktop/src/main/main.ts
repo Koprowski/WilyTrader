@@ -63,6 +63,14 @@ let registeredTradeSessionHotkey: string | null = null;
 let activeGeminiSigninChild: ReturnType<typeof spawn> | null = null;
 
 function createWindow(): void {
+  const preloadPath = path.join(__dirname, '..', 'preload.js');
+  debugLog('main', 'creating window', {
+    appPath: app.getAppPath(),
+    cwd: process.cwd(),
+    preloadPath,
+    preloadExists: fs.existsSync(preloadPath),
+    userData: app.getPath('userData'),
+  });
   mainWindow = new BrowserWindow({
     width: 920,
     height: 680,
@@ -71,7 +79,7 @@ function createWindow(): void {
     title: 'WilyTrader Desktop',
     show: false,
     webPreferences: {
-      preload: path.join(__dirname, '..', 'preload.js'),
+      preload: preloadPath,
       contextIsolation: true,
       nodeIntegration: false,
     },
@@ -82,7 +90,7 @@ function createWindow(): void {
     console.log(`[WilyTrader Desktop] window ready: ${mainWindow?.getTitle() ?? 'untitled'}`);
   });
   mainWindow.webContents.on('console-message', (_event, level, message) => {
-    if (level >= 2) console.log(`[WilyTrader Desktop renderer] ${message}`);
+    debugLog('renderer-console', 'console-message', { level, message });
   });
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
     console.log(`[WilyTrader Desktop] renderer exited: ${details.reason}`);
@@ -116,6 +124,12 @@ app.on('will-quit', () => {
 });
 
 function registerIpc(): void {
+  debugLog('ipc', 'registering handlers');
+  ipcMain.handle('debug:log', async (_event, payload) => {
+    const record = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+    debugLog(String(record.scope ?? 'renderer'), String(record.message ?? 'debug'), record.details);
+    return { ok: true };
+  });
   ipcMain.handle('app:info', async () => ({
     name: app.getName(),
     version: app.getVersion(),
@@ -128,10 +142,150 @@ function registerIpc(): void {
   ipcMain.handle('session:transcript-segment', async (_event, payload) => addTranscriptSegment(payload));
   ipcMain.handle('settings:get', async () => settings);
   ipcMain.handle('settings:save', async (_event, payload) => saveSettings(payload));
+  ipcMain.handle('settings:check-dependencies', async (_event, payload) => {
+    debugLog('ipc', 'settings:check-dependencies received', { payload });
+    try {
+      const result = await checkDependencies(payload);
+      debugLog('ipc', 'settings:check-dependencies completed', summarizeDependencyResult(result));
+      return result;
+    } catch (err) {
+      debugLog('ipc', 'settings:check-dependencies failed', errorDetails(err));
+      throw err;
+    }
+  });
+  ipcMain.handle('settings:install-whisper', async () => {
+    debugLog('ipc', 'settings:install-whisper received');
+    return installWhisperDependency();
+  });
+  ipcMain.handle('settings:install-gemini-cli', async () => {
+    debugLog('ipc', 'settings:install-gemini-cli received');
+    return installGeminiCli();
+  });
+  ipcMain.handle('settings:install-node', async () => {
+    debugLog('ipc', 'settings:install-node received');
+    return installNodeLts();
+  });
+  ipcMain.handle('settings:test-llm-connection', async (_event, payload) => {
+    debugLog('ipc', 'settings:test-llm-connection received', sanitizeLlmPayload(payload));
+    return testLlmConnection(payload);
+  });
+  ipcMain.handle('settings:list-openrouter-models', async () => {
+    debugLog('ipc', 'settings:list-openrouter-models received');
+    return listOpenRouterModelsWithCache();
+  });
+  ipcMain.handle('settings:list-gemini-cli-models', async () => {
+    debugLog('ipc', 'settings:list-gemini-cli-models received');
+    return listGeminiCliModels();
+  });
+  ipcMain.handle('settings:gemini-cli-signin-status', async () => {
+    debugLog('ipc', 'settings:gemini-cli-signin-status received');
+    const result = geminiCliSigninStatus();
+    debugLog('ipc', 'settings:gemini-cli-signin-status completed', result);
+    return result;
+  });
+  ipcMain.handle('settings:gemini-cli-signin', async (_event, payload) => {
+    debugLog('ipc', 'settings:gemini-cli-signin received', { payload });
+    const result = await geminiCliSignin(payload);
+    debugLog('ipc', 'settings:gemini-cli-signin completed', result);
+    return result;
+  });
+  ipcMain.handle('settings:gemini-cli-signin-cancel', async () => {
+    debugLog('ipc', 'settings:gemini-cli-signin-cancel received');
+    return geminiCliSigninCancel();
+  });
+  ipcMain.handle('settings:gemini-cli-signout', async () => {
+    debugLog('ipc', 'settings:gemini-cli-signout received');
+    return geminiCliSignout();
+  });
   ipcMain.handle('extension:check-updates', async () => {
     await checkExtensionUpdates(true);
     return getStatus();
   });
+  ipcMain.handle('extension:open-folder', async () => openWilyTraderExtensionFolder());
+  ipcMain.handle('extension:open-chrome-extensions', async () => openChromeExtensionsPage());
+  ipcMain.handle('extension:move-location', async () => moveWilyTraderExtensionLocation());
+}
+
+function debugLog(scope: string, message: string, details?: unknown): void {
+  const entry = {
+    at: new Date().toISOString(),
+    pid: process.pid,
+    scope,
+    message,
+    details: details ?? null,
+  };
+  const line = JSON.stringify(entry);
+  try {
+    const userData = app.isReady() ? app.getPath('userData') : path.join(os.homedir(), 'AppData', 'Roaming', 'wilytrader-desktop');
+    fs.mkdirSync(userData, { recursive: true });
+    fs.appendFileSync(path.join(userData, 'debug.log'), `${line}${os.EOL}`, 'utf-8');
+  } catch {
+    // Keep debug logging non-fatal.
+  }
+  console.log(`[WilyTrader Desktop][${scope}] ${message}`, details ?? '');
+}
+
+function errorDetails(err: unknown): Record<string, unknown> {
+  return err instanceof Error
+    ? { name: err.name, message: err.message, stack: err.stack }
+    : { message: String(err) };
+}
+
+function tail(value: string, max = 500): string {
+  return value.length > max ? value.slice(-max) : value;
+}
+
+function sanitizeForLog(value: unknown, depth = 0): unknown {
+  if (value === null || typeof value !== 'object') {
+    return typeof value === 'string' && value.length > 1000 ? tail(value, 1000) : value;
+  }
+  if (depth > 4) return '[MaxDepth]';
+  if (Array.isArray(value)) return value.slice(0, 50).map((item) => sanitizeForLog(item, depth + 1));
+  const redacted: Record<string, unknown> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    redacted[key] = /(api[-_]?key|authorization|bearer|credential|oauth|password|secret|token)/i.test(key)
+      ? '[REDACTED]'
+      : sanitizeForLog(raw, depth + 1);
+  }
+  return redacted;
+}
+
+function sanitizeLlmPayload(payload: unknown): unknown {
+  return sanitizeForLog(payload);
+}
+
+function dependencyProbeSummary(result: DependencyProbeResult): Record<string, unknown> {
+  return {
+    ok: result.ok,
+    code: result.code,
+    timedOut: result.timedOut,
+    error: result.error,
+    stdoutTail: tail(result.stdout.trim(), 500),
+    stderrTail: tail(cleanCliStderr(result.stderr), 500),
+  };
+}
+
+function summarizeDependencyResult(result: Awaited<ReturnType<typeof checkDependencies>>): Record<string, unknown> {
+  return {
+    whisper: {
+      ok: result.whisper.ok,
+      message: result.whisper.message,
+      exePath: result.whisper.exePath,
+      modelPath: result.whisper.modelPath,
+    },
+    node: {
+      ok: result.node.ok,
+      optional: result.node.optional,
+      version: result.node.version,
+      message: result.node.message,
+    },
+    geminiCli: {
+      ok: result.geminiCli.ok,
+      version: result.geminiCli.version,
+      command: result.geminiCli.command,
+      message: result.geminiCli.message,
+    },
+  };
 }
 
 function registerTradeSessionHotkey(): void {
@@ -1511,7 +1665,12 @@ async function checkDependencies(payload?: { geminiCliCommand?: string }): Promi
   node: { ok: boolean; message: string; version?: string; optional?: boolean };
   geminiCli: { ok: boolean; message: string; version?: string; command?: string };
 }> {
+  debugLog('dependencies', 'check started', {
+    payload: sanitizeForLog(payload),
+    whisperSearchRoots: whisperSearchRoots().map((root) => ({ root, exists: fs.existsSync(root) })),
+  });
   const foundWhisper = findWhisperBinary();
+  debugLog('dependencies', 'whisper probe completed', foundWhisper ?? { found: false });
   const whisper = foundWhisper
     ? {
         ok: true,
@@ -1524,14 +1683,21 @@ async function checkDependencies(payload?: { geminiCliCommand?: string }): Promi
         message: 'Whisper files were not found. Use Install Whisper in this setup checklist.',
       };
   const npmProbe = await runNpmDependencyProbe(['--version'], 10_000);
+  debugLog('dependencies', 'npm probe completed', dependencyProbeSummary(npmProbe));
   const cliCommand = (payload?.geminiCliCommand || settings.geminiCliCommand || 'gemini').trim() || 'gemini';
   const resolvedCli = resolveGeminiCliExecutable(cliCommand);
+  debugLog('dependencies', 'gemini cli resolved', {
+    requestedCommand: cliCommand,
+    command: resolvedCli.command,
+    prefixArgs: resolvedCli.prefixArgs,
+  });
   const geminiProbe = await runDependencyProbe(
     resolvedCli.command,
     [...resolvedCli.prefixArgs, '--version'],
     10_000,
     geminiCliEnv()
   );
+  debugLog('dependencies', 'gemini cli probe completed', dependencyProbeSummary(geminiProbe));
   const geminiCli = geminiProbe.ok
     ? {
         ok: true,
@@ -1564,6 +1730,7 @@ async function checkDependencies(payload?: { geminiCliCommand?: string }): Promi
             ? `npm was not found (${npmProbe.error}). Install Node.js LTS first.`
             : `npm check failed${npmProbe.timedOut ? ' (timed out)' : ''}. Install Node.js LTS first.`,
         };
+  debugLog('dependencies', 'check finished', summarizeDependencyResult({ whisper, node, geminiCli }));
   return { whisper, node, geminiCli };
 }
 
@@ -1897,6 +2064,12 @@ function readOauthCredsSubject(): string | null {
 
 function geminiCliSigninStatus(): { signedIn: boolean; subject?: string | null } {
   const subject = readOauthCredsSubject();
+  debugLog('gemini-signin', 'status checked', {
+    oauthCredsPath: OAUTH_CREDS_PATH,
+    oauthCredsExists: fs.existsSync(OAUTH_CREDS_PATH),
+    signedIn: Boolean(subject),
+    subject,
+  });
   return { signedIn: Boolean(subject), subject };
 }
 
@@ -1921,11 +2094,19 @@ function geminiCliSigninCancel(): { ok: boolean; message?: string } {
 }
 
 function geminiCliSignin(payload?: { command?: string }): Promise<{ ok: boolean; message: string; subject?: string }> {
+  debugLog('gemini-signin', 'signin requested', {
+    payload: sanitizeForLog(payload),
+    active: Boolean(activeGeminiSigninChild),
+    oauthCredsPath: OAUTH_CREDS_PATH,
+    oauthCredsExists: fs.existsSync(OAUTH_CREDS_PATH),
+  });
   if (activeGeminiSigninChild) {
+    debugLog('gemini-signin', 'signin rejected; already active');
     return Promise.resolve({ ok: false, message: 'Sign-in already in progress. Wait for it to finish or cancel it.' });
   }
   const existingSubject = readOauthCredsSubject();
   if (existingSubject) {
+    debugLog('gemini-signin', 'signin skipped; already signed in', { subject: existingSubject });
     return Promise.resolve({
       ok: true,
       message: `Gemini CLI is already signed in as ${existingSubject}.`,
@@ -1933,6 +2114,10 @@ function geminiCliSignin(payload?: { command?: string }): Promise<{ ok: boolean;
     });
   }
   const resolvedCli = resolveGeminiCliExecutable(payload?.command ?? settings.geminiCliCommand ?? 'gemini');
+  debugLog('gemini-signin', 'launching gemini cli', {
+    command: resolvedCli.command,
+    prefixArgs: resolvedCli.prefixArgs,
+  });
   const startedAtMs = Date.now();
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
@@ -1944,11 +2129,13 @@ function geminiCliSignin(payload?: { command?: string }): Promise<{ ok: boolean;
         env: geminiCliEnv(),
       });
     } catch (err) {
+      debugLog('gemini-signin', 'spawn threw', errorDetails(err));
       resolve({ ok: false, message: `Failed to launch Gemini CLI: ${(err as Error).message}` });
       return;
     }
     activeGeminiSigninChild = child;
     let stdout = '';
+    let stderr = '';
     let answered = false;
     let settled = false;
     const finish = (result: { ok: boolean; message: string; subject?: string }) => {
@@ -1962,22 +2149,38 @@ function geminiCliSignin(payload?: { command?: string }): Promise<{ ok: boolean;
         // ignore
       }
       if (activeGeminiSigninChild === child) activeGeminiSigninChild = null;
+      debugLog('gemini-signin', 'signin finished', {
+        result,
+        stdoutTail: tail(stdout.trim(), 500),
+        stderrTail: tail(cleanCliStderr(stderr), 500),
+        durationMs: Date.now() - startedAtMs,
+      });
       resolve(result);
     };
     child.stdout?.on('data', (data: Buffer) => {
       stdout += data.toString();
+      debugLog('gemini-signin', 'stdout chunk', { stdoutTail: tail(stdout.trim(), 300) });
       if (!answered && /continue\?\s*\[Y\/n\]/i.test(stdout)) {
         answered = true;
         try {
           child.stdin?.write('y\n');
+          debugLog('gemini-signin', 'answered workspace trust prompt');
         } catch {
           // ignore
         }
       }
     });
-    child.on('error', (err) => finish({ ok: false, message: `Gemini CLI process error: ${err.message}` }));
+    child.stderr?.on('data', (data: Buffer) => {
+      stderr += data.toString();
+      debugLog('gemini-signin', 'stderr chunk', { stderrTail: tail(cleanCliStderr(stderr), 300) });
+    });
+    child.on('error', (err) => {
+      debugLog('gemini-signin', 'process error', errorDetails(err));
+      finish({ ok: false, message: `Gemini CLI process error: ${err.message}` });
+    });
     child.on('close', (code) => {
       if (settled) return;
+      debugLog('gemini-signin', 'process closed', { code });
       setTimeout(() => {
         const subject = readOauthCredsSubject();
         const fresh = Boolean(subject && fs.existsSync(OAUTH_CREDS_PATH) && fs.statSync(OAUTH_CREDS_PATH).mtimeMs >= startedAtMs);
@@ -1991,9 +2194,11 @@ function geminiCliSignin(payload?: { command?: string }): Promise<{ ok: boolean;
       const stat = fs.statSync(OAUTH_CREDS_PATH);
       if (stat.mtimeMs < startedAtMs) return;
       const subject = readOauthCredsSubject();
+      debugLog('gemini-signin', 'oauth creds detected', { subject, mtimeMs: stat.mtimeMs, startedAtMs });
       finish({ ok: true, message: subject ? `Signed in as ${subject}.` : 'Signed in successfully.', subject: subject ?? undefined });
     }, 1000);
     const timeoutTimer = setTimeout(() => {
+      debugLog('gemini-signin', 'signin timed out');
       finish({ ok: false, message: 'Sign-in timed out after 5 minutes. Try again.' });
     }, 5 * 60 * 1000);
   });
@@ -2006,10 +2211,22 @@ function runDependencyProbe(
   env?: NodeJS.ProcessEnv
 ): Promise<DependencyProbeResult> {
   return new Promise((resolve) => {
+    debugLog('dependency-probe', 'starting process', { command, args, timeoutMs });
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let settled = false;
     let child: ReturnType<typeof spawn>;
+    const finish = (result: DependencyProbeResult) => {
+      if (settled) return;
+      settled = true;
+      debugLog('dependency-probe', 'process finished', {
+        command,
+        args,
+        ...dependencyProbeSummary(result),
+      });
+      resolve(result);
+    };
     try {
       child = spawn(command, args, {
         windowsHide: true,
@@ -2018,11 +2235,12 @@ function runDependencyProbe(
         env,
       });
     } catch (err) {
-      resolve({ ok: false, code: -1, stdout, stderr, error: (err as Error).message, timedOut });
+      finish({ ok: false, code: -1, stdout, stderr, error: (err as Error).message, timedOut });
       return;
     }
     const timer = setTimeout(() => {
       timedOut = true;
+      debugLog('dependency-probe', 'process timed out; killing', { command, args, timeoutMs });
       try {
         child.kill();
       } catch {
@@ -2033,11 +2251,11 @@ function runDependencyProbe(
     child.stderr?.on('data', (data) => { stderr += String(data); });
     child.on('error', (err) => {
       clearTimeout(timer);
-      resolve({ ok: false, code: -1, stdout, stderr, error: err.message, timedOut });
+      finish({ ok: false, code: -1, stdout, stderr, error: err.message, timedOut });
     });
     child.on('close', (code) => {
       clearTimeout(timer);
-      resolve({ ok: code === 0 && !timedOut, code, stdout, stderr, timedOut });
+      finish({ ok: code === 0 && !timedOut, code, stdout, stderr, timedOut });
     });
   });
 }
@@ -2101,6 +2319,7 @@ function runNpmDependencyProbe(args: string[], timeoutMs = 15_000): Promise<Depe
   const npm = resolveNpmExecutable(env);
   const comspec = process.env.ComSpec || 'cmd.exe';
   const npmCommand = ['call', quoteCmdArg(npm), ...args.map(quoteCmdArg)].join(' ');
+  debugLog('dependency-probe', 'resolved npm command', { npm, comspec, args, timeoutMs });
   return runDependencyProbe(comspec, ['/d', '/c', npmCommand], timeoutMs, env);
 }
 

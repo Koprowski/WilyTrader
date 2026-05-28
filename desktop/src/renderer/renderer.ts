@@ -50,6 +50,7 @@ type WilyTraderDesktopRuntimeApi = typeof window.wilyTraderDesktop & Partial<{
   }>;
   geminiCliSigninStatus: () => Promise<{ signedIn: boolean; subject?: string | null }>;
   geminiCliSignin: (payload: { command?: string }) => Promise<{ ok: boolean; message: string; subject?: string }>;
+  logDebug: (scope: string, message: string, details?: unknown) => Promise<{ ok: true }>;
 }>;
 
 const startButton = document.querySelector<HTMLButtonElement>('[data-action="start"]');
@@ -69,6 +70,28 @@ const dependencyStatusEl = document.querySelector<HTMLElement>('[data-dependency
 const geminiSigninStatusEl = document.querySelector<HTMLElement>('[data-gemini-signin-status]');
 const settingsMessageEl = document.querySelector<HTMLElement>('[data-settings-message]');
 const settingsModal = document.querySelector<HTMLElement>('[data-settings-modal]');
+
+debugLog('renderer', 'renderer loaded', {
+  hasRuntimeApi: Boolean(window.wilyTraderDesktop),
+  actions: Array.from(document.querySelectorAll<HTMLElement>('[data-action]')).map((item) => item.dataset.action),
+});
+
+window.addEventListener('error', (event) => {
+  debugLog('renderer', 'window error', {
+    message: event.message,
+    filename: event.filename,
+    lineno: event.lineno,
+    colno: event.colno,
+    error: event.error instanceof Error ? { name: event.error.name, message: event.error.message, stack: event.error.stack } : String(event.error),
+  });
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+  const reason = event.reason;
+  debugLog('renderer', 'unhandled rejection', reason instanceof Error
+    ? { name: reason.name, message: reason.message, stack: reason.stack }
+    : { reason: String(reason) });
+});
 
 startButton?.addEventListener('click', () => void startAudioFirstSession().catch(showError));
 stopButton?.addEventListener('click', () => void stopAudioFirstSession().catch(showError));
@@ -99,7 +122,12 @@ bindAction('gemini-signin-cancel', () => void cancelGeminiSignin());
 bindAction('open-extension-folder', () => void openExtensionFolder());
 bindAction('move-extension-location', () => void moveExtensionLocation());
 for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>('[data-action="open-chrome-extensions"]'))) {
-  button.addEventListener('click', () => void openChromeExtensions());
+  debugLog('renderer', 'binding action', { action: 'open-chrome-extensions', found: true });
+  button.addEventListener('click', (event) => {
+    event.preventDefault();
+    debugLog('renderer', 'action clicked', { action: 'open-chrome-extensions', disabled: button.disabled });
+    void openChromeExtensions();
+  });
 }
 
 getInput('openRouterModelFilter')?.addEventListener('input', renderOpenrouterModelOptions);
@@ -277,16 +305,23 @@ async function refreshDependencyStatus(): Promise<void> {
   if (dependencyStatusEl) dependencyStatusEl.textContent = 'Checking dependencies...';
   try {
     const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi;
+    debugLog('renderer', 'refreshDependencyStatus started', {
+      hasApi: Boolean(api),
+      hasCheckDependencies: typeof api.checkDependencies === 'function',
+      geminiCliCommand: getInputValue('geminiCliCommand') || 'gemini',
+    });
     if (typeof api.checkDependencies !== 'function') {
       throw new Error('Dependency checker is unavailable in the running app. Restart WilyTrader Desktop so the updated preload API is loaded.');
     }
     const result = await api.checkDependencies({ geminiCliCommand: getInputValue('geminiCliCommand') || 'gemini' });
+    debugLog('renderer', 'refreshDependencyStatus completed', result);
     setDependencyStatus([
       formatDependency('Whisper', result.whisper),
       formatDependency('Node/npm', result.node),
       formatDependency('Gemini CLI', result.geminiCli),
     ].join('\n'));
   } catch (err) {
+    debugLog('renderer', 'refreshDependencyStatus failed', errorDetails(err));
     setDependencyStatus(`Dependency check failed: ${(err as Error).message}`);
   }
 }
@@ -345,33 +380,50 @@ async function refreshGeminiSigninStatus(): Promise<void> {
   if (!geminiSigninStatusEl) return;
   try {
     const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi;
+    debugLog('renderer', 'refreshGeminiSigninStatus started', {
+      hasStatusApi: typeof api.geminiCliSigninStatus === 'function',
+    });
     if (typeof api.geminiCliSigninStatus !== 'function') {
       throw new Error('Gemini sign-in status is unavailable in the running app. Restart WilyTrader Desktop so the updated preload API is loaded.');
     }
     const result = await api.geminiCliSigninStatus();
+    debugLog('renderer', 'refreshGeminiSigninStatus completed', result);
     geminiSigninStatusEl.textContent = result.signedIn ? `Signed in as ${result.subject ?? 'Google account'}.` : 'Not signed in.';
   } catch (err) {
+    debugLog('renderer', 'refreshGeminiSigninStatus failed', errorDetails(err));
     geminiSigninStatusEl.textContent = `Could not check sign-in status: ${(err as Error).message}`;
   }
 }
 
 async function signInGemini(): Promise<void> {
-  const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi;
-  if (typeof api.geminiCliSignin !== 'function' || typeof api.geminiCliSigninStatus !== 'function') {
-    setSettingsMessage('Gemini sign-in is unavailable in the running app. Restart WilyTrader Desktop so the updated preload API is loaded.', true);
-    return;
+  try {
+    const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi;
+    debugLog('renderer', 'signInGemini started', {
+      hasSigninApi: typeof api.geminiCliSignin === 'function',
+      hasStatusApi: typeof api.geminiCliSigninStatus === 'function',
+      geminiCliCommand: getInputValue('geminiCliCommand') || 'gemini',
+    });
+    if (typeof api.geminiCliSignin !== 'function' || typeof api.geminiCliSigninStatus !== 'function') {
+      setSettingsMessage('Gemini sign-in is unavailable in the running app. Restart WilyTrader Desktop so the updated preload API is loaded.', true);
+      return;
+    }
+    const status = await api.geminiCliSigninStatus();
+    debugLog('renderer', 'signInGemini current status', status);
+    if (status.signedIn) {
+      const subject = status.subject ?? 'Google account';
+      setSettingsMessage(`Gemini CLI is already signed in as ${subject}.`);
+      if (geminiSigninStatusEl) geminiSigninStatusEl.textContent = `Signed in as ${subject}.`;
+      return;
+    }
+    setSettingsMessage('Starting Gemini CLI Google sign-in...');
+    const result = await api.geminiCliSignin({ command: getInputValue('geminiCliCommand') || 'gemini' });
+    debugLog('renderer', 'signInGemini completed', result);
+    setSettingsMessage(result.message, !result.ok);
+    await refreshGeminiSigninStatus();
+  } catch (err) {
+    debugLog('renderer', 'signInGemini failed', errorDetails(err));
+    setSettingsMessage(`Gemini sign-in failed: ${(err as Error).message}`, true);
   }
-  const status = await api.geminiCliSigninStatus();
-  if (status.signedIn) {
-    const subject = status.subject ?? 'Google account';
-    setSettingsMessage(`Gemini CLI is already signed in as ${subject}.`);
-    if (geminiSigninStatusEl) geminiSigninStatusEl.textContent = `Signed in as ${subject}.`;
-    return;
-  }
-  setSettingsMessage('Starting Gemini CLI Google sign-in...');
-  const result = await api.geminiCliSignin({ command: getInputValue('geminiCliCommand') || 'gemini' });
-  setSettingsMessage(result.message, !result.ok);
-  await refreshGeminiSigninStatus();
 }
 
 async function signOutGemini(): Promise<void> {
@@ -450,12 +502,58 @@ function toggleOpenRouterKey(): void {
 
 function showError(error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
+  debugLog('renderer', 'showError', errorDetails(error));
   setUiBusy(false, `Error: ${message}`);
   setSettingsMessage(message, true);
 }
 
 function bindAction(action: string, listener: () => void): void {
-  document.querySelector<HTMLButtonElement>(`[data-action="${action}"]`)?.addEventListener('click', listener);
+  const button = document.querySelector<HTMLButtonElement>(`[data-action="${action}"]`);
+  debugLog('renderer', 'binding action', { action, found: Boolean(button) });
+  button?.addEventListener('click', (event) => {
+    event.preventDefault();
+    debugLog('renderer', 'action clicked', { action, disabled: button.disabled });
+    try {
+      listener();
+    } catch (err) {
+      debugLog('renderer', 'action listener failed', { action, error: errorDetails(err) });
+      showError(err);
+    }
+  });
+}
+
+function debugLog(scope: string, message: string, details?: unknown): void {
+  try {
+    const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi | undefined;
+    if (api && typeof api.logDebug === 'function') {
+      void api.logDebug(scope, message, sanitizeForLog(details)).catch((err) => {
+        console.warn('[WilyTrader Desktop debug log failed]', err);
+      });
+      return;
+    }
+  } catch {
+    // fall through to console
+  }
+  console.log(`[WilyTrader Desktop][${scope}] ${message}`, details ?? '');
+}
+
+function errorDetails(error: unknown): Record<string, unknown> {
+  return error instanceof Error
+    ? { name: error.name, message: error.message, stack: error.stack }
+    : { message: String(error) };
+}
+
+function sanitizeForLog(value: unknown, depth = 0): unknown {
+  if (value === null || typeof value !== 'object') return value;
+  if (depth > 4) return '[MaxDepth]';
+  if (Array.isArray(value)) return value.slice(0, 50).map((item) => sanitizeForLog(item, depth + 1));
+  const redacted: Record<string, unknown> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    redacted[key] = /(api[-_]?key|authorization|bearer|credential|oauth|password|secret|token)/i.test(key)
+      ? '[REDACTED]'
+      : sanitizeForLog(raw, depth + 1);
+  }
+  return redacted;
 }
 
 function getInput(name: string): HTMLInputElement | null {
