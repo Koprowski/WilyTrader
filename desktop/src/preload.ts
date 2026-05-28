@@ -63,6 +63,10 @@ const api = {
     ipcRenderer.invoke('extension:open-folder') as Promise<{ ok: boolean; message: string; path?: string | null }>,
   openChromeExtensions: () =>
     ipcRenderer.invoke('extension:open-chrome-extensions') as Promise<{ ok: boolean; message: string }>,
+  openLatestExtensionRelease: () =>
+    ipcRenderer.invoke('extension:open-latest-release') as Promise<{ ok: boolean; message: string; url?: string }>,
+  downloadLatestExtensionRelease: () =>
+    ipcRenderer.invoke('extension:download-latest-release') as Promise<{ ok: boolean; message: string; url?: string }>,
   moveExtensionLocation: () =>
     ipcRenderer.invoke('extension:move-location') as Promise<{
       ok: boolean;

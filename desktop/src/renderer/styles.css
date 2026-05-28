@@ -199,6 +199,22 @@ summary:focus-visible {
   color: #d8e7f4;
 }
 
+.extension-guidance {
+  max-width: 940px;
+  padding: 9px 10px;
+  border: 1px solid #356284;
+  border-radius: 7px;
+  background: #101922;
+  color: #eef3f8;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.extension-guidance[hidden],
+.extension-update-actions[hidden] {
+  display: none;
+}
+
 .modal[hidden] {
   display: none;
 }

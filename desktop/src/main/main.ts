@@ -23,6 +23,7 @@ import type {
 const BRIDGE_PORT = 17365;
 const MAX_BRIDGE_BODY_BYTES = 25 * 1024 * 1024;
 const WILYTRADER_TAGS_API_URL = 'https://api.github.com/repos/Koprowski/WilyTrader/tags?per_page=10';
+const WILYTRADER_RELEASE_BASE_URL = 'https://github.com/Koprowski/WilyTrader/releases';
 const ffmpegPath = require('ffmpeg-static') as string | null;
 
 interface ActiveTradeSession {
@@ -233,6 +234,8 @@ function registerIpc(): void {
   });
   ipcMain.handle('extension:open-folder', async () => openWilyTraderExtensionFolder());
   ipcMain.handle('extension:open-chrome-extensions', async () => openChromeExtensionsPage());
+  ipcMain.handle('extension:open-latest-release', async () => openLatestExtensionReleasePage());
+  ipcMain.handle('extension:download-latest-release', async () => openLatestExtensionDownload());
   ipcMain.handle('extension:move-location', async () => moveWilyTraderExtensionLocation());
 }
 
@@ -2015,6 +2018,31 @@ async function fetchLatestExtensionVersion(): Promise<string> {
     .pop();
   if (!latest) throw new Error('No semantic WilyTrader tag found.');
   return latest;
+}
+
+async function latestKnownExtensionVersion(): Promise<string> {
+  if (extensionStatus.latestVersion) return extensionStatus.latestVersion;
+  const latest = await fetchLatestExtensionVersion();
+  extensionStatus = {
+    ...extensionStatus,
+    latestVersion: latest,
+    checkedAt: new Date().toISOString(),
+  };
+  return latest;
+}
+
+async function openLatestExtensionReleasePage(): Promise<{ ok: boolean; message: string; url?: string }> {
+  const latest = await latestKnownExtensionVersion();
+  const url = `${WILYTRADER_RELEASE_BASE_URL}/tag/v${latest}`;
+  await shell.openExternal(url);
+  return { ok: true, message: `Opened WilyTrader ${latest} release page.`, url };
+}
+
+async function openLatestExtensionDownload(): Promise<{ ok: boolean; message: string; url?: string }> {
+  const latest = await latestKnownExtensionVersion();
+  const url = `${WILYTRADER_RELEASE_BASE_URL}/download/v${latest}/wilytrader-${latest}-extension.zip`;
+  await shell.openExternal(url);
+  return { ok: true, message: `Opened WilyTrader ${latest} extension zip download.`, url };
 }
 
 interface DependencyProbeResult {
