@@ -3403,7 +3403,7 @@
       lineStyle: "solid",
       labelText: `${isTakeProfit ? "WT TARGET" : "WT STOP"} ${formatTargetSellPercent(target.sellPercent)} ${formatters.usd(target.marketCapUsd)}`,
       labelBackground: isTakeProfit ? "rgba(49, 230, 186, 0.86)" : "rgba(255, 61, 143, 0.86)",
-      labelAlign: isTakeProfit ? "right" : "left",
+      labelAlign: "center",
       showPrice: true,
       movable: true,
     };
