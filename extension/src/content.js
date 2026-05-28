@@ -2249,7 +2249,7 @@
       }, "warn");
       return setStatus("Current market cap is unavailable.");
     }
-    const targetOptions = buildMarketCapMenuOptions(EXIT_TARGET_KINDS.takeProfit, currentMarketCap);
+    const targetOptions = buildMarketCapMenuOptions(EXIT_TARGET_KINDS.takeProfit, currentMarketCap).reverse();
     const stopOptions = buildMarketCapMenuOptions(EXIT_TARGET_KINDS.stopLoss, currentMarketCap);
     logExitTargetDiagnostic("target-menu-render", null, {
       clientX,
@@ -2266,10 +2266,11 @@
       : "";
     menu.innerHTML = `
       <div class="wt-context-title">WilyTrader ${formatTargetSellPercent(targetSellPercent)} @ ${formatters.usd(currentMarketCap)}</div>
-      ${buildMarketCapSubmenuHtml("Target Exit MC", EXIT_TARGET_KINDS.takeProfit, targetOptions, targetSellPercent)}
+      ${buildMarketCapSubmenuHtml("Target Exit MC", EXIT_TARGET_KINDS.takeProfit, targetOptions, targetSellPercent, "bottom")}
       ${stopLossHtml}
       <button type="button" data-action="context-clear-targets">Clear WT Targets</button>
     `;
+    bindSubmenuInitialScroll(menu);
     positionContextMenu(menu, clientX, clientY, anchorRect);
   }
 
@@ -2287,16 +2288,28 @@
     return Array.from({ length: EXIT_TARGET_MENU_MAX_OPTIONS }, (_, index) => start + index * step);
   }
 
-  function buildMarketCapSubmenuHtml(label, kind, options, sellPercent = 100) {
+  function buildMarketCapSubmenuHtml(label, kind, options, sellPercent = 100, initialScroll = "") {
     const rows = options
       .map((marketCap) => `<button type="button" data-action="select-exit-target-mc" data-target-kind="${kind}" data-target-market-cap="${marketCap}" data-target-sell-percent="${sellPercent}">${formatters.usd(marketCap)}</button>`)
       .join("");
+    const scrollAttr = initialScroll ? ` data-initial-scroll="${initialScroll}"` : "";
     return `
       <div class="wt-context-submenu">
         <button type="button" class="wt-context-submenu-trigger" aria-haspopup="true">${label}</button>
-        <div class="wt-context-submenu-panel">${rows}</div>
+        <div class="wt-context-submenu-panel"${scrollAttr}>${rows}</div>
       </div>
     `;
+  }
+
+  function bindSubmenuInitialScroll(menu) {
+    menu.querySelectorAll("[data-initial-scroll='bottom']").forEach((panel) => {
+      const submenu = panel.closest(".wt-context-submenu");
+      const scrollToBottom = () => window.requestAnimationFrame(() => {
+        panel.scrollTop = panel.scrollHeight;
+      });
+      submenu?.addEventListener("mouseenter", scrollToBottom, { once: true });
+      submenu?.addEventListener("focusin", scrollToBottom, { once: true });
+    });
   }
 
   function positionContextMenu(menu, clientX, clientY, anchorRect = null) {
