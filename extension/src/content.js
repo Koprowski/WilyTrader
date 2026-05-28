@@ -2271,7 +2271,7 @@
       <button type="button" data-action="context-clear-targets">Clear WT Targets</button>
     `;
     bindSubmenuInitialScroll(menu);
-    positionContextMenu(menu, clientX, clientY, anchorRect);
+    positionContextMenu(menu, clientX, clientY, anchorRect, "side");
   }
 
   function buildMarketCapMenuOptions(kind, currentMarketCap) {
@@ -2312,7 +2312,7 @@
     });
   }
 
-  function positionContextMenu(menu, clientX, clientY, anchorRect = null) {
+  function positionContextMenu(menu, clientX, clientY, anchorRect = null, placement = "below") {
     const margin = 8;
     const gap = 6;
     const submenuWidth = 132;
@@ -2320,24 +2320,38 @@
     const rect = menu.getBoundingClientRect();
     let left = clientX;
     let top = clientY;
+    let submenuShouldOpenLeft = false;
     if (anchorRect) {
-      const anchorCenter = anchorRect.left + anchorRect.width / 2;
-      const panelIsRightAligned = anchorCenter > window.innerWidth / 2;
-      left = panelIsRightAligned ? anchorRect.right - rect.width : anchorRect.left;
-      top = anchorRect.bottom + gap;
-      if (top + rect.height > window.innerHeight - margin) {
-        top = anchorRect.top - rect.height - gap;
+      if (placement === "side") {
+        const fitsLeft = anchorRect.left - rect.width - gap >= margin;
+        const fitsRight = anchorRect.right + rect.width + gap <= window.innerWidth - margin;
+        if (fitsLeft || !fitsRight) {
+          left = anchorRect.left - rect.width - gap;
+          submenuShouldOpenLeft = true;
+        } else {
+          left = anchorRect.right + gap;
+        }
+        top = anchorRect.top + anchorRect.height / 2 - rect.height / 2;
+      } else {
+        const anchorCenter = anchorRect.left + anchorRect.width / 2;
+        const panelIsRightAligned = anchorCenter > window.innerWidth / 2;
+        left = panelIsRightAligned ? anchorRect.right - rect.width : anchorRect.left;
+        top = anchorRect.bottom + gap;
+        if (top + rect.height > window.innerHeight - margin) {
+          top = anchorRect.top - rect.height - gap;
+        }
       }
     }
     left = Math.min(Math.max(margin, left), Math.max(margin, window.innerWidth - rect.width - margin));
     top = Math.min(Math.max(margin, top), Math.max(margin, window.innerHeight - rect.height - margin));
-    const submenuShouldOpenLeft = left + rect.width + submenuWidth > window.innerWidth - margin && left > submenuWidth;
+    submenuShouldOpenLeft ||= left + rect.width + submenuWidth > window.innerWidth - margin && left > submenuWidth;
     menu.classList.toggle("wt-context-menu-left", submenuShouldOpenLeft);
     menu.style.left = `${left}px`;
     menu.style.top = `${top}px`;
     logExitTargetDiagnostic("target-menu-positioned", null, {
       requested: { left: clientX, top: clientY },
       applied: { left, top },
+      placement,
       anchorRect: rectSnapshot(anchorRect),
       rect: rectSnapshot(menu.getBoundingClientRect()),
       leftOpening: menu.classList.contains("wt-context-menu-left"),
