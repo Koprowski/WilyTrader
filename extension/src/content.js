@@ -1241,6 +1241,7 @@
 
   function stopOverlayEvent(event) {
     if (!root?.contains(event.target)) return;
+    if (event.type === "pointerdown" && event.button === 2 && handleSellButtonTargetContextEvent(event)) return;
     const trackerHandle = event.target?.closest?.("[data-tracker-resize-corner]");
     if (trackerHandle) {
       logTrackerResizeDiagnostic("root-stop-overlay-event", event, {
@@ -1311,15 +1312,20 @@
   }
 
   function handleOverlayContextMenu(event) {
+    handleSellButtonTargetContextEvent(event);
+  }
+
+  function handleSellButtonTargetContextEvent(event) {
     const target = event.target?.closest?.("button");
-    if (!target || !root?.contains(target)) return;
+    if (!target || !root?.contains(target)) return false;
     const sellPercent = Number(target.dataset.sellPct || 0);
     const isHundredPercentSell = Math.round(sellPercent) === 100 || target.dataset.action === "sell-all";
-    if (!isHundredPercentSell) return;
+    if (!isHundredPercentSell) return false;
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
     showSellButtonTargetMenu(event.clientX, event.clientY);
+    return true;
   }
 
   function handleClick(event) {
@@ -2320,8 +2326,17 @@
     const text = String(value || "").trim();
     const match = text.match(/\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*([KMB])?/i);
     if (!match) return null;
-    const parsed = parseCompactNumber(match[1], match[2]);
+    const parsed = parseMarketCapInputNumber(match[1], match[2]);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  function parseMarketCapInputNumber(value, suffix = "") {
+    if (suffix) return parseCompactNumber(value, suffix);
+    const raw = String(value || "").replace(/,/g, "");
+    const parsed = Number.parseFloat(raw);
+    if (!Number.isFinite(parsed)) return null;
+    const digitCount = raw.replace(/\D/g, "").length;
+    return digitCount > 0 && digitCount <= 3 ? parsed * 1000 : parsed;
   }
 
   function getActiveExitTargets() {
