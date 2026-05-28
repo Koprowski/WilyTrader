@@ -1924,6 +1924,14 @@ function geminiCliSignin(payload?: { command?: string }): Promise<{ ok: boolean;
   if (activeGeminiSigninChild) {
     return Promise.resolve({ ok: false, message: 'Sign-in already in progress. Wait for it to finish or cancel it.' });
   }
+  const existingSubject = readOauthCredsSubject();
+  if (existingSubject) {
+    return Promise.resolve({
+      ok: true,
+      message: `Gemini CLI is already signed in as ${existingSubject}.`,
+      subject: existingSubject,
+    });
+  }
   const resolvedCli = resolveGeminiCliExecutable(payload?.command ?? settings.geminiCliCommand ?? 'gemini');
   const startedAtMs = Date.now();
   return new Promise((resolve) => {

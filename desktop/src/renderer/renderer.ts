@@ -42,6 +42,16 @@ interface WilyTraderDesktopStatus {
   };
 }
 
+type WilyTraderDesktopRuntimeApi = typeof window.wilyTraderDesktop & Partial<{
+  checkDependencies: (payload: { geminiCliCommand?: string }) => Promise<{
+    whisper: { ok: boolean; message: string; exePath?: string; modelPath?: string };
+    node: { ok: boolean; message: string; version?: string; optional?: boolean };
+    geminiCli: { ok: boolean; message: string; version?: string; command?: string };
+  }>;
+  geminiCliSigninStatus: () => Promise<{ signedIn: boolean; subject?: string | null }>;
+  geminiCliSignin: (payload: { command?: string }) => Promise<{ ok: boolean; message: string; subject?: string }>;
+}>;
+
 const startButton = document.querySelector<HTMLButtonElement>('[data-action="start"]');
 const stopButton = document.querySelector<HTMLButtonElement>('[data-action="stop"]');
 const settingsButton = document.querySelector<HTMLButtonElement>('[data-action="settings"]');
@@ -266,7 +276,11 @@ async function checkExtensionUpdates(): Promise<void> {
 async function refreshDependencyStatus(): Promise<void> {
   if (dependencyStatusEl) dependencyStatusEl.textContent = 'Checking dependencies...';
   try {
-    const result = await window.wilyTraderDesktop.checkDependencies({ geminiCliCommand: getInputValue('geminiCliCommand') || 'gemini' });
+    const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi;
+    if (typeof api.checkDependencies !== 'function') {
+      throw new Error('Dependency checker is unavailable in the running app. Restart WilyTrader Desktop so the updated preload API is loaded.');
+    }
+    const result = await api.checkDependencies({ geminiCliCommand: getInputValue('geminiCliCommand') || 'gemini' });
     setDependencyStatus([
       formatDependency('Whisper', result.whisper),
       formatDependency('Node/npm', result.node),
@@ -330,7 +344,11 @@ async function testLlmConnection(): Promise<void> {
 async function refreshGeminiSigninStatus(): Promise<void> {
   if (!geminiSigninStatusEl) return;
   try {
-    const result = await window.wilyTraderDesktop.geminiCliSigninStatus();
+    const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi;
+    if (typeof api.geminiCliSigninStatus !== 'function') {
+      throw new Error('Gemini sign-in status is unavailable in the running app. Restart WilyTrader Desktop so the updated preload API is loaded.');
+    }
+    const result = await api.geminiCliSigninStatus();
     geminiSigninStatusEl.textContent = result.signedIn ? `Signed in as ${result.subject ?? 'Google account'}.` : 'Not signed in.';
   } catch (err) {
     geminiSigninStatusEl.textContent = `Could not check sign-in status: ${(err as Error).message}`;
@@ -338,8 +356,20 @@ async function refreshGeminiSigninStatus(): Promise<void> {
 }
 
 async function signInGemini(): Promise<void> {
+  const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi;
+  if (typeof api.geminiCliSignin !== 'function' || typeof api.geminiCliSigninStatus !== 'function') {
+    setSettingsMessage('Gemini sign-in is unavailable in the running app. Restart WilyTrader Desktop so the updated preload API is loaded.', true);
+    return;
+  }
+  const status = await api.geminiCliSigninStatus();
+  if (status.signedIn) {
+    const subject = status.subject ?? 'Google account';
+    setSettingsMessage(`Gemini CLI is already signed in as ${subject}.`);
+    if (geminiSigninStatusEl) geminiSigninStatusEl.textContent = `Signed in as ${subject}.`;
+    return;
+  }
   setSettingsMessage('Starting Gemini CLI Google sign-in...');
-  const result = await window.wilyTraderDesktop.geminiCliSignin({ command: getInputValue('geminiCliCommand') || 'gemini' });
+  const result = await api.geminiCliSignin({ command: getInputValue('geminiCliCommand') || 'gemini' });
   setSettingsMessage(result.message, !result.ok);
   await refreshGeminiSigninStatus();
 }

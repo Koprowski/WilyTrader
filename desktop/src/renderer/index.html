@@ -89,10 +89,10 @@
               <div class="section-title">Setup Checklist</div>
               <div class="dependency-status" data-dependency-status>Checking dependencies...</div>
               <div class="button-wrap">
-                <button class="small-button" data-action="check-dependencies">Check Dependencies</button>
-                <button class="small-button" data-action="install-whisper">Install Whisper</button>
-                <button class="small-button" data-action="install-gemini-cli">Install Gemini CLI</button>
-                <button class="small-button" data-action="install-node">Install Node.js</button>
+                <button class="small-button" data-action="check-dependencies" type="button">Check Dependencies</button>
+                <button class="small-button" data-action="install-whisper" type="button">Install Whisper</button>
+                <button class="small-button" data-action="install-gemini-cli" type="button">Install Gemini CLI</button>
+                <button class="small-button" data-action="install-node" type="button">Install Node.js</button>
               </div>
             </section>
 
@@ -110,9 +110,9 @@
                 <div class="panel-heading">
                   <strong>Google account</strong>
                   <div class="inline-actions">
-                    <button class="small-button" data-action="gemini-signin">Sign in with Google</button>
-                    <button class="small-button" data-action="gemini-signout">Sign out</button>
-                    <button class="small-button danger" data-action="gemini-signin-cancel">Cancel</button>
+                    <button class="small-button" data-action="gemini-signin" type="button">Sign in with Google</button>
+                    <button class="small-button" data-action="gemini-signout" type="button">Sign out</button>
+                    <button class="small-button danger" data-action="gemini-signin-cancel" type="button">Cancel</button>
                   </div>
                 </div>
                 <div class="muted" data-gemini-signin-status>Checking sign-in status...</div>
@@ -122,7 +122,7 @@
                 <span>Gemini CLI model</span>
                 <div class="input-row">
                   <input data-setting="geminiCliModel" type="text" spellcheck="false" autocomplete="off" />
-                  <button class="small-button" data-action="fetch-gemini-models">Show Models</button>
+                  <button class="small-button" data-action="fetch-gemini-models" type="button">Show Models</button>
                 </div>
               </label>
               <input class="full-input" data-setting="geminiCliModelFilter" type="text" placeholder="Filter Gemini model names" spellcheck="false" autocomplete="off" />
@@ -139,7 +139,7 @@
                 <span>OpenRouter / OpenAI API key</span>
                 <div class="input-row">
                   <input data-setting="openRouterApiKey" type="password" placeholder="sk-or-... or sk-..." spellcheck="false" autocomplete="off" />
-                  <button class="small-button" data-action="toggle-openrouter-key">Show</button>
+                  <button class="small-button" data-action="toggle-openrouter-key" type="button">Show</button>
                 </div>
               </label>
               <label class="field">
@@ -150,7 +150,7 @@
                 <span>OpenRouter model</span>
                 <div class="input-row">
                   <input data-setting="openRouterModel" type="text" spellcheck="false" autocomplete="off" />
-                  <button class="small-button" data-action="fetch-openrouter-models">Fetch Models</button>
+                  <button class="small-button" data-action="fetch-openrouter-models" type="button">Fetch Models</button>
                 </div>
               </label>
               <input class="full-input" data-setting="openRouterModelFilter" type="text" placeholder="Filter model names" spellcheck="false" autocomplete="off" />
@@ -165,7 +165,7 @@
                 </label>
               </div>
               <select data-setting="openRouterModels" class="select" size="1"></select>
-              <button class="small-button" data-action="test-llm-connection">Test LLM Connection</button>
+              <button class="small-button" data-action="test-llm-connection" type="button">Test LLM Connection</button>
             </section>
 
             <section class="settings-section">
