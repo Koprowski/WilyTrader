@@ -192,7 +192,7 @@
   display: none;
   position: absolute;
   top: -6px;
-  left: calc(100% + 6px);
+  left: 100%;
   width: 116px;
   max-height: min(420px, calc(100vh - 24px));
   overflow-y: auto;
@@ -204,7 +204,7 @@
 }
 
 .wt-context-menu-left .wt-context-submenu-panel {
-  right: calc(100% + 6px);
+  right: 100%;
   left: auto;
 }
 

@@ -1311,10 +1311,11 @@
   }
 
   function handleOverlayContextMenu(event) {
-    const target = event.target?.closest?.("[data-sell-pct]");
+    const target = event.target?.closest?.("button");
     if (!target || !root?.contains(target)) return;
     const sellPercent = Number(target.dataset.sellPct || 0);
-    if (Math.round(sellPercent) !== 100) return;
+    const isHundredPercentSell = Math.round(sellPercent) === 100 || target.dataset.action === "sell-all";
+    if (!isHundredPercentSell) return;
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
@@ -3215,7 +3216,7 @@
       labelBackground: isTakeProfit ? "rgba(49, 230, 186, 0.86)" : "rgba(255, 61, 143, 0.86)",
       labelAlign: isTakeProfit ? "right" : "left",
       showPrice: true,
-      movable: false,
+      movable: true,
     };
   }
 
@@ -3269,6 +3270,7 @@
       labelBackground: isEntry ? "rgba(34, 197, 94, 0.86)" : "rgba(239, 68, 68, 0.86)",
       labelAlign: isEntry ? "left" : "center",
       showPrice: true,
+      movable: true,
     };
   }
 

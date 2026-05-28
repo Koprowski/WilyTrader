@@ -381,7 +381,7 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
   async function upsertStoredLine(boundChart: BoundChart, line: StoredLine): Promise<StoredLine> {
     const entity = line.entityId ? safeCall(() => boundChart.chart.getShapeById?.(line.entityId)) : null;
     if (entity) {
-      setEntityPoints(entity, line.price, boundChart);
+      if (!isMovableLine(line)) setEntityPoints(entity, line.price, boundChart);
       setEntityProperties(entity, line.style);
       return line;
     }
