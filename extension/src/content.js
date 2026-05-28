@@ -2304,11 +2304,21 @@
   function bindSubmenuInitialScroll(menu) {
     menu.querySelectorAll("[data-initial-scroll='bottom']").forEach((panel) => {
       const submenu = panel.closest(".wt-context-submenu");
-      const scrollToBottom = () => window.requestAnimationFrame(() => {
+      const trigger = submenu?.querySelector(".wt-context-submenu-trigger");
+      const scrollToBottom = () => {
         panel.scrollTop = panel.scrollHeight;
+        window.requestAnimationFrame(() => {
+          panel.scrollTop = panel.scrollHeight;
+        });
+        window.setTimeout(() => {
+          panel.scrollTop = panel.scrollHeight;
+        }, 40);
+      };
+      [submenu, trigger, panel].filter(Boolean).forEach((element) => {
+        element.addEventListener("mouseenter", scrollToBottom);
+        element.addEventListener("pointerenter", scrollToBottom);
+        element.addEventListener("focusin", scrollToBottom);
       });
-      submenu?.addEventListener("mouseenter", scrollToBottom, { once: true });
-      submenu?.addEventListener("focusin", scrollToBottom, { once: true });
     });
   }
 
