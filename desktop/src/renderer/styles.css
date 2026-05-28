@@ -42,6 +42,40 @@ p {
   color: #9fb0bf;
 }
 
+.finalization-progress {
+  display: grid;
+  gap: 6px;
+  width: min(420px, 100%);
+  margin-top: 10px;
+}
+
+.finalization-progress[hidden] {
+  display: none;
+}
+
+.progress-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: #d8e7f4;
+  font-size: 12px;
+}
+
+.progress-track {
+  height: 8px;
+  overflow: hidden;
+  border: 1px solid #356284;
+  border-radius: 999px;
+  background: #0f1419;
+}
+
+.progress-fill {
+  width: 0%;
+  height: 100%;
+  background: #45b37d;
+  transition: width 240ms ease;
+}
+
 .actions {
   display: flex;
   align-items: center;

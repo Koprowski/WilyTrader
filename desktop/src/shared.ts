@@ -32,6 +32,7 @@ export interface AudioRecordingMeta {
 
 export interface WilyTraderDesktopStatus {
   active: boolean;
+  sessionState: 'idle' | 'recording' | 'finalizing';
   bridgePort: number;
   sessionDir: string | null;
   sessionStartedAtMs: number | null;
@@ -40,8 +41,20 @@ export interface WilyTraderDesktopStatus {
   audioChunks: number;
   executionsReceived: number;
   screenshotsReceived: number;
+  finalization: WilyTraderSessionFinalization | null;
   extension: WilyTraderExtensionStatus;
   settings: WilyTraderDesktopSettings;
+}
+
+export interface WilyTraderSessionFinalization {
+  phase: string;
+  message: string;
+  percent: number;
+  sessionDir: string;
+  startedAtMs: number;
+  updatedAtMs: number;
+  estimatedTotalMs: number;
+  estimatedRemainingMs: number;
 }
 
 export interface WilyTraderDesktopAppInfo {

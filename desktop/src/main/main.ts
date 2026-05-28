@@ -16,6 +16,7 @@ import type {
   WilyTraderDesktopSettings,
   WilyTraderDesktopStatus,
   WilyTraderExtensionStatus,
+  WilyTraderSessionFinalization,
 } from '../shared';
 
 const BRIDGE_PORT = 17365;
@@ -35,6 +36,20 @@ interface ActiveTradeSession {
   executionsReceived: number;
   screenshotsReceived: number;
   lastLedgerPayload: unknown | null;
+  incrementalTranscription: IncrementalTranscriptionRun;
+}
+
+interface IncrementalTranscriptionRun {
+  queue: Promise<void>;
+  chunksReceived: number;
+  failedChunks: number;
+  warnings: string[];
+  results: IncrementalTranscriptionChunkResult[];
+}
+
+interface IncrementalTranscriptionChunkResult {
+  index: number;
+  segments: TranscriptSegment[];
 }
 
 interface NormalizedTrade {
@@ -54,8 +69,18 @@ interface NormalizedTrade {
   tokenAddress: string | null;
 }
 
+interface FinalizingTradeSession {
+  sessionDir: string;
+  sessionStartedAtMs: number;
+  stoppedAtMs: number;
+  executionsReceived: number;
+  screenshotsReceived: number;
+  finalization: WilyTraderSessionFinalization;
+}
+
 let mainWindow: BrowserWindow | null = null;
 let activeSession: ActiveTradeSession | null = null;
+let finalizingSession: FinalizingTradeSession | null = null;
 let bridgeServer: http.Server | null = null;
 let settings: WilyTraderDesktopSettings = fallbackSettings();
 let extensionStatus: WilyTraderExtensionStatus = defaultExtensionStatus();
@@ -314,6 +339,7 @@ async function toggleTradeSessionFromHotkey(): Promise<void> {
       mainWindow.show();
       return;
     }
+    if (finalizingSession) return;
     if (activeSession) {
       await stopSession();
       return;
@@ -327,6 +353,7 @@ async function toggleTradeSessionFromHotkey(): Promise<void> {
 
 function startSession(): WilyTraderDesktopStatus {
   if (activeSession) return getStatus();
+  if (finalizingSession) return getStatus();
 
   const sessionStartedAtMs = Date.now();
   const sessionDir = path.join(settings.outputDir, `${formatSessionStamp(new Date(sessionStartedAtMs))} wilytrader-trade`);
@@ -348,6 +375,7 @@ function startSession(): WilyTraderDesktopStatus {
     executionsReceived: 0,
     screenshotsReceived: 0,
     lastLedgerPayload: null,
+    incrementalTranscription: createIncrementalTranscriptionRun(),
   };
 
   writeJson(path.join(sessionDir, 'session_manifest.json'), {
@@ -375,6 +403,7 @@ async function stopSession(): Promise<StopSessionResult> {
   stopBridge('session stopped');
 
   const stoppedAtMs = Date.now();
+  startFinalizingSession(session, stoppedAtMs);
   writeJson(path.join(session.sessionDir, 'session_manifest.json'), {
     app: 'WilyTrader Desktop',
     mode: 'trade',
@@ -389,13 +418,19 @@ async function stopSession(): Promise<StopSessionResult> {
     executionsReceived: session.executionsReceived,
     screenshotsReceived: session.screenshotsReceived,
   });
+  updateFinalizationProgress(session, 'stopping', 'Recording stopped; preparing session artifacts.', 8);
 
-  const transcriptionWarnings = await transcribeSessionAudio(session);
+  const transcriptionWarnings = await transcribeSessionAudio(session, (phase, message, percent) => {
+    updateFinalizationProgress(session, phase, message, percent);
+  });
+  updateFinalizationProgress(session, 'artifacts', 'Writing transcript files.', 82);
   const transcriptJsonPath = writeTranscriptJson(session);
   const transcriptMdPath = writeTranscriptMd(session);
+  updateFinalizationProgress(session, 'trade-log', 'Building trade log artifacts.', 90);
   const trades = loadTradesFromSession(session);
   const tradeLogMdPath = settings.generateTradeLogOnStop ? writeTradeLogMd(session, trades) : '';
   const tradeLogXlsxPath = settings.generateTradeLogOnStop ? await writeTradeLogXlsx(session, trades) : '';
+  updateFinalizationProgress(session, 'complete', 'Session finalized.', 100);
   writeStatusFileForSession(session, 'complete', {
     durationMs: stoppedAtMs - session.sessionStartedAtMs,
     tradeLogMdPath,
@@ -409,6 +444,8 @@ async function stopSession(): Promise<StopSessionResult> {
     tradeLogXlsxPath,
   }, 'success');
   broadcastStatus();
+  finalizingSession = null;
+  broadcastStatus();
   return {
     ok: true,
     sessionDir: session.sessionDir,
@@ -420,21 +457,128 @@ async function stopSession(): Promise<StopSessionResult> {
   };
 }
 
+function startFinalizingSession(session: ActiveTradeSession, stoppedAtMs: number): void {
+  const startedAtMs = Date.now();
+  const estimatedTotalMs = estimateSessionFinalizationMs(session, stoppedAtMs);
+  finalizingSession = {
+    sessionDir: session.sessionDir,
+    sessionStartedAtMs: session.sessionStartedAtMs,
+    stoppedAtMs,
+    executionsReceived: session.executionsReceived,
+    screenshotsReceived: session.screenshotsReceived,
+    finalization: {
+      phase: 'stopping',
+      message: 'Stopping recording and preparing session finalization.',
+      percent: 5,
+      sessionDir: session.sessionDir,
+      startedAtMs,
+      updatedAtMs: startedAtMs,
+      estimatedTotalMs,
+      estimatedRemainingMs: estimatedTotalMs,
+    },
+  };
+  writeStatusFileForSession(session, 'finalizing', {
+    finalization: finalizingSession.finalization,
+  });
+  broadcastStatus();
+}
+
+function updateFinalizationProgress(
+  session: ActiveTradeSession,
+  phase: string,
+  message: string,
+  percent: number
+): void {
+  if (!finalizingSession || finalizingSession.sessionDir !== session.sessionDir) return;
+  const now = Date.now();
+  const clampedPercent = Math.max(0, Math.min(100, Math.round(percent)));
+  finalizingSession.finalization = {
+    ...finalizingSession.finalization,
+    phase,
+    message,
+    percent: Math.max(finalizingSession.finalization.percent, clampedPercent),
+    updatedAtMs: now,
+    estimatedRemainingMs: Math.max(
+      0,
+      finalizingSession.finalization.estimatedTotalMs - (now - finalizingSession.finalization.startedAtMs)
+    ),
+  };
+  writeStatusFileForSession(session, phase === 'complete' ? 'complete' : 'finalizing', {
+    finalization: finalizingSession.finalization,
+  });
+  broadcastStatus();
+}
+
+function estimateSessionFinalizationMs(session: ActiveTradeSession, stoppedAtMs: number): number {
+  const durationMs = Math.max(0, stoppedAtMs - session.sessionStartedAtMs);
+  const hasAudio = Boolean(session.audioRecording || session.audioChunks.length > 0);
+  const canTranscribe = hasAudio && canRunLocalTranscription();
+  const transcriptionMs = canTranscribe ? Math.min(8 * 60_000, Math.max(12_000, durationMs * 0.35)) : 4_000;
+  const tradeLogMs = settings.generateTradeLogOnStop ? 6_000 : 1_500;
+  return Math.round(Math.max(8_000, transcriptionMs + tradeLogMs));
+}
+
 function getStatus(): WilyTraderDesktopStatus {
   const now = Date.now();
+  const finalization = finalizingSession ? {
+    ...finalizingSession.finalization,
+    estimatedRemainingMs: Math.max(
+      0,
+      finalizingSession.finalization.estimatedTotalMs - (now - finalizingSession.finalization.startedAtMs)
+    ),
+  } : null;
   return {
     active: Boolean(activeSession),
+    sessionState: activeSession ? 'recording' : finalizingSession ? 'finalizing' : 'idle',
     bridgePort: BRIDGE_PORT,
-    sessionDir: activeSession?.sessionDir ?? null,
-    sessionStartedAtMs: activeSession?.sessionStartedAtMs ?? null,
-    elapsedMs: activeSession ? now - activeSession.sessionStartedAtMs : 0,
+    sessionDir: activeSession?.sessionDir ?? finalizingSession?.sessionDir ?? null,
+    sessionStartedAtMs: activeSession?.sessionStartedAtMs ?? finalizingSession?.sessionStartedAtMs ?? null,
+    elapsedMs: activeSession
+      ? now - activeSession.sessionStartedAtMs
+      : finalizingSession
+        ? finalizingSession.stoppedAtMs - finalizingSession.sessionStartedAtMs
+        : 0,
     transcriptSegments: activeSession?.transcriptSegments.length ?? 0,
     audioChunks: activeSession?.audioChunks.length ?? 0,
-    executionsReceived: activeSession?.executionsReceived ?? 0,
-    screenshotsReceived: activeSession?.screenshotsReceived ?? 0,
+    executionsReceived: activeSession?.executionsReceived ?? finalizingSession?.executionsReceived ?? 0,
+    screenshotsReceived: activeSession?.screenshotsReceived ?? finalizingSession?.screenshotsReceived ?? 0,
+    finalization,
     extension: extensionStatus,
     settings,
   };
+}
+
+function createIncrementalTranscriptionRun(): IncrementalTranscriptionRun {
+  return {
+    queue: Promise.resolve(),
+    chunksReceived: 0,
+    failedChunks: 0,
+    warnings: [],
+    results: [],
+  };
+}
+
+function enqueueIncrementalTranscriptionChunk(session: ActiveTradeSession, chunk: AudioChunkMeta): void {
+  if (!canRunLocalTranscription()) return;
+  const run = session.incrementalTranscription;
+  run.chunksReceived += 1;
+  run.queue = run.queue
+    .then(async () => {
+      const result = await transcribeIncrementalAudioChunk(session, chunk);
+      run.results.push(result);
+    })
+    .catch((err) => {
+      const message = (err as Error).message;
+      run.failedChunks += 1;
+      run.warnings.push(`chunk ${chunk.index}: ${message}`);
+      appendSessionLogForSession(session, 'transcript', 'incremental chunk failed', {
+        index: chunk.index,
+        offsetMs: chunk.offsetMs,
+        offsetEndMs: chunk.offsetEndMs,
+        bytes: chunk.bytes,
+        error: message,
+      }, 'warning');
+    });
 }
 
 async function saveAudioChunk(payload: {
@@ -466,6 +610,7 @@ async function saveAudioChunk(payload: {
   session.audioChunks.push(meta);
   writeJson(path.join(session.audioDir, 'chunks.json'), session.audioChunks);
   appendSessionLog('audio', 'chunk saved', meta, 'info');
+  enqueueIncrementalTranscriptionChunk(session, meta);
   broadcastStatus();
   return { ok: true, filePath };
 }
@@ -761,10 +906,41 @@ function writeRootTranscriptTxt(session: ActiveTradeSession): string {
   return txtPath;
 }
 
-async function transcribeSessionAudio(session: ActiveTradeSession): Promise<string[]> {
+async function transcribeSessionAudio(
+  session: ActiveTradeSession,
+  onProgress?: (phase: string, message: string, percent: number) => void
+): Promise<string[]> {
   const warnings: string[] = [];
+  if (session.incrementalTranscription.chunksReceived > 0) {
+    onProgress?.('transcript', 'Waiting for background transcript chunks.', 32);
+  }
+  const incremental = await finalizeIncrementalTranscription(session);
+  if (incremental && incremental.chunksReceived > 0 && incremental.failedChunks === 0 && incremental.segments.length > 0) {
+    session.transcriptSegments = incremental.segments;
+    appendSessionLogForSession(session, 'transcript', 'incremental transcript used', {
+      chunksReceived: incremental.chunksReceived,
+      segments: session.transcriptSegments.length,
+      warnings: incremental.warnings,
+    }, incremental.warnings.length > 0 ? 'warning' : 'success');
+    onProgress?.('transcript', 'Background transcript chunks finished.', 80);
+    return incremental.warnings;
+  }
+  if (incremental && incremental.chunksReceived > 0) {
+    const warning = incremental.failedChunks > 0
+      ? `incremental transcription had ${incremental.failedChunks} failed chunk(s); falling back to full-session transcription`
+      : 'incremental transcription produced no segments; falling back to full-session transcription';
+    warnings.push(warning, ...incremental.warnings);
+    appendSessionLogForSession(session, 'transcript', 'incremental transcript rejected; falling back to full transcription', {
+      chunksReceived: incremental.chunksReceived,
+      failedChunks: incremental.failedChunks,
+      segments: incremental.segments.length,
+      warnings: incremental.warnings,
+    }, 'warning');
+  }
+
   const sourceAudio = session.audioRecording ?? rebuildSessionAudioFromChunks(session);
   if (!sourceAudio) {
+    onProgress?.('transcript', 'No audio recording was available; skipping transcript.', 70);
     warnings.push('No audio recording was available; transcript is empty.');
     appendSessionLogForSession(session, 'transcript', 'skipped; no audio recording', undefined, 'skipped');
     return warnings;
@@ -772,6 +948,7 @@ async function transcribeSessionAudio(session: ActiveTradeSession): Promise<stri
   const whisper = findWhisperBinary();
   if (!whisper) {
     const message = 'Whisper is not installed; transcript generation skipped.';
+    onProgress?.('transcript', message, 70);
     warnings.push(message);
     appendSessionLogForSession(session, 'transcript', message, {
       checked: whisperSearchRoots(),
@@ -780,6 +957,7 @@ async function transcribeSessionAudio(session: ActiveTradeSession): Promise<stri
   }
   if (!ffmpegPath || !fs.existsSync(ffmpegPath)) {
     const message = 'ffmpeg-static did not provide a usable ffmpeg binary; transcript generation skipped.';
+    onProgress?.('transcript', message, 70);
     warnings.push(message);
     appendSessionLogForSession(session, 'transcript', message, { ffmpegPath }, 'skipped');
     return warnings;
@@ -799,8 +977,11 @@ async function transcribeSessionAudio(session: ActiveTradeSession): Promise<stri
   const wavPath = path.join(transcriptDir, `${base}.wav`);
   const outPrefix = path.join(transcriptDir, base);
   try {
+    onProgress?.('audio', 'Converting session audio for transcription.', 22);
     await webmToWav(sourceAudio.filePath, wavPath);
+    onProgress?.('transcript', 'Transcribing session audio with local Whisper.', 38);
     await runWhisper(whisper.exe, whisper.model, wavPath, outPrefix);
+    onProgress?.('transcript', 'Parsing transcript segments.', 76);
     const srtPath = `${outPrefix}.srt`;
     if (!fs.existsSync(srtPath)) {
       warnings.push('No SRT transcript produced for session audio.');
@@ -819,12 +1000,70 @@ async function transcribeSessionAudio(session: ActiveTradeSession): Promise<stri
   }
 
   session.transcriptSegments = mergeDesktopTranscriptSegments(segments);
+  onProgress?.('transcript', 'Transcript processing finished.', 80);
   appendSessionLogForSession(session, 'transcript', 'finished', {
     chunks: session.audioChunks.length,
     segments: session.transcriptSegments.length,
     warnings,
   }, warnings.length > 0 ? 'warning' : 'success');
   return warnings;
+}
+
+async function finalizeIncrementalTranscription(session: ActiveTradeSession): Promise<{
+  chunksReceived: number;
+  failedChunks: number;
+  warnings: string[];
+  segments: TranscriptSegment[];
+} | null> {
+  const run = session.incrementalTranscription;
+  if (run.chunksReceived === 0) return null;
+  await run.queue;
+  const ordered = [...run.results].sort((a, b) => a.index - b.index);
+  return {
+    chunksReceived: run.chunksReceived,
+    failedChunks: run.failedChunks,
+    warnings: run.warnings,
+    segments: mergeDesktopTranscriptSegments(ordered.flatMap((result) => result.segments)),
+  };
+}
+
+async function transcribeIncrementalAudioChunk(
+  session: ActiveTradeSession,
+  chunk: AudioChunkMeta
+): Promise<IncrementalTranscriptionChunkResult> {
+  const whisper = findWhisperBinary();
+  if (!whisper) throw new Error('Whisper is not installed; incremental transcription skipped.');
+  if (!ffmpegPath || !fs.existsSync(ffmpegPath)) {
+    throw new Error('ffmpeg-static did not provide a usable ffmpeg binary; incremental transcription skipped.');
+  }
+  if (!fs.existsSync(chunk.filePath)) throw new Error(`audio chunk file missing: ${chunk.filePath}`);
+
+  const transcriptDir = path.join(session.inputsDir, 'incremental-transcript');
+  fs.mkdirSync(transcriptDir, { recursive: true });
+  const base = `chunk-${String(chunk.index).padStart(4, '0')}`;
+  const wavPath = path.join(transcriptDir, `${base}.wav`);
+  const outPrefix = path.join(transcriptDir, base);
+  try {
+    await webmToWav(chunk.filePath, wavPath);
+    await runWhisper(whisper.exe, whisper.model, wavPath, outPrefix);
+    const srtPath = `${outPrefix}.srt`;
+    const segments = fs.existsSync(srtPath)
+      ? parseSrtToDesktopSegments(fs.readFileSync(srtPath, 'utf-8'), session, chunk.offsetMs, base)
+      : [];
+    appendSessionLogForSession(session, 'transcript', 'incremental chunk transcribed', {
+      index: chunk.index,
+      offsetMs: chunk.offsetMs,
+      offsetEndMs: chunk.offsetEndMs,
+      bytes: chunk.bytes,
+      segments: segments.length,
+      final: chunk.final,
+    }, 'success');
+    return { index: chunk.index, segments };
+  } finally {
+    for (const file of [wavPath, `${outPrefix}.srt`]) {
+      try { fs.unlinkSync(file); } catch { /* ignore */ }
+    }
+  }
 }
 
 function rebuildSessionAudioFromChunks(session: ActiveTradeSession): AudioRecordingMeta | null {
@@ -883,6 +1122,10 @@ function whisperSearchRoots(): string[] {
     path.join(process.resourcesPath || '', 'resources'),
     'E:\\Apps\\snipalot\\resources',
   ].filter((candidate, index, arr) => Boolean(candidate) && arr.indexOf(candidate) === index);
+}
+
+function canRunLocalTranscription(): boolean {
+  return Boolean(findWhisperBinary()) && Boolean(ffmpegPath && fs.existsSync(ffmpegPath));
 }
 
 function webmToWav(webmPath: string, wavPath: string): Promise<void> {

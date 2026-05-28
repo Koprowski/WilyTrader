@@ -3,9 +3,22 @@ let mediaStream: MediaStream | null = null;
 let sessionStartedAtMs: number | null = null;
 let stopping = false;
 let audioRecordingBlobs: Blob[] = [];
+let audioChunkStream: MediaStream | null = null;
+let audioChunkRecorder: MediaRecorder | null = null;
+let audioChunkBlobs: Blob[] = [];
+let audioChunkIndex = 0;
+let audioChunkStartedAtMs = 0;
+let audioChunkTimer: number | null = null;
+let audioChunkStopResolve: (() => void) | null = null;
+let audioChunkStopFinal = false;
+let rollingAudioChunksActive = false;
 let currentSettings: WilyTraderDesktopSettings | null = null;
 let fetchedOpenrouterModels: Array<{ id: string; createdAtMs: number; inputCostPer1M: number }> = [];
 let fetchedGeminiCliModels: Array<{ id: string; createdAtMs: number }> = [];
+let finalizationTimer: number | null = null;
+let latestFinalization: WilyTraderSessionFinalization | null = null;
+
+const INCREMENTAL_AUDIO_CHUNK_MS = 60_000;
 
 interface WilyTraderDesktopSettings {
   outputDir: string;
@@ -25,13 +38,16 @@ interface WilyTraderDesktopSettings {
 
 interface WilyTraderDesktopStatus {
   active: boolean;
+  sessionState: 'idle' | 'recording' | 'finalizing';
   bridgePort: number;
   sessionDir: string | null;
   sessionStartedAtMs: number | null;
   elapsedMs: number;
+  transcriptSegments: number;
   audioChunks: number;
   executionsReceived: number;
   screenshotsReceived: number;
+  finalization: WilyTraderSessionFinalization | null;
   settings: WilyTraderDesktopSettings;
   extension: {
     runtimeInstalledVersion: string | null;
@@ -40,6 +56,17 @@ interface WilyTraderDesktopStatus {
     localExtensionPath: string | null;
     updateMessage: string;
   };
+}
+
+interface WilyTraderSessionFinalization {
+  phase: string;
+  message: string;
+  percent: number;
+  sessionDir: string;
+  startedAtMs: number;
+  updatedAtMs: number;
+  estimatedTotalMs: number;
+  estimatedRemainingMs: number;
 }
 
 type WilyTraderDesktopRuntimeApi = typeof window.wilyTraderDesktop & Partial<{
@@ -59,6 +86,11 @@ const settingsButton = document.querySelector<HTMLButtonElement>('[data-action="
 const settingsSaveButton = document.querySelector<HTMLButtonElement>('[data-action="settings-save"]');
 const updateCheckButton = document.querySelector<HTMLButtonElement>('[data-action="check-extension-update"]');
 const statusEl = document.querySelector<HTMLElement>('[data-status]');
+const finalizationProgressEl = document.querySelector<HTMLElement>('[data-finalization-progress]');
+const finalizationPhaseEl = document.querySelector<HTMLElement>('[data-finalization-phase]');
+const finalizationEtaEl = document.querySelector<HTMLElement>('[data-finalization-eta]');
+const finalizationTrackEl = document.querySelector<HTMLElement>('[data-finalization-track]');
+const finalizationBarEl = document.querySelector<HTMLElement>('[data-finalization-bar]');
 const sessionDirEl = document.querySelector<HTMLElement>('[data-session-dir]');
 const bridgeEl = document.querySelector<HTMLElement>('[data-bridge]');
 const countsEl = document.querySelector<HTMLElement>('[data-counts]');
@@ -175,11 +207,13 @@ async function startAudioFirstSession(): Promise<void> {
       };
       mediaRecorder.onstop = () => void finalizeRecorderStop().catch(showError);
       mediaRecorder.start();
+      startRollingAudioChunks();
     }
 
     renderStatus(session);
     setUiBusy(false, session.settings.microphoneCaptureEnabled ? 'Recording microphone audio.' : 'Trade session running.');
   } catch (error) {
+    stopRollingAudioChunksSync();
     sessionStartedAtMs = null;
     stopping = false;
     throw error;
@@ -190,6 +224,7 @@ async function stopAudioFirstSession(): Promise<void> {
   if (stopping) return;
   stopping = true;
   setUiBusy(true, 'Stopping session...');
+  showLocalFinalizationProgress('Stopping recording.', 3);
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     mediaRecorder.requestData();
     mediaRecorder.stop();
@@ -198,8 +233,139 @@ async function stopAudioFirstSession(): Promise<void> {
   await finalizeRecorderStop();
 }
 
+function startRollingAudioChunks(): void {
+  if (!mediaStream || !sessionStartedAtMs) return;
+  const audioTrack = mediaStream.getAudioTracks()[0];
+  if (!audioTrack) return;
+  stopRollingAudioChunksSync();
+  audioChunkStream = new MediaStream([audioTrack.clone()]);
+  rollingAudioChunksActive = true;
+  audioChunkIndex = 0;
+  startNextAudioChunk();
+}
+
+function startNextAudioChunk(): void {
+  if (!rollingAudioChunksActive || !audioChunkStream) return;
+  audioChunkBlobs = [];
+  audioChunkIndex += 1;
+  audioChunkStartedAtMs = Date.now();
+  const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
+  try {
+    audioChunkRecorder = new MediaRecorder(audioChunkStream, { mimeType });
+  } catch (err) {
+    debugLog('renderer', 'incremental audio recorder construction failed', errorDetails(err));
+    rollingAudioChunksActive = false;
+    return;
+  }
+
+  const index = audioChunkIndex;
+  audioChunkRecorder.ondataavailable = (event) => {
+    if (event.data.size > 0) audioChunkBlobs.push(event.data);
+  };
+  audioChunkRecorder.onstop = async () => {
+    const final = audioChunkStopFinal;
+    const resolve = audioChunkStopResolve;
+    audioChunkStopFinal = false;
+    audioChunkStopResolve = null;
+    clearAudioChunkTimer();
+    const endedAtMs = Math.max(audioChunkStartedAtMs + 1, Date.now());
+    const blob = new Blob(audioChunkBlobs, { type: mimeType });
+    audioChunkBlobs = [];
+    if (blob.size > 0) {
+      try {
+        await window.wilyTraderDesktop.saveAudioChunk({
+          buffer: await blob.arrayBuffer(),
+          index,
+          startedAtMs: audioChunkStartedAtMs,
+          endedAtMs,
+          mimeType,
+          final,
+        });
+      } catch (err) {
+        debugLog('renderer', 'incremental audio chunk send failed', {
+          index,
+          error: errorDetails(err),
+        });
+      }
+    }
+    audioChunkRecorder = null;
+    if (!final && rollingAudioChunksActive && mediaRecorder && mediaRecorder.state !== 'inactive') {
+      startNextAudioChunk();
+    }
+    resolve?.();
+  };
+  audioChunkRecorder.onerror = (event) => {
+    debugLog('renderer', 'incremental audio recorder error', {
+      index,
+      error: String((event as ErrorEvent).message ?? event.type),
+    });
+  };
+  audioChunkRecorder.start();
+  audioChunkTimer = window.setTimeout(() => {
+    void stopCurrentAudioChunk(false);
+  }, INCREMENTAL_AUDIO_CHUNK_MS);
+}
+
+function clearAudioChunkTimer(): void {
+  if (audioChunkTimer !== null) {
+    window.clearTimeout(audioChunkTimer);
+    audioChunkTimer = null;
+  }
+}
+
+function stopCurrentAudioChunk(final: boolean): Promise<void> {
+  clearAudioChunkTimer();
+  if (audioChunkStopResolve) {
+    if (final) audioChunkStopFinal = true;
+    return new Promise((resolve) => {
+      const previousResolve = audioChunkStopResolve;
+      audioChunkStopResolve = () => {
+        previousResolve?.();
+        resolve();
+      };
+    });
+  }
+  const recorder = audioChunkRecorder;
+  if (!recorder || recorder.state === 'inactive') return Promise.resolve();
+  return new Promise((resolve) => {
+    audioChunkStopResolve = resolve;
+    audioChunkStopFinal = final;
+    try {
+      recorder.stop();
+    } catch {
+      audioChunkStopResolve = null;
+      audioChunkStopFinal = false;
+      resolve();
+    }
+  });
+}
+
+async function stopRollingAudioChunks(final: boolean): Promise<void> {
+  rollingAudioChunksActive = false;
+  await stopCurrentAudioChunk(final);
+  stopRollingAudioChunksSync();
+}
+
+function stopRollingAudioChunksSync(): void {
+  clearAudioChunkTimer();
+  rollingAudioChunksActive = false;
+  if (audioChunkRecorder && audioChunkRecorder.state !== 'inactive') {
+    try { audioChunkRecorder.stop(); } catch { /* ignore */ }
+  }
+  audioChunkRecorder = null;
+  audioChunkBlobs = [];
+  if (audioChunkStream) {
+    for (const track of audioChunkStream.getTracks()) track.stop();
+    audioChunkStream = null;
+  }
+  audioChunkStopResolve = null;
+  audioChunkStopFinal = false;
+}
+
 async function finalizeRecorderStop(): Promise<void> {
+  await stopRollingAudioChunks(true);
   if (audioRecordingBlobs.length > 0 && sessionStartedAtMs !== null) {
+    showLocalFinalizationProgress('Saving session audio.', 6);
     const fullAudio = new Blob(audioRecordingBlobs, { type: audioRecordingBlobs[0]?.type || 'audio/webm' });
     await window.wilyTraderDesktop.saveAudioRecording({
       buffer: await fullAudio.arrayBuffer(),
@@ -214,24 +380,38 @@ async function finalizeRecorderStop(): Promise<void> {
   }
   mediaStream = null;
   mediaRecorder = null;
+  showLocalFinalizationProgress('Processing transcript and trade logs.', 10);
   const result = await window.wilyTraderDesktop.stopSession();
   sessionStartedAtMs = null;
   stopping = false;
-  setUiBusy(false, `Session complete: ${result.sessionDir}`);
   renderStatus(await window.wilyTraderDesktop.getStatus());
+  showLocalFinalizationProgress('Session complete.', 100, 0);
+  setUiBusy(false, `Session complete: ${result.sessionDir}`);
 }
 
 function renderStatus(status: WilyTraderDesktopStatus): void {
   currentSettings = status.settings;
-  if (startButton) startButton.disabled = status.active;
-  if (stopButton) stopButton.disabled = !status.active;
-  if (statusEl) statusEl.textContent = status.active ? `Recording ${formatElapsed(status.elapsedMs)}` : 'Idle';
+  const finalizing = status.sessionState === 'finalizing' && status.finalization !== null;
+  if (startButton) startButton.disabled = status.active || stopping || finalizing;
+  if (stopButton) {
+    stopButton.disabled = !status.active || stopping || finalizing;
+    stopButton.textContent = stopping || finalizing ? 'Processing...' : 'Stop';
+  }
+  if (statusEl) {
+    statusEl.textContent = status.active
+      ? `Recording ${formatElapsed(status.elapsedMs)}`
+      : finalizing
+        ? status.finalization?.message ?? 'Processing session.'
+        : 'Idle';
+  }
   if (sessionDirEl) sessionDirEl.textContent = status.sessionDir ?? 'No active session';
   if (bridgeEl) bridgeEl.textContent = `Bridge: http://127.0.0.1:${status.bridgePort}/v1/wilytrader/ledger`;
   if (countsEl) {
     countsEl.textContent =
-      `${status.active ? 'Recording audio file' : 'Audio file saved on stop'}, ${status.executionsReceived} bridge events, ${status.screenshotsReceived} screenshots`;
+      `${finalizing ? 'Finalizing transcript and trade log' : status.active ? 'Recording audio file' : 'Audio file saved on stop'}, ${status.executionsReceived} bridge events, ${status.screenshotsReceived} screenshots`;
   }
+  if (finalizing && status.finalization) showFinalizationProgress(status.finalization);
+  else if (!stopping) hideFinalizationProgress();
   const installed = status.extension.runtimeInstalledVersion ?? status.extension.localManifestVersion ?? 'Not detected';
   const heartbeat = status.extension.runtimeLastSeenAt ? `, last seen ${new Date(status.extension.runtimeLastSeenAt).toLocaleTimeString()}` : '';
   if (extensionVersionEl) extensionVersionEl.textContent = `Installed: ${installed}${heartbeat}`;
@@ -245,9 +425,71 @@ function renderStatus(status: WilyTraderDesktopStatus): void {
 }
 
 function setUiBusy(busy: boolean, message: string): void {
-  if (startButton && !busy) startButton.disabled = Boolean(sessionStartedAtMs);
-  if (stopButton && !busy) stopButton.disabled = !sessionStartedAtMs;
+  if (startButton) startButton.disabled = busy || Boolean(sessionStartedAtMs);
+  if (stopButton) {
+    stopButton.disabled = busy || !sessionStartedAtMs;
+    stopButton.textContent = busy && stopping ? 'Processing...' : 'Stop';
+  }
   if (statusEl) statusEl.textContent = message;
+}
+
+function showLocalFinalizationProgress(message: string, percent: number, estimatedRemainingMs: number | null = null): void {
+  const now = Date.now();
+  showFinalizationProgress({
+    phase: 'local',
+    message,
+    percent,
+    sessionDir: '',
+    startedAtMs: now,
+    updatedAtMs: now,
+    estimatedTotalMs: 0,
+    estimatedRemainingMs: estimatedRemainingMs ?? 0,
+  }, estimatedRemainingMs === null);
+}
+
+function showFinalizationProgress(progress: WilyTraderSessionFinalization, hideEta = false): void {
+  latestFinalization = progress;
+  finalizationProgressEl?.removeAttribute('hidden');
+  if (finalizationPhaseEl) finalizationPhaseEl.textContent = progress.message;
+  if (finalizationBarEl) finalizationBarEl.style.width = `${Math.max(0, Math.min(100, progress.percent))}%`;
+  if (finalizationTrackEl) finalizationTrackEl.setAttribute('aria-valuenow', String(Math.max(0, Math.min(100, progress.percent))));
+  if (finalizationEtaEl) {
+    finalizationEtaEl.textContent = hideEta || progress.percent >= 100
+      ? ''
+      : `~${formatDuration(progress.estimatedRemainingMs)} left`;
+  }
+  if (!hideEta && progress.percent < 100) startFinalizationTimer();
+  else stopFinalizationTimer();
+}
+
+function hideFinalizationProgress(): void {
+  latestFinalization = null;
+  stopFinalizationTimer();
+  finalizationProgressEl?.setAttribute('hidden', 'true');
+  if (finalizationBarEl) finalizationBarEl.style.width = '0%';
+}
+
+function startFinalizationTimer(): void {
+  if (finalizationTimer !== null) return;
+  finalizationTimer = window.setInterval(() => {
+    if (!latestFinalization || latestFinalization.percent >= 100) {
+      stopFinalizationTimer();
+      return;
+    }
+    const elapsedMs = Date.now() - latestFinalization.startedAtMs;
+    const remainingMs = Math.max(0, latestFinalization.estimatedTotalMs - elapsedMs);
+    if (finalizationEtaEl) finalizationEtaEl.textContent = `~${formatDuration(remainingMs)} left`;
+    if (finalizationBarEl && latestFinalization.estimatedTotalMs > 0) {
+      const timePercent = Math.min(94, Math.round((elapsedMs / latestFinalization.estimatedTotalMs) * 100));
+      finalizationBarEl.style.width = `${Math.max(latestFinalization.percent, timePercent)}%`;
+    }
+  }, 1000);
+}
+
+function stopFinalizationTimer(): void {
+  if (finalizationTimer === null) return;
+  window.clearInterval(finalizationTimer);
+  finalizationTimer = null;
 }
 
 async function openSettings(): Promise<void> {
@@ -614,4 +856,12 @@ function formatElapsed(ms: number): string {
   const minutes = Math.floor(total / 60);
   const seconds = total % 60;
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function formatDuration(ms: number): string {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  if (total < 60) return `${total}s`;
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
 }

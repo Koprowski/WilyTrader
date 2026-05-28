@@ -12,6 +12,15 @@
         <div>
           <h1>WilyTrader Desktop</h1>
           <p data-status>Idle</p>
+          <div class="finalization-progress" data-finalization-progress hidden>
+            <div class="progress-meta">
+              <span data-finalization-phase>Processing session</span>
+              <span data-finalization-eta></span>
+            </div>
+            <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" data-finalization-track>
+              <div class="progress-fill" data-finalization-bar></div>
+            </div>
+          </div>
         </div>
         <div class="actions">
           <button class="icon-button" data-action="settings" title="Settings" aria-label="Settings">
