@@ -56,6 +56,10 @@ interface WilyTraderDesktopStatus {
     runtimeInstalledVersion: string | null;
     localManifestVersion: string | null;
     runtimeLastSeenAt: string | null;
+    runtimePageUrl: string | null;
+    runtimeTokenName: string | null;
+    runtimeTokenAddress: string | null;
+    runtimeTokenChain: string | null;
     localExtensionPath: string | null;
     latestVersion: string | null;
     updateAvailable: boolean;
@@ -495,13 +499,38 @@ function renderStatus(status: WilyTraderDesktopStatus): void {
   const heartbeat = status.extension.runtimeLastSeenAt ? `, last seen ${new Date(status.extension.runtimeLastSeenAt).toLocaleTimeString()}` : '';
   if (extensionVersionEl) extensionVersionEl.textContent = `Installed: ${installed}${heartbeat}`;
   if (settingsExtensionVersionEl) settingsExtensionVersionEl.textContent = installed;
-  if (extensionUpdateEl) extensionUpdateEl.textContent = status.extension.updateMessage;
+  if (extensionUpdateEl) {
+    const tradingTarget = formatExtensionTradingTarget(status.extension);
+    extensionUpdateEl.textContent = tradingTarget
+      ? `${status.extension.updateMessage} Trading ${tradingTarget}.`
+      : status.extension.updateMessage;
+  }
   renderExtensionUpdateGuidance(status.extension);
   const extensionPath = status.extension.localExtensionPath ?? 'No local manifest path detected';
   if (extensionPathEl) extensionPathEl.textContent = extensionPath;
   const extensionFolderButton = document.querySelector<HTMLButtonElement>('[data-action="open-extension-folder"]');
   if (extensionFolderButton) extensionFolderButton.textContent = extensionPath;
   populateSettings(status.settings);
+}
+
+function formatExtensionTradingTarget(extension: {
+  runtimePageUrl: string | null;
+  runtimeTokenName: string | null;
+  runtimeTokenAddress: string | null;
+  runtimeTokenChain: string | null;
+}): string | null {
+  if (extension.runtimeTokenName) return extension.runtimeTokenName;
+  if (extension.runtimeTokenAddress) {
+    return extension.runtimeTokenChain
+      ? `${extension.runtimeTokenChain} ${shortenMiddle(extension.runtimeTokenAddress)}`
+      : shortenMiddle(extension.runtimeTokenAddress);
+  }
+  return extension.runtimePageUrl;
+}
+
+function shortenMiddle(value: string, left = 6, right = 4): string {
+  if (value.length <= left + right + 3) return value;
+  return `${value.slice(0, left)}...${value.slice(-right)}`;
 }
 
 function setUiBusy(busy: boolean, message: string): void {

@@ -1754,6 +1754,10 @@ function receiveExtensionStatus(payload: unknown): void {
     runtimeInstalledVersion: installedVersion,
     runtimeExtensionId: strOrNull(record.extensionId),
     runtimeLastSeenAt: new Date().toISOString(),
+    runtimePageUrl: strOrNull(record.pageUrl),
+    runtimeTokenName: strOrNull(record.tokenName),
+    runtimeTokenAddress: strOrNull(record.tokenAddress),
+    runtimeTokenChain: strOrNull(record.tokenChain),
   };
   if (extensionStatus.latestVersion && installedVersion) {
     extensionStatus.updateAvailable = isRemoteVersionNewer(installedVersion, extensionStatus.latestVersion);
@@ -1939,6 +1943,10 @@ function defaultExtensionStatus(): WilyTraderExtensionStatus {
     runtimeInstalledVersion: null,
     runtimeExtensionId: null,
     runtimeLastSeenAt: null,
+    runtimePageUrl: null,
+    runtimeTokenName: null,
+    runtimeTokenAddress: null,
+    runtimeTokenChain: null,
     localManifestVersion: null,
     localExtensionPath: null,
     latestVersion: null,

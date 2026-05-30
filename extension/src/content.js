@@ -792,8 +792,8 @@
 
   function detectTokenName(address, adapter) {
     if (adapter?.id === "axiom") {
-      const axiomChartName = detectAxiomChartTokenName(address);
-      if (axiomChartName) return axiomChartName;
+      const axiomName = detectAxiomTokenDisplayName(address);
+      if (axiomName) return axiomName;
     }
 
     const heading = queryPageSelector(
@@ -810,27 +810,77 @@
     return address ? shortenAddress(address) : "Unknown token";
   }
 
+  function detectAxiomTokenDisplayName(address) {
+    return detectAxiomHeaderTokenName(address) || detectAxiomChartTokenName(address);
+  }
+
+  function detectAxiomHeaderTokenName(address) {
+    const selectors = [
+      "#platform-layout-container [class*='min-h-[64px]'] [class*='text-nowrap'] span.md\\:hidden > div",
+      "#platform-layout-container [class*='min-h-[64px]'] [class*='text-nowrap'] span[class*='md:hidden'] > div",
+      "#platform-layout-container [class*='min-h-[64px]'] [class*='text-nowrap'] [title]",
+      "#platform-layout-container [class*='min-h-[64px]'] [class*='text-nowrap'] [aria-label]",
+      "#platform-layout-container [class*='min-h-[64px]'] [class*='text-nowrap']",
+    ];
+    const candidates = [];
+    selectors.forEach((selector) => {
+      document.querySelectorAll(selector).forEach((element) => {
+        if (root?.contains(element)) return;
+        candidates.push(element.getAttribute("title"));
+        candidates.push(element.getAttribute("aria-label"));
+        candidates.push(element.textContent);
+      });
+    });
+
+    const shortened = shortenAddress(address);
+    for (const candidate of candidates) {
+      const name = extractAxiomTokenDisplayName(candidate, shortened, { allowPlainName: true });
+      if (name) return name;
+    }
+    return null;
+  }
+
   function detectAxiomChartTokenName(address) {
     const shortened = shortenAddress(address);
     for (const text of getPageTextCandidates(2000)) {
       if (!text || text.length > 240) continue;
       if (findTokenAddress(text) || (shortened && text.includes(shortened))) continue;
 
+      const name = extractAxiomTokenDisplayName(text, shortened);
+      if (name) return name;
+
       const pairMatch = text.match(/\b([A-Za-z][A-Za-z0-9 ._'’-]{1,80}?)\/(?:USD|SOL)\s+on\b/i);
       const pairName = cleanTokenDisplayName(pairMatch?.[1]);
       if (pairName) return pairName;
 
-      const headerMatch = text.match(/^[A-Z0-9$]{2,16}\s+([A-Za-z][A-Za-z0-9 ._'’-]{1,80})(?:\s+\d+[smhdw]\b|\s+\$|\s+Price\b|$)/);
+      const headerMatch = text.match(/^[A-Z0-9$]{2,16}\s+([A-Za-z][A-Za-z0-9 ._'’-]{1,80}?)(?=\s+\d+[smhdw]\b|\s+\$|\s+Price\b|$)/);
       const headerName = cleanTokenDisplayName(headerMatch?.[1]);
       if (headerName) return headerName;
     }
     return null;
   }
 
+  function extractAxiomTokenDisplayName(value, shortenedAddress = "", options = {}) {
+    const text = cleanText(value);
+    if (!text || text.length > 240) return null;
+    if (findTokenAddress(text) || (shortenedAddress && text.includes(shortenedAddress))) return null;
+
+    const chartMatch = text.match(/\b([A-Za-z][A-Za-z0-9 ._'’-]{1,80}?)\/(?:USD|SOL)\s+on\b/i);
+    const chartName = cleanTokenDisplayName(chartMatch?.[1]);
+    if (chartName) return chartName;
+
+    const headerMatch = text.match(/^[A-Z0-9$]{2,16}\s+([A-Za-z][A-Za-z0-9 ._'’-]{1,80}?)(?=\s+\d+[smhdw]\b|\s+\$|\s+Price\b|$)/);
+    const headerName = cleanTokenDisplayName(headerMatch?.[1]);
+    if (headerName) return headerName;
+
+    return options.allowPlainName ? cleanTokenDisplayName(text) : null;
+  }
+
   function cleanTokenDisplayName(value) {
     const text = cleanText(value);
     if (!text || text.length < 2 || text.length > 80) return null;
     if (/^(price|market|chart|trade|token|usd|sol)$/i.test(text)) return null;
+    if (/^[A-Z0-9$]{2,16}$/.test(text)) return null;
     if (!/[A-Za-z]/.test(text)) return null;
     return text;
   }
@@ -2293,8 +2343,9 @@
       .map((marketCap) => `<button type="button" data-action="select-exit-target-mc" data-target-kind="${kind}" data-target-market-cap="${marketCap}" data-target-sell-percent="${sellPercent}">${formatters.usd(marketCap)}</button>`)
       .join("");
     const scrollAttr = initialScroll ? ` data-initial-scroll="${initialScroll}"` : "";
+    const placement = kind === EXIT_TARGET_KINDS.stopLoss ? "below" : "above";
     return `
-      <div class="wt-context-submenu">
+      <div class="wt-context-submenu" data-submenu-placement="${placement}">
         <button type="button" class="wt-context-submenu-trigger" aria-haspopup="true">${label}</button>
         <div class="wt-context-submenu-panel"${scrollAttr}>${rows}</div>
       </div>
@@ -2319,6 +2370,20 @@
         element.addEventListener("pointerenter", scrollToBottom);
         element.addEventListener("focusin", scrollToBottom);
       });
+    });
+  }
+
+  function constrainSubmenusToViewport(menu) {
+    const margin = 8;
+    menu.querySelectorAll(".wt-context-submenu").forEach((submenu) => {
+      const trigger = submenu.querySelector(".wt-context-submenu-trigger");
+      if (!trigger) return;
+      const triggerRect = trigger.getBoundingClientRect();
+      const opensBelow = submenu.dataset.submenuPlacement === "below";
+      const availableHeight = opensBelow
+        ? Math.max(96, window.innerHeight - triggerRect.bottom - margin)
+        : Math.max(96, triggerRect.top - margin);
+      submenu.style.setProperty("--wt-context-submenu-max-height", `${availableHeight}px`);
     });
   }
 
@@ -2358,6 +2423,7 @@
     menu.classList.toggle("wt-context-menu-left", submenuShouldOpenLeft);
     menu.style.left = `${left}px`;
     menu.style.top = `${top}px`;
+    constrainSubmenusToViewport(menu);
     logExitTargetDiagnostic("target-menu-positioned", null, {
       requested: { left: clientX, top: clientY },
       applied: { left, top },
@@ -4014,6 +4080,7 @@
     if (!extensionContextValid) return;
     try {
       const manifest = chrome?.runtime?.getManifest?.() || {};
+      const token = (updateActiveToken(), activeToken);
       await fetch(`${BRIDGE_BASE_URL}/extension-status`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -4023,6 +4090,9 @@
           installedVersion: manifest.version || null,
           extensionId: chrome?.runtime?.id || null,
           pageUrl: window.location.href,
+          tokenName: token?.key ? token.name : null,
+          tokenAddress: token?.key ? token.address : null,
+          tokenChain: token?.key ? token.chain : null,
           checkedAt: new Date().toISOString(),
           updateState,
         }),

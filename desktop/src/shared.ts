@@ -109,6 +109,10 @@ export interface WilyTraderExtensionStatus {
   runtimeInstalledVersion: string | null;
   runtimeExtensionId: string | null;
   runtimeLastSeenAt: string | null;
+  runtimePageUrl: string | null;
+  runtimeTokenName: string | null;
+  runtimeTokenAddress: string | null;
+  runtimeTokenChain: string | null;
   localManifestVersion: string | null;
   localExtensionPath: string | null;
   latestVersion: string | null;
