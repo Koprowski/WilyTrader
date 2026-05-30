@@ -13,6 +13,7 @@
   const EXIT_TARGET_DIAGNOSTICS = true;
   const PULSE_AUTO_BUY_KEY = "wilytrader_axiom_pulse_auto_buy_v1";
   const PULSE_AUTO_BUY_TTL_MS = 2 * 60 * 1000;
+  const PULSE_AUTO_BUY_CHECK_MS = 350;
   const AXIOM_TARGET_TRIGGER_INTERVAL_MS = 500;
   const EXIT_TARGET_MARKET_CAP_STEP = 1000;
   const EXIT_TARGET_MENU_MAX_OPTIONS = 60;
@@ -183,6 +184,12 @@
   let pulseQuickBuyQueuedUntil = 0;
   let pulseQuickBuyLayer = null;
   let pulseQuickBuyLayerRefreshId = null;
+  let pulseQuickBuyLayerRefreshFrame = 0;
+  let pulseQuickBuyTargetSeq = 0;
+  let pulseQuickBuyTargets = new Map();
+  let pulseQuickBuyLabelSeq = 0;
+  let pulseQuickBuyTokenLabels = new Map();
+  let pendingPulseAutoBuyCheckId = null;
   let updateCheckTimerId = null;
   let tradeSoundContext = null;
   let tradeSoundBufferPromise = null;
@@ -959,6 +966,7 @@
         <div class="wt-tracker-menu" data-tracker-menu hidden>
           <button type="button" data-action="tracker-open-add-balance">Add Paper Balance</button>
           <button type="button" data-action="tracker-open-set-balance">Set Paper Balance</button>
+          <button type="button" data-action="tracker-view-log">View Ledger</button>
           <button type="button" data-action="tracker-reset-session">Reset Trading Session</button>
         </div>
         <div class="wt-tracker-resize wt-tracker-resize-nw" data-tracker-resize-corner="top-left" title="Scale tracker" aria-hidden="true"></div>
@@ -1260,9 +1268,11 @@
     const data = event.data || {};
     if (data.source !== "wiley-chart-bridge") return;
     if (data.event === "chartRebound" || data.event === "symbolChange") {
+      lastAxiomChartArtifactKey = null;
       lastAxiomExitTargetSyncKey = null;
       injectAxiomChartBridgeScript();
       render();
+      window.setTimeout(render, 500);
     } else if (data.event === "lineMoved") {
       runTask(handleAxiomExitTargetLineMoved(data));
     }
@@ -1278,6 +1288,8 @@
     if (!pulseQuickBuyLayerRefreshId) {
       pulseQuickBuyLayerRefreshId = window.setInterval(refreshAxiomPulseQuickBuyLayer, 350);
     }
+    window.addEventListener("scroll", scheduleAxiomPulseQuickBuyLayerRefresh, true);
+    window.addEventListener("resize", scheduleAxiomPulseQuickBuyLayerRefresh, true);
   }
 
   function handleUnhandledRejection(event) {
@@ -1517,6 +1529,9 @@
     } else if (action === "tracker-open-set-balance") {
       closeTrackerMenu();
       openAddModal({ focus: "set-balance" });
+    } else if (action === "tracker-view-log") {
+      closeTrackerMenu();
+      openLogModal();
     } else if (action === "tracker-reset-session") {
       closeTrackerMenu();
       runTask(startNewSession({
@@ -1571,44 +1586,60 @@
     if (isWilyTraderUiTarget(event.target) || isWilyTraderModalOpen()) return;
     const quickBuyBox = findAxiomPulseQuickBuyBox(event.target);
     if (!quickBuyBox) return;
+    const row = findAxiomPulseTokenRow(quickBuyBox);
+    if (!isAxiomPulseTokenRowContentVisible(row, quickBuyBox)) {
+      refreshAxiomPulseQuickBuyLayer();
+      return;
+    }
+    const navigationTarget = findAxiomPulseRowNavigationTarget(row, quickBuyBox);
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
     if (Date.now() < pulseQuickBuyQueuedUntil) return;
     primeTradeExecutionSound();
-    queueAxiomPulseAutoBuy(quickBuyBox);
+    queueAxiomPulseAutoBuy(quickBuyBox, {
+      row,
+      navigationTarget,
+      token: detectAxiomPulseQuickBuyToken(quickBuyBox, { row, navigationTarget }),
+    });
   }
 
   function handleAxiomPulseLayerPointerDown(event) {
     if (!isPrimaryPointerEvent(event)) return;
-    const target = event.target.closest("[data-wt-pulse-quick-buy-index]");
+    const target = event.target.closest("[data-wt-pulse-quick-buy-target-id]");
     if (!target) return;
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
-    const quickBuyBox = findAxiomPulseQuickBuyBoxes()[Number(target.dataset.wtPulseQuickBuyIndex)];
+    const pulseTarget = resolveAxiomPulseQuickBuyTarget(target, event);
+    const quickBuyBox = pulseTarget?.box;
     if (!quickBuyBox) return refreshAxiomPulseQuickBuyLayer();
     if (isWilyTraderModalOpen() || isAxiomPulseQuickBuyBoxCovered(quickBuyBox)) {
       refreshAxiomPulseQuickBuyLayer();
       return;
     }
+    if (!isAxiomPulseTokenRowContentVisible(pulseTarget.row || findAxiomPulseTokenRow(quickBuyBox), quickBuyBox)) {
+      refreshAxiomPulseQuickBuyLayer();
+      return;
+    }
     if (Date.now() < pulseQuickBuyQueuedUntil) return;
     primeTradeExecutionSound();
-    queueAxiomPulseAutoBuy(quickBuyBox);
+    queueAxiomPulseAutoBuy(quickBuyBox, pulseTarget);
   }
 
   function handleAxiomPulseLayerSuppress(event) {
-    const target = event.target.closest("[data-wt-pulse-quick-buy-index]");
+    const target = event.target.closest("[data-wt-pulse-quick-buy-target-id]");
     if (!target) return;
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
   }
 
-  function queueAxiomPulseAutoBuy(quickBuyBox) {
+  function queueAxiomPulseAutoBuy(quickBuyBox, context = {}) {
     pulseQuickBuyQueuedUntil = Date.now() + 1000;
-    const token = detectAxiomPulseQuickBuyToken(quickBuyBox);
-    const row = findAxiomPulseTokenRow(quickBuyBox);
+    const row = context.row || findAxiomPulseTokenRow(quickBuyBox);
+    const navigationTarget = context.navigationTarget || findAxiomPulseRowNavigationTarget(row, quickBuyBox);
+    const token = context.token || detectAxiomPulseQuickBuyToken(quickBuyBox, { row, navigationTarget });
     if (!token?.key) {
       flashAxiomPulseQuickBuyBox(quickBuyBox, "wt-axiom-pulse-quick-buy-error", 900);
       setStatus("Pulse quick buy could not find that token address.");
@@ -1624,9 +1655,11 @@
       return;
     }
     setStatus(`Opening ${token.name || shortenAddress(token.address)} for ${formatters.native(amount, token.chain)} auto-buy.`);
+    schedulePendingPulseAutoBuyCheck(PULSE_AUTO_BUY_CHECK_MS);
     window.setTimeout(() => {
       quickBuyBox.classList.remove("wt-axiom-pulse-quick-buy-active");
-      triggerAxiomPulseRowNavigation(row, quickBuyBox);
+      triggerAxiomPulseRowNavigation(row, quickBuyBox, navigationTarget);
+      schedulePendingPulseAutoBuyCheck(PULSE_AUTO_BUY_CHECK_MS);
     }, 120);
   }
 
@@ -1664,6 +1697,51 @@
       });
   }
 
+  function findVisibleAxiomPulseQuickBuyTargets() {
+    return findAxiomPulseQuickBuyBoxes()
+      .map((box) => ({
+        box,
+        row: findAxiomPulseTokenRow(box),
+        rect: getClippedViewportRect(box.getBoundingClientRect()),
+      }))
+      .filter(({ rect }) => rect.width > 0 && rect.height > 0)
+      .filter(({ box }) => !isAxiomPulseQuickBuyBoxCovered(box))
+      .filter(({ row, box }) => isAxiomPulseTokenRowContentVisible(row, box))
+      .sort(compareAxiomPulseQuickBuyTargets);
+  }
+
+  function getClippedViewportRect(rect) {
+    const left = Math.max(0, rect.left);
+    const top = Math.max(0, rect.top);
+    const right = Math.min(window.innerWidth, rect.right);
+    const bottom = Math.min(window.innerHeight, rect.bottom);
+    return {
+      left,
+      top,
+      right,
+      bottom,
+      width: Math.max(0, right - left),
+      height: Math.max(0, bottom - top),
+    };
+  }
+
+  function compareAxiomPulseQuickBuyTargets(a, b) {
+    const rowTolerance = Math.max(18, Math.min(a.rect.height || 0, b.rect.height || 0) * 0.6);
+    if (Math.abs(a.rect.top - b.rect.top) > rowTolerance) return a.rect.top - b.rect.top;
+    return (a.rect.left - b.rect.left) || (a.rect.top - b.rect.top);
+  }
+
+  function scheduleAxiomPulseQuickBuyLayerRefresh() {
+    if (pulseQuickBuyLayerRefreshFrame) return;
+    const refresh = () => {
+      pulseQuickBuyLayerRefreshFrame = 0;
+      refreshAxiomPulseQuickBuyLayer();
+    };
+    pulseQuickBuyLayerRefreshFrame = window.requestAnimationFrame
+      ? window.requestAnimationFrame(refresh)
+      : window.setTimeout(refresh, 16);
+  }
+
   function ensureAxiomPulseQuickBuyLayer() {
     if (pulseQuickBuyLayer?.isConnected) return pulseQuickBuyLayer;
     pulseQuickBuyLayer = document.getElementById(selectors.pulseLayer);
@@ -1686,25 +1764,133 @@
     if (!isAxiomPulseRoute() || isWilyTraderModalOpen()) {
       layer.hidden = true;
       layer.innerHTML = "";
+      pulseQuickBuyTargets = new Map();
       return;
     }
 
-    const boxes = findAxiomPulseQuickBuyBoxes();
+    const targets = findVisibleAxiomPulseQuickBuyTargets();
     layer.hidden = false;
     layer.innerHTML = "";
-    boxes.forEach((box, index) => {
-      const rect = box.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) return;
-      if (isAxiomPulseQuickBuyBoxCovered(box)) return;
+    pulseQuickBuyTargets = new Map();
+    targets.forEach(({ box, row, rect }, index) => {
+      const navigationTarget = findAxiomPulseRowNavigationTarget(row, box);
+      const token = detectAxiomPulseQuickBuyToken(box, { row, navigationTarget });
+      const label = getAxiomPulseQuickBuyLabel(token, index);
+      const targetId = `pulse-target-${++pulseQuickBuyTargetSeq}`;
       const hitTarget = document.createElement("div");
       hitTarget.className = "wt-pulse-quick-buy-hit";
       hitTarget.dataset.wtPulseQuickBuyIndex = String(index);
-      hitTarget.style.left = `${Math.max(0, rect.left)}px`;
-      hitTarget.style.top = `${Math.max(0, rect.top)}px`;
-      hitTarget.style.width = `${Math.min(window.innerWidth, rect.right) - Math.max(0, rect.left)}px`;
-      hitTarget.style.height = `${Math.min(window.innerHeight, rect.bottom) - Math.max(0, rect.top)}px`;
+      hitTarget.dataset.wtPulseQuickBuyTargetId = targetId;
+      hitTarget.dataset.wtPulseLabel = String(label);
+      hitTarget.title = token?.name
+        ? `WilyTrader pulse quick-buy target ${label}: ${token.name}`
+        : `WilyTrader pulse quick-buy target ${label}`;
+      hitTarget.style.left = `${rect.left}px`;
+      hitTarget.style.top = `${rect.top}px`;
+      hitTarget.style.width = `${rect.width}px`;
+      hitTarget.style.height = `${rect.height}px`;
+      pulseQuickBuyTargets.set(targetId, { box, row, navigationTarget, token, rect, label, createdAt: Date.now() });
       layer.appendChild(hitTarget);
     });
+  }
+
+  function getAxiomPulseQuickBuyLabel(token, fallbackIndex) {
+    const key = token?.key || "";
+    if (!key) return fallbackIndex + 1;
+    if (!pulseQuickBuyTokenLabels.has(key)) {
+      pulseQuickBuyTokenLabels.set(key, ++pulseQuickBuyLabelSeq);
+    }
+    return pulseQuickBuyTokenLabels.get(key);
+  }
+
+  function isAxiomPulseTokenRowContentVisible(row, quickBuyBox) {
+    if (!row?.getBoundingClientRect || !quickBuyBox?.getBoundingClientRect) return true;
+    if (row === quickBuyBox) return true;
+
+    const rowRect = getClippedViewportRect(row.getBoundingClientRect());
+    const quickRect = getClippedViewportRect(quickBuyBox.getBoundingClientRect());
+    if (rowRect.width <= 0 || rowRect.height <= 0) return false;
+
+    const contentLeft = rowRect.left + Math.min(28, Math.max(8, rowRect.width * 0.08));
+    const contentRight = Math.min(rowRect.right - 8, quickRect.left - 12);
+    if (contentRight - contentLeft < 32) return false;
+
+    const xCandidates = [
+      contentLeft,
+      contentLeft + (contentRight - contentLeft) * 0.45,
+      contentRight - 8,
+    ];
+    const yCandidates = [
+      rowRect.top + Math.min(24, rowRect.height * 0.32),
+      rowRect.top + rowRect.height * 0.5,
+      rowRect.bottom - Math.min(18, rowRect.height * 0.28),
+    ];
+
+    return yCandidates.some((y) =>
+      xCandidates.some((x) => isAxiomPulseTokenRowContentPointVisible(row, quickBuyBox, x, y))
+    );
+  }
+
+  function isAxiomPulseTokenRowContentPointVisible(row, quickBuyBox, x, y) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+    if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) return false;
+
+    const stack = document.elementsFromPoint(x, y);
+    for (const element of stack) {
+      if (!element || element === document.documentElement || element === document.body) continue;
+      if (root?.contains(element) || pulseQuickBuyLayer?.contains(element)) continue;
+      if (element === quickBuyBox || quickBuyBox.contains?.(element)) continue;
+      if (element === row || row.contains(element)) return true;
+
+      const style = window.getComputedStyle(element);
+      if (style.pointerEvents === "none" || style.visibility === "hidden" || style.display === "none") continue;
+      if (style.position === "fixed" || style.position === "sticky") return false;
+    }
+    return false;
+  }
+
+  function resolveAxiomPulseQuickBuyTarget(hitTarget, event) {
+    const targetId = hitTarget?.dataset?.wtPulseQuickBuyTargetId;
+    const mapped = targetId ? pulseQuickBuyTargets.get(targetId) : null;
+    if (mapped?.box && isAxiomPulseQuickBuyBoxCurrentForHitTarget(hitTarget, mapped.box)) {
+      return mapped;
+    }
+
+    const pointedBox = findAxiomPulseQuickBuyBoxAtPoint(event.clientX, event.clientY);
+    if (pointedBox) {
+      const row = findAxiomPulseTokenRow(pointedBox);
+      const navigationTarget = findAxiomPulseRowNavigationTarget(row, pointedBox);
+      return {
+        box: pointedBox,
+        row,
+        navigationTarget,
+        token: detectAxiomPulseQuickBuyToken(pointedBox, { row, navigationTarget }),
+      };
+    }
+
+    scheduleAxiomPulseQuickBuyLayerRefresh();
+    return null;
+  }
+
+  function isAxiomPulseQuickBuyBoxCurrentForHitTarget(hitTarget, box) {
+    if (!box?.isConnected || !isAxiomPulseQuickBuyBoxElement(box)) return false;
+    const hitRect = hitTarget.getBoundingClientRect();
+    const boxRect = getClippedViewportRect(box.getBoundingClientRect());
+    return Math.abs(hitRect.left - boxRect.left) <= 4
+      && Math.abs(hitRect.top - boxRect.top) <= 4
+      && Math.abs(hitRect.width - boxRect.width) <= 8
+      && Math.abs(hitRect.height - boxRect.height) <= 8;
+  }
+
+  function findAxiomPulseQuickBuyBoxAtPoint(x, y) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    const stack = document.elementsFromPoint(x, y);
+    for (const element of stack) {
+      if (!element || root?.contains(element) || pulseQuickBuyLayer?.contains(element)) continue;
+      const quickBuyBox = findAxiomPulseQuickBuyBox(element);
+      if (quickBuyBox) return quickBuyBox;
+    }
+    return null;
   }
 
   function isWilyTraderUiTarget(target) {
@@ -1777,16 +1963,18 @@
     return style.cursor === "pointer" && (hasAxiomBlueButtonStyle || element.tagName === "BUTTON");
   }
 
-  function detectAxiomPulseQuickBuyToken(quickBuyBox) {
+  function detectAxiomPulseQuickBuyToken(quickBuyBox, context = {}) {
     const adapter = getPlatformAdapter(window.location.hostname);
     if (!adapter || adapter.id !== "axiom") return null;
 
-    const row = findAxiomPulseTokenRow(quickBuyBox);
-    const address = findAxiomPulseTokenAddress(row || quickBuyBox, quickBuyBox);
+    const row = context.row || findAxiomPulseTokenRow(quickBuyBox);
+    const navigationTarget = context.navigationTarget || findAxiomPulseRowNavigationTarget(row, quickBuyBox);
+    const address = findAxiomPulseTokenAddress(row || quickBuyBox, quickBuyBox, navigationTarget);
     if (!address) return null;
 
-    const marketCap = detectAxiomPulseMarketCap(row || quickBuyBox, quickBuyBox);
-    const name = detectAxiomPulseTokenName(row || quickBuyBox, quickBuyBox, address);
+    const tokenScope = row || navigationTarget || quickBuyBox;
+    const marketCap = detectAxiomPulseMarketCap(tokenScope, quickBuyBox);
+    const name = detectAxiomPulseTokenName(tokenScope, quickBuyBox, address);
     return buildDetectedToken(adapter, {
       address,
       chain: "SOL",
@@ -1813,12 +2001,39 @@
     return candidates.sort((a, b) => a.area - b.area)[0]?.element || quickBuyBox.parentElement || quickBuyBox;
   }
 
-  function findAxiomPulseTokenAddress(row, quickBuyBox) {
-    return findAxiomMemeHrefAddress(row)
+  function findAxiomPulseTokenAddress(row, quickBuyBox, navigationTarget = null) {
+    return findAxiomMemeHrefAddress(navigationTarget)
+      || findTokenAddressInElementAttributes(navigationTarget)
+      || findAxiomClosestMemeHrefAddress(row, quickBuyBox)
+      || findAxiomMemeHrefAddress(row)
       || findTokenAddressInElementAttributes(row)
       || findAxiomMemeHrefAddress(row?.parentElement)
       || findTokenAddressInElementAttributes(row?.parentElement)
       || findTokenAddressInElementAttributes(quickBuyBox);
+  }
+
+  function findAxiomClosestMemeHrefAddress(scope, quickBuyBox) {
+    if (!scope?.querySelectorAll || !quickBuyBox?.getBoundingClientRect) return null;
+    const quickRect = quickBuyBox.getBoundingClientRect();
+    const quickCenterX = quickRect.left + quickRect.width / 2;
+    const quickCenterY = quickRect.top + quickRect.height / 2;
+    const candidates = Array.from(scope.querySelectorAll("a[href]"))
+      .map((anchor) => {
+        const href = safeDecode(anchor.getAttribute("href") || anchor.href || "");
+        const address = findTokenAddress(href);
+        if (!address) return null;
+        const rect = anchor.getBoundingClientRect();
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        const overlapsVertically = rect.bottom >= quickRect.top - 120 && rect.top <= quickRect.bottom + 120;
+        const memeBonus = /\/meme(?:\/|\?|$)/i.test(href) ? -1000 : 0;
+        const verticalPenalty = overlapsVertically ? 0 : 10000;
+        const distance = Math.abs(centerY - quickCenterY) * 4 + Math.abs(centerX - quickCenterX);
+        return { address, score: memeBonus + verticalPenalty + distance };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.score - b.score);
+    return candidates[0]?.address || null;
   }
 
   function findAxiomMemeHrefAddress(scope) {
@@ -1909,38 +2124,73 @@
   }
 
   function schedulePendingPulseAutoBuyCheck(delayMs = 0) {
-    if (pendingPulseAutoBuyInFlight) return;
-    window.setTimeout(() => {
+    if (pendingPulseAutoBuyCheckId !== null) return;
+    pendingPulseAutoBuyCheckId = window.setTimeout(() => {
+      pendingPulseAutoBuyCheckId = null;
       runTask(maybeRunPendingPulseAutoBuy());
     }, delayMs);
   }
 
   async function maybeRunPendingPulseAutoBuy() {
-    if (pendingPulseAutoBuyInFlight || tradeInFlight || !state) return;
+    if (pendingPulseAutoBuyInFlight || tradeInFlight || !state) {
+      if (readPendingPulseAutoBuy()) schedulePendingPulseAutoBuyCheck(PULSE_AUTO_BUY_CHECK_MS);
+      return;
+    }
     const pending = readPendingPulseAutoBuy();
     if (!pending) return;
-    if (!isAxiomMemeRoute(new URL(window.location.href))) return;
+    if (!isAxiomMemeRoute(new URL(window.location.href))) {
+      schedulePendingPulseAutoBuyCheck(PULSE_AUTO_BUY_CHECK_MS);
+      return;
+    }
 
     updateActiveToken();
     const token = activeToken;
-    if (!token?.key) return;
+    if (!token?.key) {
+      schedulePendingPulseAutoBuyCheck(PULSE_AUTO_BUY_CHECK_MS);
+      return;
+    }
+    const sourceTokenMismatch = Boolean(pending.sourceTokenKey && token.key !== pending.sourceTokenKey);
 
     if (!token.unitPriceNative) {
-      setStatus(`Waiting for token page price before auto-buying ${formatters.native(pending.amountNative, pending.chain || token.chain)}.`);
-      schedulePendingPulseAutoBuyCheck(750);
+      setStatus(sourceTokenMismatch
+        ? `Pulse opened ${token.name || shortenAddress(token.address)}; waiting for price.`
+        : `Waiting for token page price before auto-buying ${formatters.native(pending.amountNative, pending.chain || token.chain)}.`);
+      schedulePendingPulseAutoBuyCheck(PULSE_AUTO_BUY_CHECK_MS);
+      return;
+    }
+
+    const amountNative = Number(pending.amountNative);
+    const minFees = calculateFees("buy", amountNative, 0);
+    if ((state.balances[token.chain] || 0) < amountNative + minFees.totalFeeNative) {
+      clearPendingPulseAutoBuy();
+      setStatus(`Insufficient ${token.chain} paper balance for Pulse auto-buy.`);
       return;
     }
 
     pendingPulseAutoBuyInFlight = true;
-    clearPendingPulseAutoBuy();
     try {
-      setStatus(`Auto-buying ${formatters.native(pending.amountNative, token.chain)} from Pulse.`);
-      await buy(Number(pending.amountNative), token, {
+      if (sourceTokenMismatch) {
+        console.warn("[WilyTrader] Pulse token guess differed from opened token; auto-buying opened token page.", {
+          pendingToken: pending.sourceTokenKey,
+          pendingTokenName: pending.tokenName,
+          openedToken: token.key,
+          openedTokenName: token.name,
+        });
+      }
+      setStatus(sourceTokenMismatch
+        ? `Pulse target resolved to opened token ${token.name || shortenAddress(token.address)}; auto-buying ${formatters.native(pending.amountNative, token.chain)}.`
+        : `Auto-buying ${formatters.native(pending.amountNative, token.chain)} from Pulse.`);
+      const execution = await buy(amountNative, token, {
         resolveLatestToken: () => {
           updateActiveToken();
           return activeToken?.key === token.key && activeToken.unitPriceNative ? activeToken : token;
         },
       });
+      if (execution?.id) {
+        clearPendingPulseAutoBuy();
+      } else if (readPendingPulseAutoBuy()) {
+        schedulePendingPulseAutoBuyCheck(PULSE_AUTO_BUY_CHECK_MS);
+      }
     } finally {
       pendingPulseAutoBuyInFlight = false;
     }
@@ -1979,8 +2229,8 @@
     return candidates[0]?.text || shortenAddress(address);
   }
 
-  function triggerAxiomPulseRowNavigation(row, quickBuyBox) {
-    const navigationTarget = findAxiomPulseRowNavigationTarget(row, quickBuyBox);
+  function triggerAxiomPulseRowNavigation(row, quickBuyBox, navigationTarget = null) {
+    navigationTarget = navigationTarget || findAxiomPulseRowNavigationTarget(row, quickBuyBox);
     if (!navigationTarget) {
       setStatus("Pulse auto-buy queued, but row navigation target was not found.");
       return;
@@ -3085,6 +3335,7 @@
     const panelVisible = applyOverlayVisibility();
     updateActiveToken();
     renderFloatingTracker();
+    syncActiveAxiomChartArtifacts();
     if (!panelVisible) return;
 
     const tokenEl = root.querySelector(`#${selectors.token}`);
@@ -3202,6 +3453,17 @@
       });
     }
     syncAxiomNativeChartLines(chartSummary, token);
+    syncAxiomExitTargetLines(token);
+  }
+
+  function syncActiveAxiomChartArtifacts() {
+    if (!state || activeToken?.platform !== "axiom") return;
+    if (!isAxiomMemeRoute(new URL(window.location.href))) return;
+
+    const token = activeToken;
+    const position = token.key ? state.positions[token.key] : null;
+    const summary = position ? buildPositionSummary(position.positionId, "open") : findLatestTokenPositionSummary(token);
+    syncAxiomNativeChartLines(buildChartArtifactSummary(summary), token);
     syncAxiomExitTargetLines(token);
   }
 
