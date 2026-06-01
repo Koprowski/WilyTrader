@@ -71,6 +71,7 @@ type StoredMarker = {
   price: number;
   style: ExecutionMarkerStyle;
   entityId?: unknown;
+  labelEntityId?: unknown;
   mode?: "public";
 };
 
@@ -433,31 +434,43 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
 
   async function upsertStoredMarker(boundChart: BoundChart, marker: StoredMarker): Promise<StoredMarker> {
     const entity = marker.entityId ? safeCall(() => boundChart.chart.getShapeById?.(marker.entityId)) : null;
-    if (entity) {
-      safeCall(() => entity.setPoints?.([{ time: marker.time, price: marker.price }]));
-      safeCall(() => entity.setProperties?.(buildMarkerOverrides(marker)));
+    const labelEntity = marker.labelEntityId ? safeCall(() => boundChart.chart.getShapeById?.(marker.labelEntityId)) : null;
+    if (labelEntity) {
+      safeCall(() => labelEntity.setPoints?.([buildMarkerLabelPoint(marker)]));
+      safeCall(() => labelEntity.setProperties?.(buildMarkerLabelOverrides(marker)));
+      if (entity) {
+        safeCall(() => entity.setPoints?.([{ time: marker.time, price: marker.price }]));
+        safeCall(() => entity.setProperties?.(buildMarkerOverrides(marker)));
+      }
       return marker;
     }
     if (!boundChart.chart?.createShape) {
       throw new Error("No TradingView marker creation API found.");
     }
-    const id = await boundChart.chart.createShape({ time: marker.time, price: marker.price }, {
-      shape: marker.style.shape || (marker.side === "buy" ? "arrow_up" : "arrow_down"),
-      text: marker.style.text || "",
-      lock: true,
-      disableSelection: false,
-      disableSave: true,
-      disableUndo: true,
-      overrides: buildMarkerOverrides(marker),
-    });
-    return { ...marker, entityId: id, mode: "public" };
+    const labelEntityId = marker.style.text
+      ? await boundChart.chart.createShape({ time: marker.time, price: marker.price }, {
+        shape: "text",
+        text: marker.style.text,
+        lock: true,
+        disableSelection: false,
+        disableSave: true,
+        disableUndo: true,
+        zOrder: "top",
+        overrides: buildMarkerLabelOverrides(marker),
+      })
+      : undefined;
+    return { ...marker, entityId: undefined, labelEntityId, mode: "public" };
   }
 
   function removeStoredMarker(boundChart: BoundChart, marker: StoredMarker) {
     if (marker.entityId && boundChart.chart?.removeEntity) {
       safeCall(() => boundChart.chart.removeEntity(marker.entityId));
     }
+    if (marker.labelEntityId && boundChart.chart?.removeEntity) {
+      safeCall(() => boundChart.chart.removeEntity(marker.labelEntityId));
+    }
     marker.entityId = undefined;
+    marker.labelEntityId = undefined;
     marker.mode = undefined;
   }
 
@@ -533,9 +546,25 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
     return {
       color: marker.style.color,
       linecolor: marker.style.color,
-      text: marker.style.text || "",
       textcolor: marker.style.textColor || "#ffffff",
       backgroundColor: marker.style.background || marker.style.color,
+      fontsize: marker.style.fontSize ?? 11,
+      bold: true,
+    };
+  }
+
+  function buildMarkerLabelPoint(marker: StoredMarker) {
+    return { time: marker.time, price: marker.price };
+  }
+
+  function buildMarkerLabelOverrides(marker: StoredMarker) {
+    return {
+      color: marker.style.textColor || "#ffffff",
+      textcolor: marker.style.textColor || "#ffffff",
+      backgroundColor: marker.style.background || marker.style.color,
+      fillBackground: true,
+      drawBorder: true,
+      borderColor: marker.style.color,
       fontsize: marker.style.fontSize ?? 11,
       bold: true,
     };
