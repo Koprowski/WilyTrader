@@ -443,6 +443,7 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
     }
     const id = await boundChart.chart.createShape({ time: marker.time, price: marker.price }, {
       shape: marker.style.shape || (marker.side === "buy" ? "arrow_up" : "arrow_down"),
+      text: marker.style.text || "",
       lock: true,
       disableSelection: false,
       disableSave: true,

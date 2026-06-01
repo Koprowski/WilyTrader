@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WilyTrader Axiom Chart Bridge
 // @namespace    https://github.com/Koprowski/WilyTrader
-// @version      0.3.34
+// @version      0.3.35
 // @description  Draw WilyTrader average entry/exit lines as native TradingView chart shapes on axiom.trade.
 // @match        https://axiom.trade/*
 // @run-at       document-idle
@@ -364,6 +364,7 @@
       }
       const id = await boundChart.chart.createShape({ time: marker.time, price: marker.price }, {
         shape: marker.style.shape || (marker.side === "buy" ? "arrow_up" : "arrow_down"),
+        text: marker.style.text || "",
         lock: true,
         disableSelection: false,
         disableSave: true,
