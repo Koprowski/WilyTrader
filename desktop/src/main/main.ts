@@ -69,6 +69,9 @@ interface NormalizedTrade {
   entryTimestampMs: number | null;
   timeInTradeSeconds: number | null;
   tokenAddress: string | null;
+  executions?: TradeExecutionPoint[];
+  ohlcPct?: TradeOhlc | null;
+  ohlcSol?: TradeOhlc | null;
   enrichmentSource?: 'ledger' | 'llm';
   entryCommentaryOffsetMs?: number | null;
   exitCommentaryOffsetMs?: number | null;
@@ -102,6 +105,23 @@ interface NormalizedTrade {
   nonNicsPnlPct?: number | null;
   clusterPnlPct?: number | null;
   llmGradeNotes?: string | null;
+}
+
+interface TradeExecutionPoint {
+  id: string | null;
+  side: string | null;
+  timestampMs: number | null;
+  marketCapUsd: number | null;
+  pnlNative: number | null;
+  pnlPct: number | null;
+  screenshotPath?: string | null;
+}
+
+interface TradeOhlc {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
 }
 
 interface LlmTradeExtraction {
@@ -1531,6 +1551,7 @@ function normalizeWilyTraderTrades(parsed: unknown): NormalizedTrade[] {
       entryTimestampMs,
       timeInTradeSeconds: numberOrNull(position.timeInTradeSeconds),
       tokenAddress,
+      executions: positionExecutions.map(normalizeTradeExecutionPoint),
     });
   }
   if (trades.length > 0) return trades;
@@ -1560,6 +1581,7 @@ function normalizeMockApeCompatibleTrades(value: unknown): NormalizedTrade[] {
         parseTimestampMs(row.entryAt),
       timeInTradeSeconds: numberOrNull(row.timeInTradeSeconds),
       tokenAddress: strOrNull(row.tokenAddress),
+      executions: [],
     }));
 }
 
@@ -1575,7 +1597,7 @@ async function enrichTradesForSession(
   }
   if (session.transcriptSegments.length === 0) {
     warnings.push('No transcript segments were available; trade log uses ledger-only rows.');
-    return { trades, promptPath: null, responsePath: null, warnings };
+    return { trades: reconcileTradeReviewFields(trades), promptPath: null, responsePath: null, warnings };
   }
 
   const prompt = renderTradeExtractionPrompt(session, trades, stoppedAtMs);
@@ -1626,7 +1648,8 @@ async function enrichTradesForSession(
     enriched = await backfillNicsForTrades(session, enriched, warnings);
   }
 
-  return { trades: assignSessionMetaClusterIds(enriched, session), promptPath, responsePath, warnings };
+  const clustered = assignSessionMetaClusterIds(enriched, session);
+  return { trades: reconcileTradeReviewFields(clustered), promptPath, responsePath, warnings };
 }
 
 function renderTradeExtractionPrompt(
@@ -1694,11 +1717,11 @@ Return ONLY a JSON array. No markdown fences. Every object must include:
 - meta_name: repeatable narrative/meta/setup label, or null
 - N_score, I_score, C_score, S_score: each 0 or 1
 - N_why, I_why, C_why, S_why: compact evidence for each score
-- NICS_score: N_score + I_score + max(C_score, S_score), 0 through 3
-- size_ok, zone_ok, cooldown_ok: booleans or null
-- trade_type: "Core NICS++", "Scout", "Non-NICS", or another compact label
-- counts_toward_50, hard_reset: booleans or null
-- running_count, non_nics_pnl_pct, cluster_pnl_pct: numbers or null
+- NICS_score: N_score + I_score + C_score + S_score, 0 through 4
+- size_ok, zone_ok, cooldown_ok: use null; Desktop computes these from ledger/session state
+- trade_type: "Core NICS++", "Scout", or "Non-NICS"
+- counts_toward_50, hard_reset: use null; Desktop computes these from the explicit count rule and ledger size
+- running_count, non_nics_pnl_pct, cluster_pnl_pct: use null; Desktop computes these after grading
 - llm_grade_notes: one short evidence-based note
 
 NICS scoring:
@@ -1707,6 +1730,8 @@ NICS scoring:
 - C = trader states the cut/close reason.
 - S = trader states sell/stay plan, profit target, scale-out, cost recovery, or upside management.
 - Core NICS++ requires N=1, I=1, and either C=1 or S=1.
+- Scout is only for partial named/intentional setup evidence worth reviewing; do not use generic direction labels such as long or short.
+- Count-to-50 eligibility is separate from NICS_score and requires N=1, I=1, and either C=1 or S=1 plus Desktop-computed size/zone checks.
 - Desktop will assign session-local meta_cluster_id values from meta_name after extraction.
 
 Anti-fabrication:
@@ -1824,6 +1849,180 @@ function assignSessionMetaClusterIds(trades: NormalizedTrade[], session: ActiveT
   });
 }
 
+function reconcileTradeReviewFields(trades: NormalizedTrade[]): NormalizedTrade[] {
+  const rows = trades.map((trade) => {
+    const nicsScore = computeNicsScore(
+      trade.nScore ?? null,
+      trade.iScore ?? null,
+      trade.cScore ?? null,
+      trade.sScore ?? null
+    );
+    return {
+      ...trade,
+      nicsScore: nicsScore ?? trade.nicsScore ?? null,
+      sizeOk: trade.sizeOk ?? isHalfSol(trade.solInvested),
+      zoneOk: trade.zoneOk ?? isNicsMarketCapZone(trade.entryMarketCap),
+      hardReset: trade.hardReset ?? isAboveHalfSol(trade.solInvested),
+    };
+  });
+
+  const sortedIndexes = rows
+    .map((trade, index) => ({ trade, index }))
+    .sort((a, b) => (rowDateTimeMs(a.trade) ?? Number.MAX_SAFE_INTEGER) - (rowDateTimeMs(b.trade) ?? Number.MAX_SAFE_INTEGER));
+
+  let runningCount = 0;
+  let cumulativeSol = 0;
+  for (const item of sortedIndexes) {
+    const trade = rows[item.index];
+    const evidenceOk = hasCountedNicsEvidence(trade) === true;
+    const hardReset = trade.hardReset === true;
+    const counts = evidenceOk && trade.sizeOk === true && trade.zoneOk === true && !hardReset;
+    if (hardReset) runningCount = 0;
+    else if (counts) runningCount += 1;
+    const ohlcSol = computeTradeSolOhlc(trade, cumulativeSol);
+    rows[item.index] = {
+      ...trade,
+      countsToward50: counts,
+      runningCount,
+      nonNicsPnlPct: counts ? null : trade.pnlPercentage,
+      tradeType: normalizeTradeType(trade),
+      ohlcPct: computeTradePctOhlc(trade),
+      ohlcSol,
+    };
+    cumulativeSol = ohlcSol?.close ?? cumulativeSol;
+  }
+
+  const clusterPnl = new Map<string, number>();
+  for (const trade of rows) {
+    const clusterId = trade.metaClusterId?.trim();
+    if (!clusterId || trade.pnlPercentage === null) continue;
+    clusterPnl.set(clusterId, (clusterPnl.get(clusterId) ?? 0) + trade.pnlPercentage);
+  }
+
+  const losingClusters = completedLosingClusters(rows);
+  return rows.map((trade) => {
+    const clusterId = trade.metaClusterId?.trim();
+    const cooldownOk = computeCooldownOk(trade, losingClusters);
+    return {
+      ...trade,
+      cooldownOk: trade.cooldownOk ?? cooldownOk,
+      clusterPnlPct: trade.clusterPnlPct ?? (clusterId ? clusterPnl.get(clusterId) ?? null : null),
+    };
+  });
+}
+
+function hasCountedNicsEvidence(trade: NormalizedTrade): boolean | null {
+  const n = binaryOrNull(trade.nScore);
+  const i = binaryOrNull(trade.iScore);
+  const c = binaryOrNull(trade.cScore);
+  const s = binaryOrNull(trade.sScore);
+  if (n === null || i === null || (c === null && s === null)) return null;
+  return n === 1 && i === 1 && (c === 1 || s === 1);
+}
+
+function normalizeTradeType(trade: NormalizedTrade): string {
+  const raw = trade.tradeType?.trim();
+  if (raw && /^(Core NICS\+\+|Scout|Non-NICS)$/i.test(raw)) {
+    if (/^core/i.test(raw)) return 'Core NICS++';
+    if (/^scout/i.test(raw)) return 'Scout';
+    return 'Non-NICS';
+  }
+  if (hasCountedNicsEvidence(trade) === true) return 'Core NICS++';
+  if ((trade.nScore ?? 0) === 1 || (trade.iScore ?? 0) === 1 || Boolean(trade.metaName)) return 'Scout';
+  return 'Non-NICS';
+}
+
+function isHalfSol(value: number | null | undefined): boolean | null {
+  if (value === null || value === undefined || !Number.isFinite(value)) return null;
+  return Math.abs(value - 0.5) < 0.0001;
+}
+
+function isAboveHalfSol(value: number | null | undefined): boolean | null {
+  if (value === null || value === undefined || !Number.isFinite(value)) return null;
+  return value > 0.5 + 0.0001;
+}
+
+function isNicsMarketCapZone(value: number | null | undefined): boolean | null {
+  if (value === null || value === undefined || !Number.isFinite(value)) return null;
+  return value >= 2000 && value <= 20000;
+}
+
+function rowDateTimeMs(trade: NormalizedTrade): number | null {
+  return trade.entryTimestampMs ?? trade.timestampMs ?? null;
+}
+
+function completedLosingClusters(trades: NormalizedTrade[]): Array<{ clusterId: string; completedAtMs: number }> {
+  const groups = new Map<string, { completedAtMs: number | null; pnlSol: number; pnlPct: number; rows: number }>();
+  for (const trade of trades) {
+    const clusterId = trade.metaClusterId?.trim();
+    if (!clusterId) continue;
+    const group = groups.get(clusterId) ?? { completedAtMs: null, pnlSol: 0, pnlPct: 0, rows: 0 };
+    group.rows += 1;
+    if (trade.timestampMs !== null) group.completedAtMs = Math.max(group.completedAtMs ?? trade.timestampMs, trade.timestampMs);
+    if (trade.pnlSol !== null) group.pnlSol += trade.pnlSol;
+    if (trade.pnlPercentage !== null) group.pnlPct += trade.pnlPercentage;
+    groups.set(clusterId, group);
+  }
+  return [...groups.entries()]
+    .filter(([, group]) => group.completedAtMs !== null && (group.pnlSol < 0 || (group.pnlSol === 0 && group.pnlPct < 0)))
+    .map(([clusterId, group]) => ({ clusterId, completedAtMs: group.completedAtMs as number }));
+}
+
+function computeCooldownOk(
+  trade: NormalizedTrade,
+  losingClusters: Array<{ clusterId: string; completedAtMs: number }>
+): boolean | null {
+  const currentTime = rowDateTimeMs(trade);
+  if (currentTime === null) return null;
+  const currentClusterId = trade.metaClusterId?.trim() ?? '';
+  const violates = losingClusters.some((cluster) => {
+    if (cluster.clusterId === currentClusterId) return false;
+    if (currentTime < cluster.completedAtMs) return false;
+    return currentTime - cluster.completedAtMs < 5 * 60 * 1000;
+  });
+  return !violates;
+}
+
+function computeTradePctOhlc(trade: NormalizedTrade): TradeOhlc | null {
+  const points = [0];
+  const entry = trade.entryMarketCap;
+  for (const execution of trade.executions ?? []) {
+    if (execution.side === 'sell' && execution.pnlPct !== null) {
+      points.push(execution.pnlPct);
+      continue;
+    }
+    if (entry !== null && entry > 0 && execution.marketCapUsd !== null) {
+      points.push(((execution.marketCapUsd - entry) / entry) * 100);
+    }
+  }
+  if (trade.pnlPercentage !== null) points.push(trade.pnlPercentage);
+  const close = trade.pnlPercentage ?? points[points.length - 1] ?? 0;
+  return {
+    open: 0,
+    high: Math.max(...points, close),
+    low: Math.min(...points, close),
+    close,
+  };
+}
+
+function computeTradeSolOhlc(trade: NormalizedTrade, cumulativeOpen: number): TradeOhlc | null {
+  const points = [cumulativeOpen];
+  let realized = 0;
+  for (const execution of trade.executions ?? []) {
+    if (execution.side !== 'sell' || execution.pnlNative === null) continue;
+    realized += execution.pnlNative;
+    points.push(cumulativeOpen + realized);
+  }
+  const close = cumulativeOpen + (trade.pnlSol ?? realized);
+  points.push(close);
+  return {
+    open: cumulativeOpen,
+    high: Math.max(...points),
+    low: Math.min(...points),
+    close,
+  };
+}
+
 async function backfillNicsForTrades(
   session: ActiveTradeSession,
   trades: NormalizedTrade[],
@@ -1880,7 +2079,9 @@ Scoring:
 - I = why this token or immediate evidence supports entry.
 - C = cut/close reason.
 - S = sell/stay plan, target, scale-out, cost recovery, or upside management.
-- NICS_score = N + I + max(C, S).
+- NICS_score = N + I + C + S. Count-to-50 is a separate rule: N=1, I=1, and either C=1 or S=1, plus Desktop-computed size/zone checks.
+- trade_type must be "Core NICS++", "Scout", or "Non-NICS"; do not use generic direction labels like long or short.
+- Do not populate size_ok, zone_ok, cooldown_ok, counts_toward_50, hard_reset, running_count, non_nics_pnl_pct, or cluster_pnl_pct. Desktop computes those from ledger/session state.
 - Use 0 and explain missing evidence when absent.
 
 Rows:
@@ -1959,7 +2160,7 @@ function writeTradeLogMd(session: ActiveTradeSession, trades: NormalizedTrade[])
     if (trade.targetLowMc || trade.targetHighMc || trade.stopLossMc) {
       lines.push(`- **Plan:** target ${formatDollars(trade.targetLowMc ?? null)} -> ${formatDollars(trade.targetHighMc ?? null)}, stop ${formatDollars(trade.stopLossMc ?? null)}`);
     }
-    if (trade.nicsScore !== undefined && trade.nicsScore !== null) lines.push(`- **NICS:** ${trade.nicsScore}/3${trade.tradeType ? ` (${trade.tradeType})` : ''}`);
+    if (trade.nicsScore !== undefined && trade.nicsScore !== null) lines.push(`- **NICS:** ${trade.nicsScore}/4${trade.tradeType ? ` (${trade.tradeType})` : ''}`);
     if (trade.preTranscriptExcerpt) lines.push(`- **Pre excerpt:** ${trade.preTranscriptExcerpt}`);
     if (trade.postTranscriptExcerpt) lines.push(`- **Post excerpt:** ${trade.postTranscriptExcerpt}`);
     const screenshots = findTradeScreenshots(session, trade);
@@ -2031,6 +2232,16 @@ const XLSX_COLUMNS = [
   'non_nics_pnl_pct',
   'cluster_pnl_pct',
   'llm_grade_notes',
+  'ohlc_pct_open',
+  'ohlc_pct_high',
+  'ohlc_pct_low',
+  'ohlc_pct_close',
+  'ohlc_sol_open',
+  'ohlc_sol_high',
+  'ohlc_sol_low',
+  'ohlc_sol_close',
+  'ohlc_observation_count',
+  'ohlc_source',
 ] as const;
 
 async function writeTradeLogXlsx(session: ActiveTradeSession, trades: NormalizedTrade[], stoppedAtMs: number): Promise<string> {
@@ -2114,12 +2325,22 @@ function buildTradeRow(
     zone_ok: formatBoolean(trade.zoneOk),
     cooldown_ok: formatBoolean(trade.cooldownOk),
     trade_type: trade.tradeType ?? '',
-    counts_toward_50: formatBoolean(trade.countsToward50),
+    counts_toward_50: formatCount(trade.countsToward50),
     hard_reset: formatBoolean(trade.hardReset),
     running_count: formatNumber(trade.runningCount ?? null),
     non_nics_pnl_pct: formatNumber(trade.nonNicsPnlPct ?? null),
     cluster_pnl_pct: formatNumber(trade.clusterPnlPct ?? null),
     llm_grade_notes: trade.llmGradeNotes ?? '',
+    ohlc_pct_open: formatNumber(trade.ohlcPct?.open ?? null),
+    ohlc_pct_high: formatNumber(trade.ohlcPct?.high ?? null),
+    ohlc_pct_low: formatNumber(trade.ohlcPct?.low ?? null),
+    ohlc_pct_close: formatNumber(trade.ohlcPct?.close ?? null),
+    ohlc_sol_open: formatNumber(trade.ohlcSol?.open ?? null),
+    ohlc_sol_high: formatNumber(trade.ohlcSol?.high ?? null),
+    ohlc_sol_low: formatNumber(trade.ohlcSol?.low ?? null),
+    ohlc_sol_close: formatNumber(trade.ohlcSol?.close ?? null),
+    ohlc_observation_count: String(Math.max(1, trade.executions?.length ?? 0)),
+    ohlc_source: 'execution-ledger',
   };
 }
 
@@ -2260,6 +2481,20 @@ function filterPositionExecutions(
 function findFirstBuyTimestampMs(executions: Array<Record<string, unknown>>): number | null {
   const buy = executions.find((execution) => strOrNull(execution.side)?.toLowerCase() === 'buy');
   return buy ? parseTimestampMs(buy.timestampMs ?? buy.timestamp) : null;
+}
+
+function normalizeTradeExecutionPoint(execution: Record<string, unknown>): TradeExecutionPoint {
+  return {
+    id: strOrNull(execution.id),
+    side: strOrNull(execution.side)?.toLowerCase() ?? null,
+    timestampMs: parseTimestampMs(execution.timestampMs ?? execution.timestamp),
+    marketCapUsd:
+      numberOrNull(execution.executionMarketCapUsd) ??
+      numberOrNull(execution.marketCapUsd) ??
+      numberOrNull(execution.sourceMarketCapUsd),
+    pnlNative: numberOrNull(execution.pnlNative),
+    pnlPct: numberOrNull(execution.pnlPct),
+  };
 }
 
 function findTradeScreenshots(session: ActiveTradeSession, trade: NormalizedTrade): string[] {
@@ -3846,8 +4081,8 @@ function computeNicsScore(
   c: number | null,
   s: number | null
 ): number | null {
-  if (n === null || i === null || (c === null && s === null)) return null;
-  return n + i + Math.max(c ?? 0, s ?? 0);
+  if (n === null || i === null || c === null || s === null) return null;
+  return n + i + c + s;
 }
 
 function strOrNull(value: unknown): string | null {
@@ -3970,6 +4205,11 @@ function formatNumber(value: number | null): string {
 function formatBoolean(value: boolean | null | undefined): string {
   if (value === null || value === undefined) return '';
   return value ? 'true' : 'false';
+}
+
+function formatCount(value: boolean | null | undefined): string {
+  if (value === null || value === undefined) return '';
+  return value ? '1' : '0';
 }
 
 function buildTradeNotes(trade: NormalizedTrade, entry: Date | null, exit: Date | null): string {
