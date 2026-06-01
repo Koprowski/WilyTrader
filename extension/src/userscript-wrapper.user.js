@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WilyTrader Axiom Chart Bridge
 // @namespace    https://github.com/Koprowski/WilyTrader
-// @version      0.3.36
+// @version      0.3.32
 // @description  Draw WilyTrader average entry/exit lines as native TradingView chart shapes on axiom.trade.
 // @match        https://axiom.trade/*
 // @run-at       document-idle
@@ -354,43 +354,30 @@
 
     async function upsertStoredMarker(boundChart, marker) {
       const entity = marker.entityId ? safeCall(() => boundChart.chart.getShapeById?.(marker.entityId)) : null;
-      const labelEntity = marker.labelEntityId ? safeCall(() => boundChart.chart.getShapeById?.(marker.labelEntityId)) : null;
-      if (labelEntity) {
-        safeCall(() => labelEntity.setPoints?.([buildMarkerLabelPoint(marker)]));
-        safeCall(() => labelEntity.setProperties?.(buildMarkerLabelOverrides(marker)));
-        if (entity) {
-          safeCall(() => entity.setPoints?.([{ time: marker.time, price: marker.price }]));
-          safeCall(() => entity.setProperties?.(buildMarkerOverrides(marker)));
-        }
+      if (entity) {
+        safeCall(() => entity.setPoints?.([{ time: marker.time, price: marker.price }]));
+        safeCall(() => entity.setProperties?.(buildMarkerOverrides(marker)));
         return marker;
       }
       if (!boundChart.chart?.createShape) {
         throw new Error("No TradingView marker creation API found.");
       }
-      const labelEntityId = marker.style.text
-        ? await boundChart.chart.createShape({ time: marker.time, price: marker.price }, {
-          shape: "text",
-          text: marker.style.text,
-          lock: true,
-          disableSelection: false,
-          disableSave: true,
-          disableUndo: true,
-          zOrder: "top",
-          overrides: buildMarkerLabelOverrides(marker),
-        })
-        : undefined;
-      return { ...marker, entityId: undefined, labelEntityId, mode: "public" };
+      const id = await boundChart.chart.createShape({ time: marker.time, price: marker.price }, {
+        shape: marker.style.shape || (marker.side === "buy" ? "arrow_up" : "arrow_down"),
+        lock: true,
+        disableSelection: false,
+        disableSave: true,
+        disableUndo: true,
+        overrides: buildMarkerOverrides(marker),
+      });
+      return { ...marker, entityId: id, mode: "public" };
     }
 
     function removeStoredMarker(boundChart, marker) {
       if (marker.entityId && boundChart.chart?.removeEntity) {
         safeCall(() => boundChart.chart.removeEntity(marker.entityId));
       }
-      if (marker.labelEntityId && boundChart.chart?.removeEntity) {
-        safeCall(() => boundChart.chart.removeEntity(marker.labelEntityId));
-      }
       marker.entityId = undefined;
-      marker.labelEntityId = undefined;
       marker.mode = undefined;
     }
 
@@ -466,25 +453,9 @@
       return {
         color: marker.style.color,
         linecolor: marker.style.color,
+        text: marker.style.text || "",
         textcolor: marker.style.textColor || "#ffffff",
         backgroundColor: marker.style.background || marker.style.color,
-        fontsize: marker.style.fontSize ?? 11,
-        bold: true,
-      };
-    }
-
-    function buildMarkerLabelPoint(marker) {
-      return { time: marker.time, price: marker.price };
-    }
-
-    function buildMarkerLabelOverrides(marker) {
-      return {
-        color: marker.style.textColor || "#ffffff",
-        textcolor: marker.style.textColor || "#ffffff",
-        backgroundColor: marker.style.background || marker.style.color,
-        fillBackground: true,
-        drawBorder: true,
-        borderColor: marker.style.color,
         fontsize: marker.style.fontSize ?? 11,
         bold: true,
       };

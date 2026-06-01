@@ -3796,32 +3796,11 @@
     return {
       color: isBuy ? "#22c55e" : "#ef4444",
       shape: "flag",
-      text: formatAxiomExecutionMarkerText(execution),
+      text: `${isBuy ? "BUY" : "SELL"} ${formatters.usd(price)}`,
       background: isBuy ? "rgba(34, 197, 94, 0.9)" : "rgba(239, 68, 68, 0.9)",
       textColor: "#ffffff",
       fontSize: 10,
     };
-  }
-
-  function formatAxiomExecutionMarkerText(execution) {
-    const isBuy = execution.side === "buy";
-    const sizeNative = isBuy
-      ? firstFiniteNumber(execution.solInvestedNative, execution.grossNative, execution.requestedAmountNative)
-      : firstFiniteNumber(execution.grossNative, execution.solReceivedNative, execution.netNative);
-    return `${isBuy ? "+" : "-"}${formatHundredthNativeAmount(sizeNative)}`;
-  }
-
-  function formatHundredthNativeAmount(value) {
-    const rounded = Math.round(Math.abs(Number(value || 0)) * 100) / 100;
-    return rounded.toFixed(2).replace(/\.?0+$/, "");
-  }
-
-  function firstFiniteNumber(...values) {
-    for (const value of values) {
-      const numeric = Number(value);
-      if (Number.isFinite(numeric)) return numeric;
-    }
-    return 0;
   }
 
   function postAxiomChartBridgeMessage(message) {
