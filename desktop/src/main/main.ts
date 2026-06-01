@@ -69,6 +69,82 @@ interface NormalizedTrade {
   entryTimestampMs: number | null;
   timeInTradeSeconds: number | null;
   tokenAddress: string | null;
+  enrichmentSource?: 'ledger' | 'llm';
+  entryCommentaryOffsetMs?: number | null;
+  exitCommentaryOffsetMs?: number | null;
+  targetLowMc?: number | null;
+  targetHighMc?: number | null;
+  stopLossMc?: number | null;
+  rationale?: string | null;
+  preTranscriptExcerpt?: string | null;
+  postTranscriptExcerpt?: string | null;
+  adherenceSelfAssessment?: string | null;
+  needsReview?: boolean | null;
+  notes?: string | null;
+  metaClusterId?: string | null;
+  metaName?: string | null;
+  nScore?: number | null;
+  nWhy?: string | null;
+  iScore?: number | null;
+  iWhy?: string | null;
+  cScore?: number | null;
+  cWhy?: string | null;
+  sScore?: number | null;
+  sWhy?: string | null;
+  nicsScore?: number | null;
+  sizeOk?: boolean | null;
+  zoneOk?: boolean | null;
+  cooldownOk?: boolean | null;
+  tradeType?: string | null;
+  countsToward50?: boolean | null;
+  hardReset?: boolean | null;
+  runningCount?: number | null;
+  nonNicsPnlPct?: number | null;
+  clusterPnlPct?: number | null;
+  llmGradeNotes?: string | null;
+}
+
+interface LlmTradeExtraction {
+  mockape_trade_id: string | null;
+  token_name: string | null;
+  pre_call_offset_ms: number | null;
+  post_call_offset_ms: number | null;
+  target_low_mc: number | null;
+  target_high_mc: number | null;
+  stop_loss_mc: number | null;
+  rationale: string | null;
+  pre_transcript_excerpt: string | null;
+  post_transcript_excerpt: string | null;
+  adherence_self_assessment: string | null;
+  needs_review: boolean | null;
+  notes: string | null;
+  meta_name: string | null;
+  N_score: number | null;
+  N_why: string | null;
+  I_score: number | null;
+  I_why: string | null;
+  C_score: number | null;
+  C_why: string | null;
+  S_score: number | null;
+  S_why: string | null;
+  NICS_score: number | null;
+  size_ok: boolean | null;
+  zone_ok: boolean | null;
+  cooldown_ok: boolean | null;
+  trade_type: string | null;
+  counts_toward_50: boolean | null;
+  hard_reset: boolean | null;
+  running_count: number | null;
+  non_nics_pnl_pct: number | null;
+  cluster_pnl_pct: number | null;
+  llm_grade_notes: string | null;
+}
+
+interface TradeEnrichmentResult {
+  trades: NormalizedTrade[];
+  promptPath: string | null;
+  responsePath: string | null;
+  warnings: string[];
 }
 
 interface FinalizingTradeSession {
@@ -428,7 +504,7 @@ async function stopSession(): Promise<StopSessionResult> {
   });
   updateFinalizationProgress(session, 'stopping', 'Recording stopped; preparing session artifacts.', 8);
 
-  const transcriptionWarnings = await transcribeSessionAudio(session, (phase, message, percent) => {
+  const warnings = await transcribeSessionAudio(session, (phase, message, percent) => {
     updateFinalizationProgress(session, phase, message, percent);
   });
   updateFinalizationProgress(session, 'artifacts', 'Writing transcript files.', 82);
@@ -436,8 +512,14 @@ async function stopSession(): Promise<StopSessionResult> {
   const transcriptMdPath = writeTranscriptMd(session);
   updateFinalizationProgress(session, 'trade-log', 'Building trade log artifacts.', 90);
   const trades = loadTradesFromSession(session, stoppedAtMs);
-  const tradeLogMdPath = settings.generateTradeLogOnStop ? writeTradeLogMd(session, trades) : '';
-  const tradeLogXlsxPath = settings.generateTradeLogOnStop ? await writeTradeLogXlsx(session, trades, stoppedAtMs) : '';
+  const enrichment = settings.generateTradeLogOnStop
+    ? await enrichTradesForSession(session, trades, stoppedAtMs, (phase, message, percent) => {
+        updateFinalizationProgress(session, phase, message, percent);
+      })
+    : { trades, promptPath: null, responsePath: null, warnings: [] };
+  warnings.push(...enrichment.warnings);
+  const tradeLogMdPath = settings.generateTradeLogOnStop ? writeTradeLogMd(session, enrichment.trades) : '';
+  const tradeLogXlsxPath = settings.generateTradeLogOnStop ? await writeTradeLogXlsx(session, enrichment.trades, stoppedAtMs) : '';
   updateFinalizationProgress(session, 'complete', 'Session finalized.', 100);
   writeStatusFileForSession(session, 'complete', {
     durationMs: stoppedAtMs - session.sessionStartedAtMs,
@@ -445,11 +527,15 @@ async function stopSession(): Promise<StopSessionResult> {
     tradeLogXlsxPath,
     transcriptJsonPath,
     transcriptMdPath,
+    extractionPromptPath: enrichment.promptPath,
+    extractionResponsePath: enrichment.responsePath,
   });
   appendSessionLogForSession(session, 'session', 'completed', {
-    trades: trades.length,
+    trades: enrichment.trades.length,
     tradeLogMdPath,
     tradeLogXlsxPath,
+    extractionPromptPath: enrichment.promptPath,
+    extractionResponsePath: enrichment.responsePath,
   }, 'success');
   lastCompletedSessionDir = session.sessionDir;
   broadcastStatus();
@@ -462,7 +548,7 @@ async function stopSession(): Promise<StopSessionResult> {
     transcriptMdPath,
     tradeLogXlsxPath,
     tradeLogMdPath,
-    warnings: transcriptionWarnings,
+    warnings,
   };
 }
 
@@ -1477,6 +1563,377 @@ function normalizeMockApeCompatibleTrades(value: unknown): NormalizedTrade[] {
     }));
 }
 
+async function enrichTradesForSession(
+  session: ActiveTradeSession,
+  trades: NormalizedTrade[],
+  stoppedAtMs: number,
+  onProgress?: (phase: string, message: string, percent: number) => void
+): Promise<TradeEnrichmentResult> {
+  const warnings: string[] = [];
+  if (trades.length === 0) {
+    return { trades, promptPath: null, responsePath: null, warnings };
+  }
+  if (session.transcriptSegments.length === 0) {
+    warnings.push('No transcript segments were available; trade log uses ledger-only rows.');
+    return { trades, promptPath: null, responsePath: null, warnings };
+  }
+
+  const prompt = renderTradeExtractionPrompt(session, trades, stoppedAtMs);
+  const promptPath = path.join(session.inputsDir, 'trade-extraction-prompt.md');
+  const responsePath = path.join(session.inputsDir, 'trade-extraction-response.json');
+  fs.writeFileSync(promptPath, prompt, 'utf-8');
+  appendSessionLogForSession(session, 'trade-enrichment', 'prompt written', {
+    promptPath,
+    trades: trades.length,
+    transcriptSegments: session.transcriptSegments.length,
+  }, 'success');
+
+  onProgress?.('trade-log', 'Extracting trade commentary with LLM.', 92);
+  const llm = await runTradeLlmPrompt(prompt, session, 'trade extraction');
+  fs.writeFileSync(`${responsePath}.raw.txt`, llm.rawText, 'utf-8');
+  if (!llm.ok) {
+    warnings.push(llm.message);
+    appendSessionLogForSession(session, 'trade-enrichment', 'llm extraction failed; using ledger-only rows', {
+      message: llm.message,
+      rawPath: `${responsePath}.raw.txt`,
+    }, 'warning');
+    return { trades, promptPath, responsePath: null, warnings };
+  }
+
+  let extracted: LlmTradeExtraction[] = [];
+  try {
+    extracted = parseTradeExtractionResponse(llm.rawText);
+    fs.writeFileSync(responsePath, JSON.stringify(extracted, null, 2), 'utf-8');
+  } catch (err) {
+    const message = `LLM trade extraction response could not be parsed: ${(err as Error).message}`;
+    warnings.push(message);
+    appendSessionLogForSession(session, 'trade-enrichment', 'response parse failed; using ledger-only rows', {
+      responsePath: `${responsePath}.raw.txt`,
+      error: (err as Error).message,
+    }, 'error');
+    return { trades, promptPath, responsePath: `${responsePath}.raw.txt`, warnings };
+  }
+
+  let enriched = mergeTradeExtraction(trades, extracted);
+  appendSessionLogForSession(session, 'trade-enrichment', 'response merged', {
+    responsePath,
+    extracted: extracted.length,
+    enriched: enriched.filter((trade) => trade.enrichmentSource === 'llm').length,
+  }, 'success');
+
+  if (enriched.some((trade) => !hasCompleteNics(trade))) {
+    onProgress?.('trade-log', 'Backfilling NICS classifications.', 94);
+    enriched = await backfillNicsForTrades(session, enriched, warnings);
+  }
+
+  return { trades: assignSessionMetaClusterIds(enriched, session), promptPath, responsePath, warnings };
+}
+
+function renderTradeExtractionPrompt(
+  session: ActiveTradeSession,
+  trades: NormalizedTrade[],
+  stoppedAtMs: number
+): string {
+  const sessionStart = session.sessionStartedAtMs;
+  const transcript = session.transcriptSegments
+    .map((segment) => `[${formatOffset(segment.offsetMs)}-${formatOffset(segment.offsetEndMs)}] ${segment.text}`)
+    .join('\n');
+  const tradeList = trades.map((trade, index) => {
+    const entryOffset = trade.entryTimestampMs === null ? null : trade.entryTimestampMs - sessionStart;
+    const exitOffset = trade.timestampMs === null ? null : trade.timestampMs - sessionStart;
+    return {
+      index: index + 1,
+      trade_id: trade.id,
+      token_name: trade.tokenName,
+      token_address: trade.tokenAddress,
+      entry_offset: entryOffset === null ? null : formatOffset(entryOffset),
+      entry_timestamp_ms: trade.entryTimestampMs,
+      exit_offset: exitOffset === null ? null : formatOffset(exitOffset),
+      exit_timestamp_ms: trade.timestampMs,
+      entry_mc_actual: trade.entryMarketCap,
+      exit_mc_actual: trade.exitMarketCap,
+      sol_invested: trade.solInvested,
+      sol_received: trade.solReceived,
+      pnl_sol: trade.pnlSol,
+      pnl_percentage: trade.pnlPercentage,
+      time_in_trade_seconds: trade.timeInTradeSeconds,
+    };
+  });
+
+  return `You are extracting a WilyTrader Desktop trade log from a trader's spoken transcript.
+
+Use the actual trades as the source of truth. Return one JSON object for each actual trade only.
+Do not invent targets, rationale, excerpts, or scores. Use null when the transcript does not support a field.
+
+Recording window:
+- started_at: ${new Date(session.sessionStartedAtMs).toISOString()}
+- stopped_at: ${new Date(stoppedAtMs).toISOString()}
+
+Actual trades entered during this recording:
+\`\`\`json
+${JSON.stringify(tradeList, null, 2)}
+\`\`\`
+
+Transcript:
+\`\`\`
+${transcript}
+\`\`\`
+
+Return ONLY a JSON array. No markdown fences. Every object must include:
+- mockape_trade_id: exact trade_id from the actual trades list
+- token_name
+- pre_call_offset_ms: recording-relative ms where entry/setup commentary occurs, or null
+- post_call_offset_ms: recording-relative ms where exit/outcome commentary occurs, or null
+- target_low_mc, target_high_mc, stop_loss_mc: integer dollars from spoken targets/stops only
+- rationale: trader's own stated reason, or null
+- pre_transcript_excerpt: near-verbatim transcript evidence around entry/setup, or null
+- post_transcript_excerpt: near-verbatim transcript evidence around exit/outcome, or null
+- adherence_self_assessment: trader's spoken self-assessment, or null
+- needs_review: true when evidence is ambiguous
+- notes: compact extraction caveats, or null
+- meta_name: repeatable narrative/meta/setup label, or null
+- N_score, I_score, C_score, S_score: each 0 or 1
+- N_why, I_why, C_why, S_why: compact evidence for each score
+- NICS_score: N_score + I_score + max(C_score, S_score), 0 through 3
+- size_ok, zone_ok, cooldown_ok: booleans or null
+- trade_type: "Core NICS++", "Scout", "Non-NICS", or another compact label
+- counts_toward_50, hard_reset: booleans or null
+- running_count, non_nics_pnl_pct, cluster_pnl_pct: numbers or null
+- llm_grade_notes: one short evidence-based note
+
+NICS scoring:
+- N = trader clearly names the narrative/meta/setup, not just ticker.
+- I = trader states why this token is the selected ticket or what immediate evidence supports entry.
+- C = trader states the cut/close reason.
+- S = trader states sell/stay plan, profit target, scale-out, cost recovery, or upside management.
+- Core NICS++ requires N=1, I=1, and either C=1 or S=1.
+- Desktop will assign session-local meta_cluster_id values from meta_name after extraction.
+
+Anti-fabrication:
+- Targets and stops must come from spoken words. "2x" may be converted from actual entry market cap.
+- Transcript excerpts must be near-verbatim evidence.
+- If the transcript has no evidence, use null and set needs_review when useful.
+`;
+}
+
+function parseTradeExtractionResponse(raw: string): LlmTradeExtraction[] {
+  const arr = parseJsonArrayFromLlmOutput(raw);
+  return arr
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+    .map((row) => ({
+      mockape_trade_id: strOrNull(row.mockape_trade_id),
+      token_name: strOrNull(row.token_name),
+      pre_call_offset_ms: numberOrNull(row.pre_call_offset_ms),
+      post_call_offset_ms: numberOrNull(row.post_call_offset_ms),
+      target_low_mc: numberOrNull(row.target_low_mc),
+      target_high_mc: numberOrNull(row.target_high_mc),
+      stop_loss_mc: numberOrNull(row.stop_loss_mc),
+      rationale: strOrNull(row.rationale),
+      pre_transcript_excerpt: strOrNull(row.pre_transcript_excerpt),
+      post_transcript_excerpt: strOrNull(row.post_transcript_excerpt),
+      adherence_self_assessment: strOrNull(row.adherence_self_assessment),
+      needs_review: boolOrNull(row.needs_review),
+      notes: strOrNull(row.notes),
+      meta_name: strOrNull(row.meta_name),
+      N_score: binaryOrNull(row.N_score),
+      N_why: strOrNull(row.N_why),
+      I_score: binaryOrNull(row.I_score),
+      I_why: strOrNull(row.I_why),
+      C_score: binaryOrNull(row.C_score),
+      C_why: strOrNull(row.C_why),
+      S_score: binaryOrNull(row.S_score),
+      S_why: strOrNull(row.S_why),
+      NICS_score: numberOrNull(row.NICS_score),
+      size_ok: boolOrNull(row.size_ok),
+      zone_ok: boolOrNull(row.zone_ok),
+      cooldown_ok: boolOrNull(row.cooldown_ok),
+      trade_type: strOrNull(row.trade_type),
+      counts_toward_50: boolOrNull(row.counts_toward_50),
+      hard_reset: boolOrNull(row.hard_reset),
+      running_count: numberOrNull(row.running_count),
+      non_nics_pnl_pct: numberOrNull(row.non_nics_pnl_pct),
+      cluster_pnl_pct: numberOrNull(row.cluster_pnl_pct),
+      llm_grade_notes: strOrNull(row.llm_grade_notes),
+    }));
+}
+
+function mergeTradeExtraction(trades: NormalizedTrade[], extracted: LlmTradeExtraction[]): NormalizedTrade[] {
+  const byId = new Map(extracted.filter((row) => row.mockape_trade_id).map((row) => [row.mockape_trade_id as string, row]));
+  return trades.map((trade) => {
+    const row = byId.get(trade.id);
+    if (!row) return { ...trade, enrichmentSource: 'ledger' };
+    return applyTradeExtraction(trade, row);
+  });
+}
+
+function applyTradeExtraction(trade: NormalizedTrade, row: LlmTradeExtraction): NormalizedTrade {
+  const nicsScore = row.NICS_score ?? computeNicsScore(row.N_score, row.I_score, row.C_score, row.S_score);
+  return {
+    ...trade,
+    tokenName: row.token_name ?? trade.tokenName,
+    enrichmentSource: 'llm',
+    entryCommentaryOffsetMs: row.pre_call_offset_ms,
+    exitCommentaryOffsetMs: row.post_call_offset_ms,
+    targetLowMc: row.target_low_mc,
+    targetHighMc: row.target_high_mc,
+    stopLossMc: row.stop_loss_mc,
+    rationale: row.rationale,
+    preTranscriptExcerpt: row.pre_transcript_excerpt,
+    postTranscriptExcerpt: row.post_transcript_excerpt,
+    adherenceSelfAssessment: row.adherence_self_assessment,
+    needsReview: row.needs_review,
+    notes: row.notes,
+    metaName: row.meta_name,
+    nScore: row.N_score,
+    nWhy: row.N_why,
+    iScore: row.I_score,
+    iWhy: row.I_why,
+    cScore: row.C_score,
+    cWhy: row.C_why,
+    sScore: row.S_score,
+    sWhy: row.S_why,
+    nicsScore,
+    sizeOk: row.size_ok,
+    zoneOk: row.zone_ok,
+    cooldownOk: row.cooldown_ok,
+    tradeType: row.trade_type,
+    countsToward50: row.counts_toward_50,
+    hardReset: row.hard_reset,
+    runningCount: row.running_count,
+    nonNicsPnlPct: row.non_nics_pnl_pct,
+    clusterPnlPct: row.cluster_pnl_pct,
+    llmGradeNotes: row.llm_grade_notes,
+  };
+}
+
+function assignSessionMetaClusterIds(trades: NormalizedTrade[], session: ActiveTradeSession): NormalizedTrade[] {
+  const clusterIds = new Map<string, string>();
+  const stamp = formatClusterDateStamp(new Date(session.sessionStartedAtMs));
+  let next = 1;
+  return trades.map((trade) => {
+    const metaName = trade.metaName?.trim();
+    if (!metaName) return trade;
+    const key = metaName.toLowerCase();
+    let clusterId = clusterIds.get(key);
+    if (!clusterId) {
+      clusterId = `WT.${stamp}.${next}`;
+      clusterIds.set(key, clusterId);
+      next += 1;
+    }
+    return { ...trade, metaClusterId: clusterId };
+  });
+}
+
+async function backfillNicsForTrades(
+  session: ActiveTradeSession,
+  trades: NormalizedTrade[],
+  warnings: string[]
+): Promise<NormalizedTrade[]> {
+  const prompt = renderNicsBackfillPrompt(session, trades);
+  const responsePath = path.join(session.inputsDir, 'nics-response.json');
+  fs.writeFileSync(path.join(session.inputsDir, 'nics-prompt.md'), prompt, 'utf-8');
+  const llm = await runTradeLlmPrompt(prompt, session, 'NICS backfill');
+  fs.writeFileSync(`${responsePath}.raw.txt`, llm.rawText, 'utf-8');
+  if (!llm.ok) {
+    warnings.push(llm.message);
+    appendSessionLogForSession(session, 'trade-enrichment', 'nics backfill failed', { message: llm.message }, 'warning');
+    return trades;
+  }
+  try {
+    const rows = parseTradeExtractionResponse(llm.rawText);
+    fs.writeFileSync(responsePath, JSON.stringify(rows, null, 2), 'utf-8');
+    const merged = mergeNicsBackfill(trades, rows);
+    appendSessionLogForSession(session, 'trade-enrichment', 'nics backfill merged', {
+      responsePath,
+      rows: rows.length,
+    }, 'success');
+    return merged;
+  } catch (err) {
+    const message = `NICS backfill response could not be parsed: ${(err as Error).message}`;
+    warnings.push(message);
+    appendSessionLogForSession(session, 'trade-enrichment', 'nics backfill parse failed', {
+      responsePath: `${responsePath}.raw.txt`,
+      error: (err as Error).message,
+    }, 'error');
+    return trades;
+  }
+}
+
+function renderNicsBackfillPrompt(session: ActiveTradeSession, trades: NormalizedTrade[]): string {
+  const rows = trades.map((trade, index) => ({
+    trade_id: index + 1,
+    mockape_trade_id: trade.id,
+    token_name: trade.tokenName,
+    rationale: trade.rationale,
+    pre_transcript_excerpt: trade.preTranscriptExcerpt,
+    post_transcript_excerpt: trade.postTranscriptExcerpt,
+    adherence_self_assessment: trade.adherenceSelfAssessment,
+    notes: trade.notes,
+  }));
+  const transcript = session.transcriptSegments.map((segment) => `[${formatOffset(segment.offsetMs)}] ${segment.text}`).join('\n');
+  return `Grade these WilyTrader trade rows for NICS/meta classification.
+
+Return ONLY a JSON array. Each object must include mockape_trade_id, token_name, meta_name, N_score, N_why, I_score, I_why, C_score, C_why, S_score, S_why, NICS_score, trade_type, llm_grade_notes.
+
+Scoring:
+- N = narrative/meta/setup named, not just ticker.
+- I = why this token or immediate evidence supports entry.
+- C = cut/close reason.
+- S = sell/stay plan, target, scale-out, cost recovery, or upside management.
+- NICS_score = N + I + max(C, S).
+- Use 0 and explain missing evidence when absent.
+
+Rows:
+\`\`\`json
+${JSON.stringify(rows, null, 2)}
+\`\`\`
+
+Transcript:
+\`\`\`
+${transcript}
+\`\`\`
+`;
+}
+
+function mergeNicsBackfill(trades: NormalizedTrade[], rows: LlmTradeExtraction[]): NormalizedTrade[] {
+  const byId = new Map(rows.filter((row) => row.mockape_trade_id).map((row) => [row.mockape_trade_id as string, row]));
+  return trades.map((trade) => {
+    if (hasCompleteNics(trade)) return trade;
+    const row = byId.get(trade.id);
+    if (!row) return trade;
+    return {
+      ...trade,
+      metaName: row.meta_name ?? trade.metaName,
+      nScore: row.N_score ?? trade.nScore,
+      nWhy: row.N_why ?? trade.nWhy,
+      iScore: row.I_score ?? trade.iScore,
+      iWhy: row.I_why ?? trade.iWhy,
+      cScore: row.C_score ?? trade.cScore,
+      cWhy: row.C_why ?? trade.cWhy,
+      sScore: row.S_score ?? trade.sScore,
+      sWhy: row.S_why ?? trade.sWhy,
+      nicsScore: row.NICS_score ?? computeNicsScore(row.N_score, row.I_score, row.C_score, row.S_score) ?? trade.nicsScore,
+      tradeType: row.trade_type ?? trade.tradeType,
+      llmGradeNotes: row.llm_grade_notes ?? trade.llmGradeNotes,
+      enrichmentSource: 'llm',
+    };
+  });
+}
+
+function hasCompleteNics(trade: NormalizedTrade): boolean {
+  return Boolean(
+    trade.metaName &&
+    trade.nScore !== null && trade.nScore !== undefined &&
+    trade.iScore !== null && trade.iScore !== undefined &&
+    trade.cScore !== null && trade.cScore !== undefined &&
+    trade.sScore !== null && trade.sScore !== undefined &&
+    trade.nWhy &&
+    trade.iWhy &&
+    trade.cWhy &&
+    trade.sWhy
+  );
+}
+
 function writeTradeLogMd(session: ActiveTradeSession, trades: NormalizedTrade[]): string {
   const mdPath = path.join(session.sessionDir, 'trade_log.md');
   const lines = [
@@ -1498,6 +1955,13 @@ function writeTradeLogMd(session: ActiveTradeSession, trades: NormalizedTrade[])
     lines.push(`- **Market cap:** entry ${formatDollars(trade.entryMarketCap)} -> exit ${formatDollars(trade.exitMarketCap)}`);
     lines.push(`- **P&L:** ${formatSol(trade.pnlSol)} (${formatPercent(trade.pnlPercentage)})`);
     lines.push(`- **SOL:** in ${formatSol(trade.solInvested)} / out ${formatSol(trade.solReceived)}`);
+    if (trade.rationale) lines.push(`- **Rationale:** ${trade.rationale}`);
+    if (trade.targetLowMc || trade.targetHighMc || trade.stopLossMc) {
+      lines.push(`- **Plan:** target ${formatDollars(trade.targetLowMc ?? null)} -> ${formatDollars(trade.targetHighMc ?? null)}, stop ${formatDollars(trade.stopLossMc ?? null)}`);
+    }
+    if (trade.nicsScore !== undefined && trade.nicsScore !== null) lines.push(`- **NICS:** ${trade.nicsScore}/3${trade.tradeType ? ` (${trade.tradeType})` : ''}`);
+    if (trade.preTranscriptExcerpt) lines.push(`- **Pre excerpt:** ${trade.preTranscriptExcerpt}`);
+    if (trade.postTranscriptExcerpt) lines.push(`- **Post excerpt:** ${trade.postTranscriptExcerpt}`);
     const screenshots = findTradeScreenshots(session, trade);
     if (screenshots.length > 0) {
       lines.push('', '**Trade screenshots:**', '');
@@ -1602,60 +2066,60 @@ function buildTradeRow(
     (entry && exit ? Math.max(0, Math.round((exit.getTime() - entry.getTime()) / 1000)) : null);
   return {
     source_session: path.basename(session.sessionDir),
-    source_log_type: 'wilytrader-desktop-audio',
+    source_log_type: trade.enrichmentSource === 'llm' ? 'wilytrader-desktop-enriched' : 'wilytrader-desktop-audio',
     source_folder_archived_path: session.sessionDir,
     processed_at: new Date().toISOString(),
     trade_id: String(index),
     token_name: trade.tokenName,
     trade_date: formatTradeDate(tradeDate),
     video_start_time: formatTradeTime(session.sessionStartedAtMs),
-    entry_commentary_time: '',
+    entry_commentary_time: formatSessionOffsetTime(session, trade.entryCommentaryOffsetMs ?? null),
     entry_time_inferred: formatTradeTime(trade.entryTimestampMs),
-    exit_commentary_time: '',
+    exit_commentary_time: formatSessionOffsetTime(session, trade.exitCommentaryOffsetMs ?? null),
     exit_time_actual: formatTradeTime(trade.timestampMs),
     time_in_trade_seconds: timeInTradeSeconds === null ? '' : String(timeInTradeSeconds),
     video_end_time: formatTradeTime(stoppedAtMs),
     entry_mc_actual: formatNumber(trade.entryMarketCap),
-    target_exit_low_mc: '',
-    target_exit_high_mc: '',
-    stop_loss_mc: '',
+    target_exit_low_mc: formatNumber(trade.targetLowMc ?? null),
+    target_exit_high_mc: formatNumber(trade.targetHighMc ?? null),
+    stop_loss_mc: formatNumber(trade.stopLossMc ?? null),
     exit_mc_actual: formatNumber(trade.exitMarketCap),
     sol_invested: formatNumber(trade.solInvested),
     sol_received: formatNumber(trade.solReceived),
     pnl_sol: formatNumber(trade.pnlSol),
     pnl_percentage: formatNumber(trade.pnlPercentage),
-    rationale: '',
-    pre_transcript_excerpt: '',
-    post_transcript_excerpt: '',
-    adherence_self_assessment: '',
+    rationale: trade.rationale ?? '',
+    pre_transcript_excerpt: trade.preTranscriptExcerpt ?? '',
+    post_transcript_excerpt: trade.postTranscriptExcerpt ?? '',
+    adherence_self_assessment: trade.adherenceSelfAssessment ?? '',
     notes: buildTradeNotes(trade, entry, exit),
-    needs_review: '',
+    needs_review: formatBoolean(trade.needsReview),
     mockape_trade_id: trade.id,
     Hour: hour === undefined ? '' : String(hour),
     Weekday: entry ? entry.toLocaleDateString('en-US', { weekday: 'long' }) : '',
     WeekdayNum: entry ? String(entry.getDay()) : '',
     TimeBucket: hour === undefined ? '' : hour < 6 ? 'Overnight' : hour < 12 ? 'Morning' : hour < 18 ? 'Afternoon' : 'Evening',
-    meta_cluster_id: '',
-    meta_name: '',
-    N_score: '',
-    N_why: '',
-    I_score: '',
-    I_why: '',
-    C_score: '',
-    C_why: '',
-    S_score: '',
-    S_why: '',
-    NICS_score: '',
-    size_ok: '',
-    zone_ok: '',
-    cooldown_ok: '',
-    trade_type: '',
-    counts_toward_50: '',
-    hard_reset: '',
-    running_count: '',
-    non_nics_pnl_pct: '',
-    cluster_pnl_pct: '',
-    llm_grade_notes: '',
+    meta_cluster_id: trade.metaClusterId ?? '',
+    meta_name: trade.metaName ?? '',
+    N_score: formatNumber(trade.nScore ?? null),
+    N_why: trade.nWhy ?? '',
+    I_score: formatNumber(trade.iScore ?? null),
+    I_why: trade.iWhy ?? '',
+    C_score: formatNumber(trade.cScore ?? null),
+    C_why: trade.cWhy ?? '',
+    S_score: formatNumber(trade.sScore ?? null),
+    S_why: trade.sWhy ?? '',
+    NICS_score: formatNumber(trade.nicsScore ?? null),
+    size_ok: formatBoolean(trade.sizeOk),
+    zone_ok: formatBoolean(trade.zoneOk),
+    cooldown_ok: formatBoolean(trade.cooldownOk),
+    trade_type: trade.tradeType ?? '',
+    counts_toward_50: formatBoolean(trade.countsToward50),
+    hard_reset: formatBoolean(trade.hardReset),
+    running_count: formatNumber(trade.runningCount ?? null),
+    non_nics_pnl_pct: formatNumber(trade.nonNicsPnlPct ?? null),
+    cluster_pnl_pct: formatNumber(trade.clusterPnlPct ?? null),
+    llm_grade_notes: trade.llmGradeNotes ?? '',
   };
 }
 
@@ -2361,6 +2825,169 @@ async function testOpenRouterApi(apiKey: string, baseUrl: string, model: string)
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function runTradeLlmPrompt(
+  prompt: string,
+  session: ActiveTradeSession,
+  label: string
+): Promise<{ ok: boolean; rawText: string; message: string; provider: string }> {
+  if (settings.llmMode === 'gemini-cli') {
+    const gemini = await runGeminiCliPrompt(prompt, label);
+    if (gemini.ok) {
+      appendSessionLogForSession(session, 'trade-enrichment', `${label} completed with Gemini CLI`, {
+        model: settings.geminiCliModel,
+      }, 'success');
+      return { ...gemini, provider: 'gemini-cli' };
+    }
+    appendSessionLogForSession(session, 'trade-enrichment', `${label} Gemini CLI failed`, {
+      message: gemini.message,
+      stderrTail: tail(gemini.rawText, 500),
+    }, 'warning');
+    if (settings.openRouterApiKey) {
+      const fallback = await runOpenRouterPrompt(prompt, label);
+      return { ...fallback, provider: 'api' };
+    }
+    return { ...gemini, provider: 'gemini-cli' };
+  }
+  const api = await runOpenRouterPrompt(prompt, label);
+  return { ...api, provider: 'api' };
+}
+
+async function runGeminiCliPrompt(
+  prompt: string,
+  label: string
+): Promise<{ ok: boolean; rawText: string; message: string }> {
+  const resolvedCli = resolveGeminiCliExecutable(settings.geminiCliCommand || 'gemini');
+  const model = settings.geminiCliModel || 'gemini-3.1-pro-preview';
+  const baseArgs = [...resolvedCli.prefixArgs, '--model', model, '--output-format', 'json'];
+  const env = geminiCliEnv();
+  const timeoutMs = 10 * 60 * 1000;
+
+  if (prompt.length < 18_000) {
+    const promptFlag = await runDependencyProbe(
+      resolvedCli.command,
+      [...baseArgs, '--prompt', prompt],
+      timeoutMs,
+      env
+    );
+    if (promptFlag.ok && promptFlag.stdout.trim()) {
+      return { ok: true, rawText: promptFlag.stdout, message: `${label} completed with Gemini CLI.` };
+    }
+    const positionalConflict = /Cannot use both a positional prompt and the --prompt flag together/i.test(promptFlag.stderr);
+    if (!positionalConflict) {
+      const stderr = cleanCliStderr(promptFlag.stderr || promptFlag.error || '', 1000);
+      if (!promptFlag.timedOut && !/unknown option|unrecognized/i.test(stderr)) {
+        return {
+          ok: false,
+          rawText: `${promptFlag.stdout}\n${promptFlag.stderr}`,
+          message: `${label} Gemini CLI failed${promptFlag.timedOut ? ' (timed out)' : ''}: ${stderr || promptFlag.error || `exit ${promptFlag.code}`}`,
+        };
+      }
+    }
+  }
+
+  const stdinResult = await runProcessWithInput(resolvedCli.command, baseArgs, prompt, timeoutMs, env);
+  if (stdinResult.ok && stdinResult.stdout.trim()) {
+    return { ok: true, rawText: stdinResult.stdout, message: `${label} completed with Gemini CLI.` };
+  }
+  return {
+    ok: false,
+    rawText: `${stdinResult.stdout}\n${stdinResult.stderr}`,
+    message: `${label} Gemini CLI failed${stdinResult.timedOut ? ' (timed out)' : ''}: ${cleanCliStderr(stdinResult.stderr || stdinResult.error || '', 1000) || `exit ${stdinResult.code}`}`,
+  };
+}
+
+async function runOpenRouterPrompt(
+  prompt: string,
+  label: string
+): Promise<{ ok: boolean; rawText: string; message: string }> {
+  const apiKey = settings.openRouterApiKey.trim();
+  if (!apiKey) {
+    return { ok: false, rawText: '', message: `${label} API mode requires an OpenRouter/OpenAI API key.` };
+  }
+  const normalizedBase = (settings.openRouterBaseUrl || 'https://openrouter.ai/api/v1').replace(/\/$/, '');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10 * 60 * 1000);
+  try {
+    const res = await fetch(`${normalizedBase}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: settings.openRouterModel || 'google/gemini-2.5-flash',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0,
+      }),
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      return { ok: false, rawText: text, message: `${label} API request failed (HTTP ${res.status}).` };
+    }
+    const parsed = JSON.parse(text) as { choices?: Array<{ message?: { content?: unknown } }> };
+    const content = parsed.choices?.map((choice) => choice.message?.content).find((value): value is string => typeof value === 'string' && Boolean(value.trim()));
+    return content
+      ? { ok: true, rawText: content, message: `${label} completed with API.` }
+      : { ok: false, rawText: text, message: `${label} API response did not contain message content.` };
+  } catch (err) {
+    return { ok: false, rawText: '', message: `${label} API request failed: ${(err as Error).message}` };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function runProcessWithInput(
+  command: string,
+  args: string[],
+  input: string,
+  timeoutMs: number,
+  env?: NodeJS.ProcessEnv
+): Promise<DependencyProbeResult> {
+  return new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    let settled = false;
+    let child: ReturnType<typeof spawn>;
+    const finish = (result: DependencyProbeResult) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    try {
+      child = spawn(command, args, {
+        windowsHide: true,
+        shell: false,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env,
+      });
+    } catch (err) {
+      finish({ ok: false, code: -1, stdout, stderr, error: (err as Error).message, timedOut });
+      return;
+    }
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        child.kill();
+      } catch {
+        // ignore
+      }
+    }, timeoutMs);
+    child.stdout?.on('data', (data) => { stdout += String(data); });
+    child.stderr?.on('data', (data) => { stderr += String(data); });
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      finish({ ok: false, code: -1, stdout, stderr, error: err.message, timedOut });
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      finish({ ok: code === 0 && !timedOut, code, stdout, stderr, timedOut });
+    });
+    child.stdin?.end(input);
+  });
 }
 
 async function testGeminiCliConnection(
@@ -3133,9 +3760,94 @@ function parseTimestampMs(value: unknown): number | null {
   return null;
 }
 
+function parseJsonArrayFromLlmOutput(raw: string): unknown[] {
+  const candidates = candidateJsonTexts(raw);
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (Array.isArray(parsed)) return parsed;
+      const nested = extractNestedLlmText(parsed);
+      if (nested && nested !== candidate) {
+        const nestedArray = parseJsonArrayFromLlmOutput(nested);
+        if (nestedArray) return nestedArray;
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  throw new Error('No JSON array found in LLM output.');
+}
+
+function candidateJsonTexts(raw: string): string[] {
+  const trimmed = raw.trim();
+  const candidates = [trimmed];
+  const fence = trimmed.match(/^```(?:json)?\s*\n([\s\S]*?)\n```\s*$/i);
+  if (fence) candidates.push(fence[1].trim());
+  const firstArray = trimmed.indexOf('[');
+  const lastArray = trimmed.lastIndexOf(']');
+  if (firstArray >= 0 && lastArray > firstArray) candidates.push(trimmed.slice(firstArray, lastArray + 1));
+  const firstObject = trimmed.indexOf('{');
+  const lastObject = trimmed.lastIndexOf('}');
+  if (firstObject >= 0 && lastObject > firstObject) candidates.push(trimmed.slice(firstObject, lastObject + 1));
+  return [...new Set(candidates.filter(Boolean))];
+}
+
+function extractNestedLlmText(value: unknown): string | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  for (const key of ['response', 'text', 'content', 'output']) {
+    if (typeof record[key] === 'string') return record[key] as string;
+  }
+  const candidates = record.candidates;
+  if (Array.isArray(candidates)) {
+    for (const candidate of candidates) {
+      if (!candidate || typeof candidate !== 'object') continue;
+      const content = (candidate as Record<string, unknown>).content;
+      if (content && typeof content === 'object') {
+        const parts = (content as Record<string, unknown>).parts;
+        if (Array.isArray(parts)) {
+          const text = parts
+            .map((part) => part && typeof part === 'object' ? (part as Record<string, unknown>).text : null)
+            .filter((part): part is string => typeof part === 'string')
+            .join('\n')
+            .trim();
+          if (text) return text;
+        }
+      }
+    }
+  }
+  return null;
+}
+
 function numberOrNull(value: unknown): number | null {
   const number = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
   return Number.isFinite(number) ? number : null;
+}
+
+function boolOrNull(value: unknown): boolean | null {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    if (/^(true|yes|1)$/i.test(value.trim())) return true;
+    if (/^(false|no|0)$/i.test(value.trim())) return false;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) return value !== 0;
+  return null;
+}
+
+function binaryOrNull(value: unknown): number | null {
+  const number = numberOrNull(value);
+  if (number === null) return null;
+  return number === 1 ? 1 : 0;
+}
+
+function computeNicsScore(
+  n: number | null,
+  i: number | null,
+  c: number | null,
+  s: number | null
+): number | null {
+  if (n === null || i === null || (c === null && s === null)) return null;
+  return n + i + Math.max(c ?? 0, s ?? 0);
 }
 
 function strOrNull(value: unknown): string | null {
@@ -3202,6 +3914,11 @@ function formatSessionFolderName(date: Date): string {
   return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}.${pad(date.getHours())}${pad(date.getMinutes())} Trade`;
 }
 
+function formatClusterDateStamp(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${String(date.getFullYear()).slice(-2)}${pad(date.getMonth() + 1)}${pad(date.getDate())}`;
+}
+
 function formatOffset(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
@@ -3228,6 +3945,12 @@ function formatTradeTime(ms: number | null): string {
     : '';
 }
 
+function formatSessionOffsetTime(session: ActiveTradeSession, offsetMs: number | null): string {
+  return offsetMs === null || !Number.isFinite(offsetMs)
+    ? ''
+    : formatTradeTime(session.sessionStartedAtMs + offsetMs);
+}
+
 function formatDollars(value: number | null): string {
   return value === null ? 'unknown' : `$${Math.round(value).toLocaleString('en-US')}`;
 }
@@ -3244,9 +3967,15 @@ function formatNumber(value: number | null): string {
   return value === null ? '' : String(value);
 }
 
+function formatBoolean(value: boolean | null | undefined): string {
+  if (value === null || value === undefined) return '';
+  return value ? 'true' : 'false';
+}
+
 function buildTradeNotes(trade: NormalizedTrade, entry: Date | null, exit: Date | null): string {
   const notes: string[] = [];
   if (trade.tokenAddress) notes.push(`tokenAddress=${trade.tokenAddress}`);
+  if (trade.notes) notes.push(trade.notes);
   if (entry && exit && formatTradeDate(entry) !== formatTradeDate(exit)) {
     notes.push(`overnight_entry_date=${formatTradeDate(entry)}`);
   }
