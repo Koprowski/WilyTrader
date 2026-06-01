@@ -893,6 +893,9 @@
   }
 
   function detectMarketCap() {
+    const visibleAxiomMarketCap = detectAxiomVisibleMarketCap();
+    if (visibleAxiomMarketCap) return visibleAxiomMarketCap;
+
     const titleMatch = (document.title || "").match(/\$([0-9.]+)\s*([KMB])?/i);
     if (titleMatch) return parseCompactNumber(titleMatch[1], titleMatch[2]);
 
@@ -903,6 +906,35 @@
       if (match) return parseCompactNumber(match[1], match[2]);
     }
     return null;
+  }
+
+  function detectAxiomVisibleMarketCap() {
+    if (getPlatformAdapter(window.location.hostname)?.id !== "axiom") return null;
+    const candidates = Array.from(document.querySelectorAll("body *"))
+      .filter((element) => !root?.contains(element))
+      .map((element) => {
+        const text = cleanText(element.textContent);
+        if (!/^\$[0-9,.]+(?:\.[0-9]+)?\s*[KMB]$/i.test(text)) return null;
+        const rect = element.getBoundingClientRect();
+        if (!rect || rect.width <= 0 || rect.height <= 0) return null;
+        if (rect.top < 0 || rect.top > 155 || rect.left < 0 || rect.right > window.innerWidth) return null;
+        const style = window.getComputedStyle(element);
+        if (style.visibility === "hidden" || style.display === "none" || Number(style.opacity) === 0) return null;
+        return {
+          text,
+          marketCap: parseCurrencyMarketCap(text),
+          left: rect.left,
+          top: rect.top,
+        };
+      })
+      .filter((candidate) => candidate?.marketCap && candidate.marketCap >= 1_000)
+      .sort((a, b) => a.left - b.left || a.top - b.top);
+    return candidates[0]?.marketCap || null;
+  }
+
+  function parseCurrencyMarketCap(value) {
+    const match = String(value || "").match(/^\$?\s*([0-9,.]+(?:\.[0-9]+)?)\s*([KMB])?$/i);
+    return match ? parseCompactNumber(match[1], match[2]) : null;
   }
 
   function parseCompactNumber(value, suffix = "") {
@@ -3112,7 +3144,9 @@
     const usdPrice = DEFAULT_PRICES[fields.chain] || 1;
     const timestampMs = Date.now();
     const sourceMarketCapUsd = round(fields.token.marketCap, 2);
-    const executionMarketCapUsd = round(fields.executionPriceNative * usdPrice * MARKET_CAP_SUPPLY, 2);
+    const executionMarketCapUsd = Number(sourceMarketCapUsd) > 0
+      ? sourceMarketCapUsd
+      : round(fields.executionPriceNative * usdPrice * MARKET_CAP_SUPPLY, 2);
     const costBasisNative = round(fields.costBasisNative);
     const pnlNative = round(fields.pnlNative);
     const pnlPct = costBasisNative > 0 ? round((pnlNative / costBasisNative) * 100, 4) : 0;
