@@ -2,7 +2,7 @@
   "use strict";
 
   const STORAGE_KEY = "wilytrader_state_v2";
-  const SCHEMA_VERSION = 12;
+  const SCHEMA_VERSION = 13;
   const PANEL_SCALE_MIN = 0.7;
   const PANEL_SCALE_MAX = 1.5;
   const PANEL_VIEWPORT_MARGIN = 8;
@@ -2870,7 +2870,7 @@
       const before = snapshotPosition(existing);
       const newCost = existing.costNative + amountNative;
       const newTokenAmount = existing.tokenAmount + tokenAmount;
-      const updated = {
+      const baseUpdated = {
         ...existing,
         tokenName: delayedToken.name,
         lastUrl: delayedToken.url,
@@ -2881,6 +2881,7 @@
         buyCount: (existing.buyCount || 0) + 1,
         updatedAt: new Date().toISOString(),
       };
+      const updated = withUpdatedPositionMarketCapRange(baseUpdated, delayedToken).position;
 
       state.balances[chain] -= totalDebit;
       state.positions[delayedToken.key] = updated;
@@ -2943,13 +2944,14 @@
 
     state.balances[chain] = (state.balances[chain] || 0) + netProceeds;
 
+    const closingRangePosition = withUpdatedPositionMarketCapRange(position, delayedToken).position;
     const remainingTokenAmount = position.tokenAmount - tokenAmount;
     let after = null;
     if (shouldClosePositionAfterSell(position.tokenAmount, remainingTokenAmount, sellRatio)) {
       delete state.positions[token.key];
     } else {
       const updated = {
-        ...position,
+        ...closingRangePosition,
         tokenAmount: remainingTokenAmount,
         costNative: position.costNative - costBasis,
         sellCount: (position.sellCount || 0) + 1,
@@ -2982,7 +2984,7 @@
     playTradeExecutionSound();
 
     if (!after) {
-      const summary = buildPositionSummary(position.positionId, "closed");
+      const summary = buildPositionSummary(position.positionId, "closed", closingRangePosition);
       if (summary) state.closedPositions.push(summary);
       removeExitTargetsForPosition(position.positionId);
     }
@@ -3033,9 +3035,45 @@
       sellCount: 0,
       openedAt: now,
       updatedAt: now,
+      highMarketCapAfterEntry: round(token.marketCap, 2),
+      highMarketCapAt: now,
+      lowMarketCapAfterEntry: round(token.marketCap, 2),
+      lowMarketCapAt: now,
       firstUrl: token.url,
       lastUrl: token.url,
     };
+  }
+
+  function withUpdatedPositionMarketCapRange(position, token, timestampMs = Date.now()) {
+    const marketCap = round(token?.marketCap, 2);
+    if (!position || !Number.isFinite(marketCap) || marketCap <= 0) return { position, changed: false };
+    const timestamp = new Date(timestampMs).toISOString();
+    const currentHigh = Number(position.highMarketCapAfterEntry || 0);
+    const currentLow = Number(position.lowMarketCapAfterEntry || 0);
+    let changed = false;
+    const updated = { ...position };
+    if (!currentHigh || marketCap > currentHigh) {
+      updated.highMarketCapAfterEntry = marketCap;
+      updated.highMarketCapAt = timestamp;
+      changed = true;
+    }
+    if (!currentLow || marketCap < currentLow) {
+      updated.lowMarketCapAfterEntry = marketCap;
+      updated.lowMarketCapAt = timestamp;
+      changed = true;
+    }
+    return { position: updated, changed };
+  }
+
+  function updateActivePositionMarketCapRange({ persistRange = true } = {}) {
+    const token = activeToken;
+    const position = token?.key ? state.positions[token.key] : null;
+    if (!position) return false;
+    const result = withUpdatedPositionMarketCapRange(position, token);
+    if (!result.changed) return false;
+    state.positions[token.key] = result.position;
+    if (persistRange) runTask(persist());
+    return true;
   }
 
   async function waitForSimulatedExecution(side, token, options = {}) {
@@ -3177,14 +3215,14 @@
     };
   }
 
-  function buildPositionSummary(positionId, statusOverride) {
+  function buildPositionSummary(positionId, statusOverride, positionState = null) {
     const executions = state.executions
       .filter((execution) => execution.positionId === positionId)
       .sort((a, b) => getExecutionTimestampMs(a) - getExecutionTimestampMs(b));
-    return buildPositionSummaryFromExecutions(positionId, statusOverride, executions);
+    return buildPositionSummaryFromExecutions(positionId, statusOverride, executions, positionState);
   }
 
-  function buildPositionSummaryFromExecutions(positionId, statusOverride, executions) {
+  function buildPositionSummaryFromExecutions(positionId, statusOverride, executions, positionState = null) {
     if (executions.length === 0) return null;
 
     const buys = executions.filter((execution) => execution.side === "buy");
@@ -3251,6 +3289,10 @@
       exitMarketCapVwapUsd: round(weightedAverageFirst(sells, ["executionMarketCapUsd", "marketCapUsd"], "tokenAmount"), 2),
       entrySourceMarketCapVwapUsd: round(weightedAverage(buys, "marketCapUsd", "tokenAmount"), 2),
       exitSourceMarketCapVwapUsd: round(weightedAverage(sells, "marketCapUsd", "tokenAmount"), 2),
+      highMarketCapAfterEntry: round(positionState?.highMarketCapAfterEntry, 2),
+      highMarketCapAt: positionState?.highMarketCapAt || null,
+      lowMarketCapAfterEntry: round(positionState?.lowMarketCapAfterEntry, 2),
+      lowMarketCapAt: positionState?.lowMarketCapAt || null,
       avgEntryNative: round(weightedAverage(buys, "unitPriceNative", "tokenAmount"), 12),
       avgExitNative: round(weightedAverage(sells, "unitPriceNative", "tokenAmount"), 12),
       executionIds: executions.map((execution) => execution.id),
@@ -3259,7 +3301,7 @@
 
   function getPositionSummaries() {
     const open = Object.values(state.positions)
-      .map((position) => buildPositionSummary(position.positionId, "open"))
+      .map((position) => buildPositionSummary(position.positionId, "open", position))
       .filter(Boolean);
     return [...state.closedPositions, ...open];
   }
@@ -3271,6 +3313,10 @@
         chain: position.chain,
         entryMarketCap: position.entryMarketCapVwapUsd || 0,
         exitMarketCap: position.exitMarketCapVwapUsd || 0,
+        highMarketCapAfterEntry: position.highMarketCapAfterEntry || 0,
+        highMarketCapAt: position.highMarketCapAt || null,
+        lowMarketCapAfterEntry: position.lowMarketCapAfterEntry || 0,
+        lowMarketCapAt: position.lowMarketCapAt || null,
         id: position.id,
         platform: position.platform,
         pnlPercentage: position.pnlPct,
@@ -3334,6 +3380,7 @@
     if (!root || !state) return;
     const panelVisible = applyOverlayVisibility();
     updateActiveToken();
+    updateActivePositionMarketCapRange();
     renderFloatingTracker();
     syncActiveAxiomChartArtifacts();
     if (!panelVisible) return;
