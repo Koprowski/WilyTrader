@@ -15,6 +15,8 @@ const api = {
   abandonSession: () => ipcRenderer.invoke('session:abandon') as Promise<AbandonSessionResult>,
   openLastCompletedSessionFolder: () =>
     ipcRenderer.invoke('session:open-last-completed-folder') as Promise<{ ok: boolean; message: string; path?: string | null }>,
+  copyLastCompletedSessionFolderLink: () =>
+    ipcRenderer.invoke('session:copy-last-completed-folder-link') as Promise<{ ok: boolean; message: string; path?: string | null }>,
   getStatus: () => ipcRenderer.invoke('session:status') as Promise<WilyTraderDesktopStatus>,
   getSettings: () => ipcRenderer.invoke('settings:get') as Promise<WilyTraderDesktopSettings>,
   saveSettings: (payload: Partial<WilyTraderDesktopSettings>) =>

@@ -134,7 +134,7 @@
       trackerPosition: null,
       trackerSize: null,
       trackerScale: 1,
-      bridgeEnabled: false,
+      bridgeEnabled: true,
       autoScreenshotOnTrade: true,
       fallbackDownloadsEnabled: true,
       updateChecksEnabled: true,
@@ -237,6 +237,7 @@
     preloadTradeExecutionSound();
     schedulePendingPulseAutoBuyCheck();
     bindRouteWatcher();
+    bindLivePositionWatcher();
     bindExitTargetWatcher();
     startUpdateChecks();
     runTask(sendDesktopExtensionStatus("startup"));
@@ -893,11 +894,16 @@
   }
 
   function detectMarketCap() {
+    const axiomTitleMarketCap = isAxiomMemeRoute(new URL(window.location.href))
+      ? detectAxiomTitleMarketCap()
+      : null;
+    if (axiomTitleMarketCap) return axiomTitleMarketCap;
+
     const visibleAxiomMarketCap = detectAxiomVisibleMarketCap();
     if (visibleAxiomMarketCap) return visibleAxiomMarketCap;
 
-    const titleMatch = (document.title || "").match(/\$([0-9.]+)\s*([KMB])?/i);
-    if (titleMatch) return parseCompactNumber(titleMatch[1], titleMatch[2]);
+    const titleMarketCap = detectAxiomTitleMarketCap();
+    if (titleMarketCap) return titleMarketCap;
 
     const candidates = getPageTextCandidates(1200);
 
@@ -906,6 +912,11 @@
       if (match) return parseCompactNumber(match[1], match[2]);
     }
     return null;
+  }
+
+  function detectAxiomTitleMarketCap() {
+    const titleMatch = (document.title || "").match(/\$([0-9.]+)\s*([KMB])?/i);
+    return titleMatch ? parseCompactNumber(titleMatch[1], titleMatch[2]) : null;
   }
 
   function detectAxiomVisibleMarketCap() {
@@ -2222,10 +2233,9 @@
     }
     const sourceTokenMismatch = Boolean(pending.sourceTokenKey && token.key !== pending.sourceTokenKey);
 
-    if (!token.unitPriceNative) {
-      setStatus(sourceTokenMismatch
-        ? `Pulse opened ${token.name || shortenAddress(token.address)}; waiting for price.`
-        : `Waiting for token page price before auto-buying ${formatters.native(pending.amountNative, pending.chain || token.chain)}.`);
+    const readiness = getPulseAutoBuyReadiness(token, pending);
+    if (!readiness.ready) {
+      setStatus(readiness.message);
       schedulePendingPulseAutoBuyCheck(PULSE_AUTO_BUY_CHECK_MS);
       return;
     }
@@ -2254,7 +2264,8 @@
       const execution = await buy(amountNative, token, {
         resolveLatestToken: () => {
           updateActiveToken();
-          return activeToken?.key === token.key && activeToken.unitPriceNative ? activeToken : token;
+          const latest = activeToken?.key === token.key ? activeToken : null;
+          return latest && getPulseAutoBuyReadiness(latest, pending).ready ? latest : null;
         },
       });
       if (execution?.id) {
@@ -2265,6 +2276,25 @@
     } finally {
       pendingPulseAutoBuyInFlight = false;
     }
+  }
+
+  function getPulseAutoBuyReadiness(token, pending) {
+    const amount = formatters.native(pending.amountNative, pending.chain || token?.chain || "SOL");
+    if (!token?.key) {
+      return { ready: false, message: `Waiting for Axiom token page before auto-buying ${amount}.` };
+    }
+    const expectedKey = pending.sourceTokenKey;
+    if (expectedKey && token.key !== expectedKey) {
+      return { ready: false, message: `Pulse opened a different token; waiting for the selected token page.` };
+    }
+    if (!token.unitPriceNative || !Number.isFinite(Number(token.marketCap)) || Number(token.marketCap) <= 0) {
+      return { ready: false, message: `Waiting for token page price before auto-buying ${amount}.` };
+    }
+    const titleMarketCap = detectAxiomTitleMarketCap();
+    if (!titleMarketCap) {
+      return { ready: false, message: `Waiting for Axiom page title market cap before auto-buying ${amount}.` };
+    }
+    return { ready: true, message: "" };
   }
 
   function detectAxiomPulseMarketCap(row, quickBuyBox) {
@@ -4549,7 +4579,7 @@
 
   async function syncBridge(reason, eventExecution = null, captureScreenshot = false) {
     if (!extensionContextValid) return false;
-    if (!state?.settings?.bridgeEnabled) return false;
+    if (!state?.settings?.bridgeEnabled && !eventExecution) return false;
     try {
       const screenshot = await captureBridgeScreenshot(captureScreenshot);
       const response = await fetch(`${BRIDGE_BASE_URL}/ledger`, {
@@ -4564,8 +4594,9 @@
         lastMessage: data.sessionDir ? "WilyTrader bridge synced" : "WilyTrader bridge active",
       };
       return true;
-    } catch {
-      bridgeState = { active: false, lastMessage: "WilyTrader bridge not connected" };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error || "unknown error");
+      bridgeState = { active: false, lastMessage: `WilyTrader bridge not connected: ${message}` };
       return false;
     } finally {
       render();
@@ -4662,6 +4693,16 @@
         render();
         schedulePendingPulseAutoBuyCheck();
       }
+    }, 1000);
+  }
+
+  function bindLivePositionWatcher() {
+    window.setInterval(() => {
+      if (!extensionContextValid) return;
+      updateActiveToken();
+      const token = activeToken;
+      if (!token?.key || !state?.positions?.[token.key]) return;
+      render();
     }, 1000);
   }
 

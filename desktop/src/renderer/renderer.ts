@@ -92,6 +92,7 @@ type WilyTraderDesktopRuntimeApi = typeof window.wilyTraderDesktop & Partial<{
   geminiCliSigninStatus: () => Promise<{ signedIn: boolean; subject?: string | null }>;
   geminiCliSignin: (payload: { command?: string }) => Promise<{ ok: boolean; message: string; subject?: string }>;
   logDebug: (scope: string, message: string, details?: unknown) => Promise<{ ok: true }>;
+  copyLastCompletedSessionFolderLink: () => Promise<{ ok: boolean; message: string; path?: string | null }>;
   openLatestExtensionRelease: () => Promise<{ ok: boolean; message: string; url?: string }>;
   downloadLatestExtensionRelease: () => Promise<{ ok: boolean; message: string; url?: string }>;
 }>;
@@ -100,6 +101,7 @@ const startButton = document.querySelector<HTMLButtonElement>('[data-action="sta
 const stopButton = document.querySelector<HTMLButtonElement>('[data-action="stop"]');
 const discardButton = document.querySelector<HTMLButtonElement>('[data-action="discard"]');
 const openSessionFolderButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-action="open-session-folder"]'));
+const copySessionFolderButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-action="copy-session-folder-link"]'));
 const settingsButton = document.querySelector<HTMLButtonElement>('[data-action="settings"]');
 const settingsSaveButton = document.querySelector<HTMLButtonElement>('[data-action="settings-save"]');
 const updateCheckButton = document.querySelector<HTMLButtonElement>('[data-action="check-extension-update"]');
@@ -153,6 +155,9 @@ stopButton?.addEventListener('click', () => void stopAudioFirstSession().catch(s
 discardButton?.addEventListener('click', () => void discardAudioFirstSession().catch(showError));
 for (const button of openSessionFolderButtons) {
   button.addEventListener('click', () => void openLastCompletedSessionFolder().catch(showError));
+}
+for (const button of copySessionFolderButtons) {
+  button.addEventListener('click', () => void copyLastCompletedSessionFolderLink().catch(showError));
 }
 settingsButton?.addEventListener('click', () => void openSettings());
 for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>('[data-action="settings-close"]'))) {
@@ -499,6 +504,10 @@ function renderStatus(status: WilyTraderDesktopStatus): void {
   if (lastCompletedSessionEl) lastCompletedSessionEl.toggleAttribute('hidden', !hasLastCompletedSession);
   if (lastCompletedDirEl) lastCompletedDirEl.textContent = status.lastCompletedSessionDir ?? 'No completed session yet';
   for (const button of openSessionFolderButtons) {
+    button.hidden = !hasLastCompletedSession;
+    button.disabled = !hasLastCompletedSession;
+  }
+  for (const button of copySessionFolderButtons) {
     button.hidden = !hasLastCompletedSession;
     button.disabled = !hasLastCompletedSession;
   }
@@ -857,6 +866,12 @@ async function openExtensionFolder(): Promise<void> {
 
 async function openLastCompletedSessionFolder(): Promise<void> {
   const result = await window.wilyTraderDesktop.openLastCompletedSessionFolder();
+  setSettingsMessage(result.message, !result.ok);
+  if (statusEl) statusEl.textContent = result.message;
+}
+
+async function copyLastCompletedSessionFolderLink(): Promise<void> {
+  const result = await window.wilyTraderDesktop.copyLastCompletedSessionFolderLink();
   setSettingsMessage(result.message, !result.ok);
   if (statusEl) statusEl.textContent = result.message;
 }

@@ -119,6 +119,13 @@ interface TradeExecutionPoint {
   side: string | null;
   timestampMs: number | null;
   marketCapUsd: number | null;
+  unitPriceNative: number | null;
+  requestedSellPct: number | null;
+  tokenAmount: number | null;
+  grossNative: number | null;
+  netNative: number | null;
+  feeNative: number | null;
+  costBasisNative: number | null;
   pnlNative: number | null;
   pnlPct: number | null;
   screenshotPath?: string | null;
@@ -278,6 +285,7 @@ function registerIpc(): void {
   ipcMain.handle('session:stop', async () => stopSession());
   ipcMain.handle('session:abandon', async () => abandonSession());
   ipcMain.handle('session:open-last-completed-folder', async () => openLastCompletedSessionFolder());
+  ipcMain.handle('session:copy-last-completed-folder-link', async () => copyLastCompletedSessionFolderLink());
   ipcMain.handle('session:status', async () => getStatus());
   ipcMain.handle('session:audio-chunk', async (_event, payload) => saveAudioChunk(payload));
   ipcMain.handle('session:audio-recording', async (_event, payload) => saveAudioRecording(payload));
@@ -2439,16 +2447,42 @@ const XLSX_COLUMNS = [
   'ohlc_source',
 ] as const;
 
+const EXIT_LEG_COLUMNS = [
+  'source_session',
+  'trade_id',
+  'mockape_trade_id',
+  'token_name',
+  'exit_leg_number',
+  'execution_id',
+  'exit_time',
+  'requested_sell_pct_of_remaining',
+  'sell_pct_of_original_position',
+  'tokens_sold',
+  'exit_mc',
+  'exit_price_native',
+  'gross_received',
+  'exit_fee',
+  'net_received',
+  'allocated_entry_cost',
+  'allocated_entry_fee',
+  'leg_total_cost_basis',
+  'leg_pnl_before_allocated_entry_fee',
+  'leg_pnl_after_allocated_entry_fee',
+  'leg_pnl_pct_after_allocated_entry_fee',
+] as const;
+
 async function writeTradeLogXlsx(session: ActiveTradeSession, trades: NormalizedTrade[], stoppedAtMs: number): Promise<string> {
   const xlsxPath = path.join(session.sessionDir, 'trade_log.xlsx');
   const rows = trades.map((trade, index) => buildTradeRow(session, trade, index + 1, stoppedAtMs));
+  const exitLegRows = trades.flatMap((trade, index) => buildExitLegRows(session, trade, index + 1));
   const zip = new JSZip();
   zip.file('[Content_Types].xml', xmlContentTypes());
   zip.folder('_rels')?.file('.rels', xmlRootRels());
   const xl = zip.folder('xl');
   xl?.file('workbook.xml', xmlWorkbook());
   xl?.folder('_rels')?.file('workbook.xml.rels', xmlWorkbookRels());
-  xl?.folder('worksheets')?.file('sheet1.xml', xmlWorksheet(rows));
+  xl?.folder('worksheets')?.file('sheet1.xml', xmlWorksheet(XLSX_COLUMNS, rows));
+  xl?.folder('worksheets')?.file('sheet2.xml', xmlWorksheet(EXIT_LEG_COLUMNS, exitLegRows));
   xl?.file('styles.xml', xmlStyles());
   zip.folder('docProps')?.file('app.xml', xmlAppProps());
   zip.folder('docProps')?.file('core.xml', xmlCoreProps());
@@ -2541,9 +2575,71 @@ function buildTradeRow(
   };
 }
 
-function xmlWorksheet(rows: Array<Record<string, string>>): string {
-  const header = XLSX_COLUMNS.map((column) => xlsxHeaderLabel(column));
-  const allRows = [header, ...rows.map((row) => XLSX_COLUMNS.map((column) => row[column] ?? ''))];
+function buildExitLegRows(
+  session: ActiveTradeSession,
+  trade: NormalizedTrade,
+  tradeIndex: number
+): Array<Record<string, string>> {
+  const sellExecutions = (trade.executions ?? []).filter((execution) => execution.side === 'sell');
+  if (sellExecutions.length === 0) return [];
+  const buyExecutions = (trade.executions ?? []).filter((execution) => execution.side === 'buy');
+  const totalTokensBought = sumExecutionNumbers(buyExecutions, 'tokenAmount');
+  const totalBuyFees = trade.buyFeesNative ?? sumExecutionNumbers(buyExecutions, 'feeNative');
+  const totalEntryCost = trade.solInvested === null
+    ? sumExecutionNumbers(buyExecutions, 'grossNative')
+    : Math.max(0, trade.solInvested - totalBuyFees);
+
+  return sellExecutions.map((execution, legIndex) => {
+    const tokenAmount = execution.tokenAmount ?? 0;
+    const originalPositionRatio = totalTokensBought > 0 ? tokenAmount / totalTokensBought : 0;
+    const allocatedEntryCost = execution.costBasisNative ?? (totalEntryCost * originalPositionRatio);
+    const allocatedEntryFee = totalBuyFees * originalPositionRatio;
+    const netReceived = execution.netNative ?? null;
+    const grossReceived = execution.grossNative ?? null;
+    const legPnlBeforeAllocatedEntryFee =
+      netReceived === null ? execution.pnlNative : netReceived - allocatedEntryCost;
+    const legPnlAfterAllocatedEntryFee =
+      legPnlBeforeAllocatedEntryFee === null ? null : legPnlBeforeAllocatedEntryFee - allocatedEntryFee;
+    const legTotalCostBasis = allocatedEntryCost + allocatedEntryFee;
+    const legPnlPctAfterAllocatedEntryFee = legTotalCostBasis > 0 && legPnlAfterAllocatedEntryFee !== null
+      ? (legPnlAfterAllocatedEntryFee / legTotalCostBasis) * 100
+      : null;
+    return {
+      source_session: path.basename(session.sessionDir),
+      trade_id: String(tradeIndex),
+      mockape_trade_id: trade.id,
+      token_name: trade.tokenName,
+      exit_leg_number: String(legIndex + 1),
+      execution_id: execution.id ?? '',
+      exit_time: formatTradeTime(execution.timestampMs),
+      requested_sell_pct_of_remaining: formatPercentNumber(execution.requestedSellPct),
+      sell_pct_of_original_position: formatPercentNumber(originalPositionRatio * 100),
+      tokens_sold: formatNumber(execution.tokenAmount),
+      exit_mc: formatNumber(execution.marketCapUsd),
+      exit_price_native: formatNumber(execution.unitPriceNative),
+      gross_received: formatNumber(grossReceived),
+      exit_fee: formatNumber(execution.feeNative),
+      net_received: formatNumber(netReceived),
+      allocated_entry_cost: formatNumber(allocatedEntryCost),
+      allocated_entry_fee: formatNumber(allocatedEntryFee),
+      leg_total_cost_basis: formatNumber(legTotalCostBasis),
+      leg_pnl_before_allocated_entry_fee: formatNumber(legPnlBeforeAllocatedEntryFee),
+      leg_pnl_after_allocated_entry_fee: formatNumber(legPnlAfterAllocatedEntryFee),
+      leg_pnl_pct_after_allocated_entry_fee: formatPercentNumber(legPnlPctAfterAllocatedEntryFee),
+    };
+  });
+}
+
+function sumExecutionNumbers(executions: TradeExecutionPoint[], key: keyof TradeExecutionPoint): number {
+  return executions.reduce((total, execution) => {
+    const value = execution[key];
+    return typeof value === 'number' && Number.isFinite(value) ? total + value : total;
+  }, 0);
+}
+
+function xmlWorksheet(columns: readonly string[], rows: Array<Record<string, string>>): string {
+  const header = columns.map((column) => xlsxHeaderLabel(column));
+  const allRows = [header, ...rows.map((row) => columns.map((column) => row[column] ?? ''))];
   const sheetRows = allRows
     .map((row, rowIndex) => {
       const rowNumber = rowIndex + 1;
@@ -2564,7 +2660,7 @@ function xlsxHeaderLabel(column: string): string {
 }
 
 function xmlContentTypes(): string {
-  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>';
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>';
 }
 
 function xmlRootRels(): string {
@@ -2572,11 +2668,11 @@ function xmlRootRels(): string {
 }
 
 function xmlWorkbook(): string {
-  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Trade Log" sheetId="1" r:id="rId1"/></sheets></workbook>';
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Trade Log" sheetId="1" r:id="rId1"/><sheet name="Exit Legs" sheetId="2" r:id="rId2"/></sheets></workbook>';
 }
 
 function xmlWorkbookRels(): string {
-  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>';
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>';
 }
 
 function xmlStyles(): string {
@@ -2689,6 +2785,13 @@ function normalizeTradeExecutionPoint(execution: Record<string, unknown>): Trade
       numberOrNull(execution.executionMarketCapUsd) ??
       numberOrNull(execution.marketCapUsd) ??
       numberOrNull(execution.sourceMarketCapUsd),
+    unitPriceNative: numberOrNull(execution.unitPriceNative),
+    requestedSellPct: numberOrNull(execution.requestedSellPct),
+    tokenAmount: numberOrNull(execution.tokenAmount),
+    grossNative: numberOrNull(execution.grossNative),
+    netNative: numberOrNull(execution.netNative),
+    feeNative: numberOrNull(execution.feeNative),
+    costBasisNative: numberOrNull(execution.costBasisNative),
     pnlNative: numberOrNull(execution.pnlNative),
     pnlPct: numberOrNull(execution.pnlPct),
   };
@@ -3836,6 +3939,24 @@ async function openWilyTraderExtensionFolder(): Promise<{ ok: boolean; message: 
 }
 
 async function openLastCompletedSessionFolder(): Promise<{ ok: boolean; message: string; path?: string | null }> {
+  const resolved = resolveLastCompletedSessionFolder();
+  if (!resolved.ok) return resolved;
+  const sessionDir = resolved.path;
+  lastCompletedSessionDir = sessionDir;
+  const openError = await shell.openPath(sessionDir);
+  if (openError) return { ok: false, message: `Could not open session folder: ${openError}`, path: sessionDir };
+  return { ok: true, message: `Opened session folder: ${sessionDir}`, path: sessionDir };
+}
+
+function copyLastCompletedSessionFolderLink(): { ok: boolean; message: string; path?: string | null } {
+  const resolved = resolveLastCompletedSessionFolder();
+  if (!resolved.ok) return resolved;
+  lastCompletedSessionDir = resolved.path;
+  clipboard.writeText(resolved.path);
+  return { ok: true, message: `Copied session folder link: ${resolved.path}`, path: resolved.path };
+}
+
+function resolveLastCompletedSessionFolder(): { ok: true; message: string; path: string } | { ok: false; message: string; path?: string | null } {
   const sessionDir = lastCompletedSessionDir ?? findLastCompletedSessionDir(settings.outputDir);
   if (!sessionDir) {
     return { ok: false, message: 'No completed WilyTrader session folder was found.', path: null };
@@ -3848,10 +3969,7 @@ async function openLastCompletedSessionFolder(): Promise<{ ok: boolean; message:
       path: sessionDir,
     };
   }
-  lastCompletedSessionDir = sessionDir;
-  const openError = await shell.openPath(sessionDir);
-  if (openError) return { ok: false, message: `Could not open session folder: ${openError}`, path: sessionDir };
-  return { ok: true, message: `Opened session folder: ${sessionDir}`, path: sessionDir };
+  return { ok: true, message: `Found session folder: ${sessionDir}`, path: sessionDir };
 }
 
 async function openChromeExtensionsPage(): Promise<{ ok: boolean; message: string }> {
