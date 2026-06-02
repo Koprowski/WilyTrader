@@ -912,6 +912,21 @@ async function handleBridgeRequest(req: http.IncomingMessage, res: http.ServerRe
     return;
   }
 
+  if (req.method === 'POST' && url.pathname === '/v1/wilytrader/diagnostics') {
+    try {
+      const payload = await readJsonBody(req);
+      receiveExtensionDiagnostic(payload);
+      writeBridgeJson(res, 200, {
+        ok: true,
+        receiver: 'WilyTrader Desktop',
+        activeSession: Boolean(activeSession),
+      });
+    } catch (err) {
+      writeBridgeJson(res, 400, { ok: false, error: (err as Error).message });
+    }
+    return;
+  }
+
   if (req.method === 'POST' && url.pathname === '/v1/wilytrader/ledger') {
     try {
       const payload = await readJsonBody(req);
@@ -2743,7 +2758,21 @@ function receiveExtensionStatus(payload: unknown): void {
       ? `Extension ${extensionStatus.latestVersion} is available; installed ${installedVersion}.`
       : `Extension is up to date (${installedVersion}).`;
   }
+  appendSessionLog('extension-status', String(record.reason || 'heartbeat'), {
+    installedVersion,
+    extensionId: extensionStatus.runtimeExtensionId,
+    pageUrl: extensionStatus.runtimePageUrl,
+    tokenName: extensionStatus.runtimeTokenName,
+    tokenAddress: extensionStatus.runtimeTokenAddress,
+    tokenChain: extensionStatus.runtimeTokenChain,
+    runtimeLastSeenAt: extensionStatus.runtimeLastSeenAt,
+  });
   broadcastStatus();
+}
+
+function receiveExtensionDiagnostic(payload: unknown): void {
+  const record = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+  appendSessionLog('extension-diagnostic', String(record.stage || 'diagnostic'), record, 'info');
 }
 
 function unwrapWilyTraderPayload(parsed: unknown): unknown {

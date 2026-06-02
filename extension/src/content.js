@@ -81,6 +81,8 @@
     ["wily", "mem", "trader_state_v1"].join(""),
   ];
   const BRIDGE_BASE_URL = "http://127.0.0.1:17365/v1/wilytrader";
+  const DESKTOP_STATUS_HEARTBEAT_MS = 5_000;
+  const LIVE_POSITION_DIAGNOSTIC_MS = 3_000;
   const TRADE_SOUND_PATH = "assets/cash-register-sound.mp3";
   const TRADE_SOUND_GAIN = 0.85;
   const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
@@ -188,6 +190,8 @@
   let pulseQuickBuyTargetSeq = 0;
   let pulseQuickBuyTargets = new Map();
   let pulseQuickBuyLabelSeq = 0;
+  let lastLivePositionDiagnosticAt = 0;
+  let lastLivePositionDiagnosticKey = "";
   let pulseQuickBuyTokenLabels = new Map();
   let pendingPulseAutoBuyCheckId = null;
   let updateCheckTimerId = null;
@@ -239,6 +243,7 @@
     bindRouteWatcher();
     bindLivePositionWatcher();
     bindExitTargetWatcher();
+    bindDesktopStatusHeartbeat();
     startUpdateChecks();
     runTask(sendDesktopExtensionStatus("startup"));
     if (isOverlayVisibleRoute()) void syncBridge("startup");
@@ -325,6 +330,76 @@
         console.error("[WilyTrader]", error);
       }
     });
+  }
+
+  function emitDiagnostic(stage, details = {}, options = {}) {
+    const payload = {
+      stage,
+      at: new Date().toISOString(),
+      installedVersion: getInstalledExtensionVersion(),
+      pageUrl: window.location.href,
+      pageTitle: document.title,
+      bridgeEnabled: Boolean(state?.settings?.bridgeEnabled),
+      executionCount: Array.isArray(state?.executions) ? state.executions.length : null,
+      lastSyncedExecutionId,
+      activeToken: summarizeToken(activeToken),
+      details,
+    };
+    console.debug("[WilyTrader][diagnostic]", payload);
+    if (options.desktop !== false) runTask(postDesktopDiagnostic(payload));
+  }
+
+  async function postDesktopDiagnostic(payload) {
+    if (!extensionContextValid) return;
+    await fetch(`${BRIDGE_BASE_URL}/diagnostics`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  }
+
+  function getInstalledExtensionVersion() {
+    try {
+      return chrome?.runtime?.getManifest?.()?.version || null;
+    } catch {
+      return null;
+    }
+  }
+
+  function summarizeToken(token) {
+    if (!token) return null;
+    return {
+      key: token.key || null,
+      name: token.name || null,
+      address: token.address || null,
+      chain: token.chain || null,
+      marketCap: round(token.marketCap, 2),
+      unitPriceNative: round(token.unitPriceNative, 12),
+      url: token.url || null,
+    };
+  }
+
+  function summarizePosition(position) {
+    if (!position) return null;
+    return {
+      positionId: position.positionId || null,
+      tokenKey: position.tokenKey || null,
+      tokenName: position.tokenName || null,
+      costNative: round(position.costNative),
+      tokenAmount: round(position.tokenAmount, 12),
+      avgEntryNative: round(position.avgEntryNative, 12),
+      buyCount: position.buyCount || 0,
+      sellCount: position.sellCount || 0,
+      updatedAt: position.updatedAt || null,
+    };
+  }
+
+  function buildMarketCapDiagnostics() {
+    return {
+      selected: round(detectMarketCap(), 2),
+      axiomTitle: round(detectAxiomTitleMarketCap(), 2),
+      axiomVisible: round(detectAxiomVisibleMarketCap(), 2),
+    };
   }
 
   function preloadTradeExecutionSound() {
@@ -2951,11 +3026,31 @@
     try {
       const token = tokenOverride || (updateActiveToken(), activeToken);
       if (tokenOverride) activeToken = tokenOverride;
-      if (!token.key) return setStatus("Open a supported token page first.");
-      if (!token.unitPriceNative) return setStatus(`Price unavailable. Wait for ${token.platformLabel || "the platform"} market cap to load.`);
+      emitDiagnostic("buy-start", {
+        amountNative,
+        token: summarizeToken(token),
+        marketCaps: buildMarketCapDiagnostics(),
+      });
+      if (!token.key) {
+        emitDiagnostic("buy-blocked-no-token", { amountNative, token: summarizeToken(token) });
+        return setStatus("Open a supported token page first.");
+      }
+      if (!token.unitPriceNative) {
+        emitDiagnostic("buy-blocked-no-price", { amountNative, token: summarizeToken(token), marketCaps: buildMarketCapDiagnostics() });
+        return setStatus(`Price unavailable. Wait for ${token.platformLabel || "the platform"} market cap to load.`);
+      }
 
       const delayedToken = await waitForSimulatedExecution("buy", token, options);
-      if (!delayedToken) return;
+      if (!delayedToken) {
+        emitDiagnostic("buy-blocked-no-delayed-token", { amountNative, token: summarizeToken(token) });
+        return;
+      }
+      emitDiagnostic("buy-delayed-token", {
+        amountNative,
+        originalToken: summarizeToken(token),
+        delayedToken: summarizeToken(delayedToken),
+        marketCaps: buildMarketCapDiagnostics(),
+      });
 
       const chain = delayedToken.chain;
       const fees = calculateFees("buy", amountNative, delayedToken.executionDelayMs);
@@ -3006,6 +3101,15 @@
         positionAfter: snapshotPosition(updated),
         costBasisNative: 0,
       });
+      emitDiagnostic("execution-recorded", {
+        side: "buy",
+        executionId: execution.id,
+        positionId: execution.positionId,
+        executionMarketCapUsd: execution.executionMarketCapUsd,
+        unitPriceNative: execution.unitPriceNative,
+        tokenAmount: execution.tokenAmount,
+        positionAfter: summarizePosition(updated),
+      });
       playTradeExecutionSound();
 
       await persistAndSync("buy");
@@ -3025,11 +3129,26 @@
     updateActiveToken();
     const token = activeToken;
     const position = token.key ? state.positions[token.key] : null;
-    if (!token.key || !position) return setStatus("No open paper position for this token.");
-    if (!token.unitPriceNative) return setStatus(`Price unavailable. Wait for ${token.platformLabel || "the platform"} market cap to load.`);
+    emitDiagnostic("sell-start", {
+      percent,
+      token: summarizeToken(token),
+      position: summarizePosition(position),
+      marketCaps: buildMarketCapDiagnostics(),
+    });
+    if (!token.key || !position) {
+      emitDiagnostic("sell-blocked-no-position", { percent, token: summarizeToken(token), positionKeys: Object.keys(state.positions || {}) });
+      return setStatus("No open paper position for this token.");
+    }
+    if (!token.unitPriceNative) {
+      emitDiagnostic("sell-blocked-no-price", { percent, token: summarizeToken(token), marketCaps: buildMarketCapDiagnostics() });
+      return setStatus(`Price unavailable. Wait for ${token.platformLabel || "the platform"} market cap to load.`);
+    }
 
     const delayedToken = await waitForSimulatedExecution("sell", token);
-    if (!delayedToken) return;
+    if (!delayedToken) {
+      emitDiagnostic("sell-blocked-no-delayed-token", { percent, token: summarizeToken(token) });
+      return;
+    }
 
     const chain = delayedToken.chain;
     const sellRatio = normalizeSellRatio(percent);
@@ -3081,6 +3200,17 @@
       positionBefore: before,
       positionAfter: after,
       costBasisNative: costBasis,
+    });
+    emitDiagnostic("execution-recorded", {
+      side: "sell",
+      executionId: execution.id,
+      positionId: execution.positionId,
+      executionMarketCapUsd: execution.executionMarketCapUsd,
+      unitPriceNative: execution.unitPriceNative,
+      requestedSellPct: execution.requestedSellPct,
+      tokenAmount: execution.tokenAmount,
+      pnlNative: execution.pnlNative,
+      positionAfter: summarizePosition(after),
     });
     playTradeExecutionSound();
 
@@ -3472,11 +3602,21 @@
   async function persistAndSync(reason) {
     await persist();
     const latestExecution = state.executions[state.executions.length - 1] || null;
+    const previousLastSyncedExecutionId = lastSyncedExecutionId;
     const isNewTradeExecution =
       (reason === "buy" || reason === "sell") &&
       latestExecution?.id &&
       latestExecution.id !== lastSyncedExecutionId;
     const shouldCaptureScreenshot = Boolean(state.settings.autoScreenshotOnTrade) && isNewTradeExecution;
+    emitDiagnostic("persist-sync", {
+      reason,
+      latestExecutionId: latestExecution?.id || null,
+      previousLastSyncedExecutionId,
+      isNewTradeExecution: Boolean(isNewTradeExecution),
+      shouldCaptureScreenshot,
+      bridgeEnabled: Boolean(state.settings.bridgeEnabled),
+      fallbackDownloadsEnabled: Boolean(state.settings.fallbackDownloadsEnabled),
+    });
     if (latestExecution?.id) lastSyncedExecutionId = latestExecution.id;
     runTask(syncTradeArtifacts(reason, isNewTradeExecution ? latestExecution : null, shouldCaptureScreenshot));
   }
@@ -4516,6 +4656,13 @@
     }
   }
 
+  function bindDesktopStatusHeartbeat() {
+    window.setInterval(() => {
+      if (!extensionContextValid) return;
+      runTask(sendDesktopExtensionStatus("heartbeat"));
+    }, DESKTOP_STATUS_HEARTBEAT_MS);
+  }
+
   function sendRuntimeMessage(message) {
     return new Promise((resolve) => {
       if (!extensionContextValid) return resolve({ ok: false, error: "Extension context invalidated." });
@@ -4571,16 +4718,42 @@
   }
 
   async function syncTradeArtifacts(reason, eventExecution = null, captureScreenshot = false) {
+    emitDiagnostic("sync-artifacts-start", {
+      reason,
+      eventExecutionId: eventExecution?.id || null,
+      captureScreenshot: Boolean(captureScreenshot),
+      bridgeEnabled: Boolean(state?.settings?.bridgeEnabled),
+      fallbackDownloadsEnabled: Boolean(state?.settings?.fallbackDownloadsEnabled),
+    });
     const bridgeSynced = await syncBridge(reason, eventExecution, captureScreenshot);
     if (!bridgeSynced && eventExecution && state?.settings?.fallbackDownloadsEnabled) {
+      emitDiagnostic("sync-artifacts-fallback", {
+        reason,
+        eventExecutionId: eventExecution.id,
+        captureScreenshot: Boolean(captureScreenshot),
+      });
       await saveFallbackTradeArtifacts(reason, eventExecution, captureScreenshot);
     }
+    emitDiagnostic("sync-artifacts-complete", {
+      reason,
+      eventExecutionId: eventExecution?.id || null,
+      bridgeSynced,
+    });
   }
 
   async function syncBridge(reason, eventExecution = null, captureScreenshot = false) {
     if (!extensionContextValid) return false;
-    if (!state?.settings?.bridgeEnabled && !eventExecution) return false;
+    if (!state?.settings?.bridgeEnabled && !eventExecution) {
+      emitDiagnostic("bridge-skip-disabled", { reason, eventExecutionId: null });
+      return false;
+    }
     try {
+      emitDiagnostic("bridge-post-start", {
+        reason,
+        eventExecutionId: eventExecution?.id || null,
+        captureScreenshot: Boolean(captureScreenshot),
+        bridgeEnabled: Boolean(state?.settings?.bridgeEnabled),
+      });
       const screenshot = await captureBridgeScreenshot(captureScreenshot);
       const response = await fetch(`${BRIDGE_BASE_URL}/ledger`, {
         method: "POST",
@@ -4593,10 +4766,22 @@
         active: true,
         lastMessage: data.sessionDir ? "WilyTrader bridge synced" : "WilyTrader bridge active",
       };
+      emitDiagnostic("bridge-post-success", {
+        reason,
+        eventExecutionId: eventExecution?.id || null,
+        sessionDir: data.sessionDir || null,
+        ledgerPath: data.ledgerPath || null,
+        screenshotPath: data.screenshotPath || null,
+      });
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error || "unknown error");
       bridgeState = { active: false, lastMessage: `WilyTrader bridge not connected: ${message}` };
+      emitDiagnostic("bridge-post-failed", {
+        reason,
+        eventExecutionId: eventExecution?.id || null,
+        error: message,
+      });
       return false;
     } finally {
       render();
@@ -4703,7 +4888,36 @@
       const token = activeToken;
       if (!token?.key || !state?.positions?.[token.key]) return;
       render();
+      emitLivePositionDiagnostic("live-position-watcher");
     }, 1000);
+  }
+
+  function emitLivePositionDiagnostic(reason) {
+    const token = activeToken;
+    const position = token?.key ? state?.positions?.[token.key] : null;
+    if (!token?.key || !position) return;
+    const pnl = calculateMarkedPositionMetrics(position, token);
+    const marketCaps = buildMarketCapDiagnostics();
+    const now = Date.now();
+    const key = [
+      token.key,
+      round(token.marketCap, 2),
+      round(token.unitPriceNative, 12),
+      round(pnl.totalPnlNative, 8),
+      round(pnl.totalPnlPct, 4),
+      marketCaps.axiomTitle,
+      marketCaps.axiomVisible,
+    ].join("|");
+    if (key === lastLivePositionDiagnosticKey && now - lastLivePositionDiagnosticAt < LIVE_POSITION_DIAGNOSTIC_MS) return;
+    lastLivePositionDiagnosticKey = key;
+    lastLivePositionDiagnosticAt = now;
+    emitDiagnostic("live-position", {
+      reason,
+      token: summarizeToken(token),
+      position: summarizePosition(position),
+      marketCaps,
+      pnl,
+    });
   }
 
   function bindExitTargetWatcher() {
