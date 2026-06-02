@@ -78,6 +78,11 @@ interface WilyTraderSessionFinalization {
   estimatedRemainingMs: number;
 }
 
+interface WilyTraderDesktopAppInfo {
+  name: string;
+  version: string;
+}
+
 type WilyTraderDesktopRuntimeApi = typeof window.wilyTraderDesktop & Partial<{
   checkDependencies: (payload: { geminiCliCommand?: string }) => Promise<{
     whisper: { ok: boolean; message: string; exePath?: string; modelPath?: string };
@@ -119,6 +124,7 @@ const dependencyStatusEl = document.querySelector<HTMLElement>('[data-dependency
 const geminiSigninStatusEl = document.querySelector<HTMLElement>('[data-gemini-signin-status]');
 const settingsMessageEl = document.querySelector<HTMLElement>('[data-settings-message]');
 const settingsModal = document.querySelector<HTMLElement>('[data-settings-modal]');
+const appVersionEls = Array.from(document.querySelectorAll<HTMLElement>('[data-app-version]'));
 
 debugLog('renderer', 'renderer loaded', {
   hasRuntimeApi: Boolean(window.wilyTraderDesktop),
@@ -211,7 +217,15 @@ void window.wilyTraderDesktop.getSettings().then((settings) => {
   currentSettings = settings;
   populateSettings(settings);
 }).catch(showError);
+void window.wilyTraderDesktop.getAppInfo().then(renderAppInfo).catch(showError);
 void window.wilyTraderDesktop.getStatus().then(renderStatus).catch(showError);
+
+function renderAppInfo(info: WilyTraderDesktopAppInfo): void {
+  for (const element of appVersionEls) {
+    element.textContent = `v${info.version}`;
+    element.title = `${info.name} ${info.version}`;
+  }
+}
 
 async function startAudioFirstSession(): Promise<void> {
   try {
