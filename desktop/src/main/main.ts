@@ -38,6 +38,7 @@ interface ActiveTradeSession {
   executionsReceived: number;
   screenshotsReceived: number;
   lastLedgerPayload: unknown | null;
+  marketCapObservations: MarketCapObservation[];
   incrementalTranscription: IncrementalTranscriptionRun;
 }
 
@@ -61,8 +62,12 @@ interface NormalizedTrade {
   chain: string;
   entryMarketCap: number | null;
   exitMarketCap: number | null;
+  highMarketCapAfterEntry: number | null;
+  lowMarketCapAfterEntry: number | null;
   solInvested: number | null;
   solReceived: number | null;
+  buyFeesNative: number | null;
+  sellFeesNative: number | null;
   pnlSol: number | null;
   pnlPercentage: number | null;
   timestampMs: number | null;
@@ -70,8 +75,10 @@ interface NormalizedTrade {
   timeInTradeSeconds: number | null;
   tokenAddress: string | null;
   executions?: TradeExecutionPoint[];
+  ohlcMc?: TradeOhlc | null;
   ohlcPct?: TradeOhlc | null;
   ohlcSol?: TradeOhlc | null;
+  ohlcSource?: string | null;
   enrichmentSource?: 'ledger' | 'llm';
   entryCommentaryOffsetMs?: number | null;
   exitCommentaryOffsetMs?: number | null;
@@ -122,6 +129,14 @@ interface TradeOhlc {
   high: number;
   low: number;
   close: number;
+}
+
+interface MarketCapObservation {
+  tokenAddress: string | null;
+  tokenName: string | null;
+  timestampMs: number;
+  marketCapUsd: number;
+  source: string;
 }
 
 interface LlmTradeExtraction {
@@ -479,6 +494,7 @@ function startSession(): WilyTraderDesktopStatus {
     executionsReceived: 0,
     screenshotsReceived: 0,
     lastLedgerPayload: null,
+    marketCapObservations: [],
     incrementalTranscription: createIncrementalTranscriptionRun(),
   };
 
@@ -953,6 +969,7 @@ async function receiveLedger(payload: unknown, res: http.ServerResponse): Promis
   };
   session.lastLedgerPayload = payload;
   if (event) session.executionsReceived += 1;
+  recordMarketCapObservation(session, payload, enrichedEvent, receivedAtMs);
 
   writeJson(path.join(session.inputsDir, 'wilytrader.json'), enriched);
   writeWilyTraderSnapshots(session.inputsDir, payload);
@@ -1094,6 +1111,58 @@ function writeWilyTraderSnapshots(inputsDir: string, payload: unknown): void {
   if (Array.isArray(root.executions)) {
     writeJson(path.join(wilyDir, 'executions.json'), root.executions);
   }
+}
+
+function recordMarketCapObservation(
+  session: ActiveTradeSession,
+  payload: unknown,
+  event: BridgeExecutionEvent | null,
+  receivedAtMs: number
+): void {
+  const record = unwrapWilyTraderPayload(payload);
+  if (!record || typeof record !== 'object') return;
+  const root = record as Record<string, unknown>;
+  const sessionRecord = root.session && typeof root.session === 'object' ? root.session as Record<string, unknown> : null;
+  const activeToken = sessionRecord?.activeToken && typeof sessionRecord.activeToken === 'object'
+    ? sessionRecord.activeToken as Record<string, unknown>
+    : null;
+  const latestExecution = root.currentSessionSummary && typeof root.currentSessionSummary === 'object'
+    ? (root.currentSessionSummary as Record<string, unknown>).latestExecution
+    : null;
+  const latestExecutionRecord = latestExecution && typeof latestExecution === 'object'
+    ? latestExecution as Record<string, unknown>
+    : null;
+  const latestExecutionMarketCap =
+    numberOrNull(latestExecutionRecord?.executionMarketCapUsd) ??
+    numberOrNull(latestExecutionRecord?.marketCapUsd) ??
+    numberOrNull(latestExecutionRecord?.sourceMarketCapUsd);
+  const activeMarketCap = numberOrNull(activeToken?.marketCap);
+  const marketCap = event ? latestExecutionMarketCap ?? activeMarketCap : activeMarketCap ?? latestExecutionMarketCap;
+  if (marketCap === null || marketCap <= 0) return;
+  const timestampMs =
+    (event ? parseTimestampMs(event.timestampMs ?? event.timestamp) : null) ??
+    parseTimestampMs(activeToken?.capturedAtMs ?? activeToken?.updatedAtMs ?? activeToken?.timestampMs ?? activeToken?.capturedAt) ??
+    parseTimestampMs(event?.timestampMs ?? event?.timestamp) ??
+    receivedAtMs;
+  const observation: MarketCapObservation = {
+    tokenAddress: strOrNull(event?.tokenAddress) ?? strOrNull(activeToken?.address) ?? strOrNull(activeToken?.tokenAddress),
+    tokenName: strOrNull(event?.tokenName) ?? strOrNull(activeToken?.name) ?? strOrNull(activeToken?.tokenName),
+    timestampMs,
+    marketCapUsd: marketCap,
+    source: event ? 'execution-payload' : 'ledger-payload',
+  };
+  const last = session.marketCapObservations[session.marketCapObservations.length - 1];
+  if (
+    last &&
+    last.tokenAddress === observation.tokenAddress &&
+    last.tokenName === observation.tokenName &&
+    last.marketCapUsd === observation.marketCapUsd &&
+    Math.abs(last.timestampMs - observation.timestampMs) < 1_000
+  ) {
+    return;
+  }
+  session.marketCapObservations.push(observation);
+  appendJsonLine(path.join(session.inputsDir, 'wilytrader-market-cap-observations.jsonl'), observation);
 }
 
 function writeTranscriptJson(session: ActiveTradeSession): string {
@@ -1543,8 +1612,18 @@ function normalizeWilyTraderTrades(parsed: unknown): NormalizedTrade[] {
       chain: strOrNull(position.chain) ?? 'SOL',
       entryMarketCap: numberOrNull(position.entryMarketCapVwapUsd),
       exitMarketCap: numberOrNull(position.exitMarketCapVwapUsd),
-      solInvested: numberOrNull(position.investedNative),
-      solReceived: numberOrNull(position.netReceivedNative),
+      highMarketCapAfterEntry: numberOrNull(position.highMarketCapAfterEntry),
+      lowMarketCapAfterEntry: numberOrNull(position.lowMarketCapAfterEntry),
+      solInvested: sumNullable(numberOrNull(position.investedNative), numberOrNull(position.buyFeesNative)),
+      solReceived: coalesceNumber(
+        numberOrNull(position.netReceivedNative),
+        sumNullable(
+          sumNullable(numberOrNull(position.investedNative), numberOrNull(position.buyFeesNative)),
+          numberOrNull(position.pnlPostFeeNative)
+        )
+      ),
+      buyFeesNative: numberOrNull(position.buyFeesNative),
+      sellFeesNative: numberOrNull(position.sellFeesNative),
       pnlSol: numberOrNull(position.pnlPostFeeNative),
       pnlPercentage: numberOrNull(position.pnlPct),
       timestampMs,
@@ -1569,8 +1648,15 @@ function normalizeMockApeCompatibleTrades(value: unknown): NormalizedTrade[] {
       chain: strOrNull(row.chain) ?? 'SOL',
       entryMarketCap: numberOrNull(row.entryMarketCap),
       exitMarketCap: numberOrNull(row.exitMarketCap),
+      highMarketCapAfterEntry: numberOrNull(row.highMarketCapAfterEntry),
+      lowMarketCapAfterEntry: numberOrNull(row.lowMarketCapAfterEntry),
       solInvested: numberOrNull(row.solInvested),
-      solReceived: numberOrNull(row.solReceived),
+      solReceived: coalesceNumber(
+        numberOrNull(row.solReceived),
+        sumNullable(numberOrNull(row.solInvested), numberOrNull(row.pnlSol))
+      ),
+      buyFeesNative: numberOrNull(row.buyFeesNative),
+      sellFeesNative: numberOrNull(row.sellFeesNative),
       pnlSol: numberOrNull(row.pnlSol),
       pnlPercentage: numberOrNull(row.pnlPercentage),
       timestampMs: numberOrNull(row.timestamp),
@@ -1597,7 +1683,7 @@ async function enrichTradesForSession(
   }
   if (session.transcriptSegments.length === 0) {
     warnings.push('No transcript segments were available; trade log uses ledger-only rows.');
-    return { trades: reconcileTradeReviewFields(trades), promptPath: null, responsePath: null, warnings };
+    return { trades: reconcileTradeReviewFields(session, trades), promptPath: null, responsePath: null, warnings };
   }
 
   const prompt = renderTradeExtractionPrompt(session, trades, stoppedAtMs);
@@ -1649,7 +1735,7 @@ async function enrichTradesForSession(
   }
 
   const clustered = assignSessionMetaClusterIds(enriched, session);
-  return { trades: reconcileTradeReviewFields(clustered), promptPath, responsePath, warnings };
+  return { trades: reconcileTradeReviewFields(session, clustered), promptPath, responsePath, warnings };
 }
 
 function renderTradeExtractionPrompt(
@@ -1676,9 +1762,9 @@ function renderTradeExtractionPrompt(
       entry_mc_actual: trade.entryMarketCap,
       exit_mc_actual: trade.exitMarketCap,
       sol_invested: trade.solInvested,
-      sol_received: trade.solReceived,
-      pnl_sol: trade.pnlSol,
-      pnl_percentage: trade.pnlPercentage,
+      sol_received: normalizedSolReceived(trade),
+      pnl_sol: normalizedPnlSol(trade),
+      pnl_percentage: normalizedPnlPercentage(trade),
       time_in_trade_seconds: trade.timeInTradeSeconds,
     };
   });
@@ -1849,7 +1935,7 @@ function assignSessionMetaClusterIds(trades: NormalizedTrade[], session: ActiveT
   });
 }
 
-function reconcileTradeReviewFields(trades: NormalizedTrade[]): NormalizedTrade[] {
+function reconcileTradeReviewFields(session: ActiveTradeSession, trades: NormalizedTrade[]): NormalizedTrade[] {
   const rows = trades.map((trade) => {
     const nicsScore = computeNicsScore(
       trade.nScore ?? null,
@@ -1879,15 +1965,23 @@ function reconcileTradeReviewFields(trades: NormalizedTrade[]): NormalizedTrade[
     const counts = evidenceOk && trade.sizeOk === true && trade.zoneOk === true && !hardReset;
     if (hardReset) runningCount = 0;
     else if (counts) runningCount += 1;
+    const marketCapSeries = buildTradeMarketCapSeries(trade, session.marketCapObservations);
+    const ohlcMc = computeNumberOhlc(marketCapSeries.map((point) => point.marketCapUsd));
     const ohlcSol = computeTradeSolOhlc(trade, cumulativeSol);
     rows[item.index] = {
       ...trade,
       countsToward50: counts,
       runningCount,
-      nonNicsPnlPct: counts ? null : trade.pnlPercentage,
+      nonNicsPnlPct: counts ? null : normalizedPnlPercentage(trade),
       tradeType: normalizeTradeType(trade),
-      ohlcPct: computeTradePctOhlc(trade),
+      ohlcMc,
+      ohlcPct: computeTradePctOhlc(trade, ohlcMc),
       ohlcSol,
+      ohlcSource: marketCapSeries.some((point) => point.source === 'position-summary-range')
+        ? 'position-summary-range'
+        : marketCapSeries.some((point) => point.source === 'ledger-payload')
+        ? 'market-cap-observations'
+        : 'execution-ledger',
     };
     cumulativeSol = ohlcSol?.close ?? cumulativeSol;
   }
@@ -1983,20 +2077,84 @@ function computeCooldownOk(
   return !violates;
 }
 
-function computeTradePctOhlc(trade: NormalizedTrade): TradeOhlc | null {
-  const points = [0];
-  const entry = trade.entryMarketCap;
+function buildTradeMarketCapSeries(
+  trade: NormalizedTrade,
+  observations: MarketCapObservation[]
+): Array<{ timestampMs: number; marketCapUsd: number; source: string }> {
+  const entryMs = trade.entryTimestampMs;
+  const exitMs = trade.timestampMs;
+  const tokenAddress = trade.tokenAddress?.toLowerCase() ?? null;
+  const tokenName = trade.tokenName.toLowerCase();
+  const points: Array<{ timestampMs: number; marketCapUsd: number; source: string }> = [];
   for (const execution of trade.executions ?? []) {
-    if (execution.side === 'sell' && execution.pnlPct !== null) {
-      points.push(execution.pnlPct);
-      continue;
-    }
-    if (entry !== null && entry > 0 && execution.marketCapUsd !== null) {
-      points.push(((execution.marketCapUsd - entry) / entry) * 100);
-    }
+    if (execution.timestampMs === null || execution.marketCapUsd === null) continue;
+    points.push({
+      timestampMs: execution.timestampMs,
+      marketCapUsd: execution.marketCapUsd,
+      source: 'execution-ledger',
+    });
   }
+  for (const observation of observations) {
+    if (entryMs !== null && observation.timestampMs < entryMs) continue;
+    if (exitMs !== null && observation.timestampMs > exitMs) continue;
+    const observationAddress = observation.tokenAddress?.toLowerCase() ?? null;
+    const observationName = observation.tokenName?.toLowerCase() ?? '';
+    const tokenMatches = tokenAddress
+      ? observationAddress === tokenAddress
+      : observationName === tokenName;
+    if (!tokenMatches) continue;
+    points.push({
+      timestampMs: observation.timestampMs,
+      marketCapUsd: observation.marketCapUsd,
+      source: observation.source,
+    });
+  }
+  if (entryMs !== null && trade.entryMarketCap !== null) {
+    points.push({ timestampMs: entryMs, marketCapUsd: trade.entryMarketCap, source: 'position-summary' });
+  }
+  if (entryMs !== null && trade.highMarketCapAfterEntry !== null) {
+    points.push({ timestampMs: entryMs, marketCapUsd: trade.highMarketCapAfterEntry, source: 'position-summary-range' });
+  }
+  if (entryMs !== null && trade.lowMarketCapAfterEntry !== null) {
+    points.push({ timestampMs: entryMs, marketCapUsd: trade.lowMarketCapAfterEntry, source: 'position-summary-range' });
+  }
+  if (exitMs !== null && trade.exitMarketCap !== null) {
+    points.push({ timestampMs: exitMs, marketCapUsd: trade.exitMarketCap, source: 'position-summary' });
+  }
+  const seen = new Set<string>();
+  return points
+    .sort((a, b) => a.timestampMs - b.timestampMs)
+    .filter((point) => {
+      const key = `${point.timestampMs}:${point.marketCapUsd}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function computeNumberOhlc(points: number[]): TradeOhlc | null {
+  if (points.length === 0) return null;
+  return {
+    open: points[0],
+    high: Math.max(...points),
+    low: Math.min(...points),
+    close: points[points.length - 1],
+  };
+}
+
+function computeTradePctOhlc(trade: NormalizedTrade, marketCapOhlc: TradeOhlc | null): TradeOhlc | null {
+  const entry = trade.entryMarketCap;
+  if (entry !== null && entry > 0 && marketCapOhlc) {
+    return {
+      open: ((marketCapOhlc.open - entry) / entry) * 100,
+      high: ((marketCapOhlc.high - entry) / entry) * 100,
+      low: ((marketCapOhlc.low - entry) / entry) * 100,
+      close: ((marketCapOhlc.close - entry) / entry) * 100,
+    };
+  }
+  const points = [0];
   if (trade.pnlPercentage !== null) points.push(trade.pnlPercentage);
-  const close = trade.pnlPercentage ?? points[points.length - 1] ?? 0;
+  const close = points[points.length - 1] ?? 0;
   return {
     open: 0,
     high: Math.max(...points, close),
@@ -2006,21 +2164,56 @@ function computeTradePctOhlc(trade: NormalizedTrade): TradeOhlc | null {
 }
 
 function computeTradeSolOhlc(trade: NormalizedTrade, cumulativeOpen: number): TradeOhlc | null {
-  const points = [cumulativeOpen];
+  const openingFeeHole = Math.max(0, trade.buyFeesNative ?? 0) * 2;
+  const open = cumulativeOpen - openingFeeHole;
+  const points = [open];
   let realized = 0;
   for (const execution of trade.executions ?? []) {
     if (execution.side !== 'sell' || execution.pnlNative === null) continue;
     realized += execution.pnlNative;
-    points.push(cumulativeOpen + realized);
+    points.push(open + realized);
   }
   const close = cumulativeOpen + (trade.pnlSol ?? realized);
   points.push(close);
   return {
-    open: cumulativeOpen,
+    open,
     high: Math.max(...points),
     low: Math.min(...points),
     close,
   };
+}
+
+function normalizedSolReceived(trade: NormalizedTrade): number | null {
+  return coalesceNumber(trade.solReceived, sumNullable(trade.solInvested, trade.pnlSol));
+}
+
+function normalizedPnlSol(trade: NormalizedTrade): number | null {
+  const received = normalizedSolReceived(trade);
+  if (received !== null && trade.solInvested !== null) return received - trade.solInvested;
+  return trade.pnlSol;
+}
+
+function normalizedPnlPercentage(trade: NormalizedTrade): number | null {
+  const pnlSol = normalizedPnlSol(trade);
+  if (pnlSol !== null && trade.solInvested !== null && trade.solInvested > 0) {
+    return (pnlSol / trade.solInvested) * 100;
+  }
+  return trade.pnlPercentage;
+}
+
+function coalesceNumber(...values: Array<number | null>): number | null {
+  return values.find((value): value is number => value !== null && Number.isFinite(value)) ?? null;
+}
+
+function sumNullable(...values: Array<number | null>): number | null {
+  let total = 0;
+  let hasValue = false;
+  for (const value of values) {
+    if (value === null || !Number.isFinite(value)) continue;
+    total += value;
+    hasValue = true;
+  }
+  return hasValue ? total : null;
 }
 
 async function backfillNicsForTrades(
@@ -2154,8 +2347,8 @@ function writeTradeLogMd(session: ActiveTradeSession, trades: NormalizedTrade[])
     lines.push(`- **Exit time actual:** ${formatTradeTime(trade.timestampMs) || 'unknown'}`);
     lines.push(`- **Time in trade seconds:** ${trade.timeInTradeSeconds ?? 'unknown'}`);
     lines.push(`- **Market cap:** entry ${formatDollars(trade.entryMarketCap)} -> exit ${formatDollars(trade.exitMarketCap)}`);
-    lines.push(`- **P&L:** ${formatSol(trade.pnlSol)} (${formatPercent(trade.pnlPercentage)})`);
-    lines.push(`- **SOL:** in ${formatSol(trade.solInvested)} / out ${formatSol(trade.solReceived)}`);
+    lines.push(`- **P&L:** ${formatSol(normalizedPnlSol(trade))} (${formatPercent(normalizedPnlPercentage(trade))})`);
+    lines.push(`- **SOL:** in ${formatSol(trade.solInvested)} / out ${formatSol(normalizedSolReceived(trade))}`);
     if (trade.rationale) lines.push(`- **Rationale:** ${trade.rationale}`);
     if (trade.targetLowMc || trade.targetHighMc || trade.stopLossMc) {
       lines.push(`- **Plan:** target ${formatDollars(trade.targetLowMc ?? null)} -> ${formatDollars(trade.targetHighMc ?? null)}, stop ${formatDollars(trade.stopLossMc ?? null)}`);
@@ -2232,7 +2425,10 @@ const XLSX_COLUMNS = [
   'non_nics_pnl_pct',
   'cluster_pnl_pct',
   'llm_grade_notes',
-  'ohlc_pct_open',
+  'ohlc_mc_open',
+  'ohlc_mc_high',
+  'ohlc_mc_low',
+  'ohlc_mc_close',
   'ohlc_pct_high',
   'ohlc_pct_low',
   'ohlc_pct_close',
@@ -2240,7 +2436,6 @@ const XLSX_COLUMNS = [
   'ohlc_sol_high',
   'ohlc_sol_low',
   'ohlc_sol_close',
-  'ohlc_observation_count',
   'ohlc_source',
 ] as const;
 
@@ -2296,9 +2491,9 @@ function buildTradeRow(
     stop_loss_mc: formatNumber(trade.stopLossMc ?? null),
     exit_mc_actual: formatNumber(trade.exitMarketCap),
     sol_invested: formatNumber(trade.solInvested),
-    sol_received: formatNumber(trade.solReceived),
-    pnl_sol: formatNumber(trade.pnlSol),
-    pnl_percentage: formatNumber(trade.pnlPercentage),
+    sol_received: formatNumber(normalizedSolReceived(trade)),
+    pnl_sol: formatNumber(normalizedPnlSol(trade)),
+    pnl_percentage: formatPercentNumber(normalizedPnlPercentage(trade)),
     rationale: trade.rationale ?? '',
     pre_transcript_excerpt: trade.preTranscriptExcerpt ?? '',
     post_transcript_excerpt: trade.postTranscriptExcerpt ?? '',
@@ -2328,19 +2523,21 @@ function buildTradeRow(
     counts_toward_50: formatCount(trade.countsToward50),
     hard_reset: formatBoolean(trade.hardReset),
     running_count: formatNumber(trade.runningCount ?? null),
-    non_nics_pnl_pct: formatNumber(trade.nonNicsPnlPct ?? null),
-    cluster_pnl_pct: formatNumber(trade.clusterPnlPct ?? null),
+    non_nics_pnl_pct: formatPercentNumber(trade.nonNicsPnlPct ?? null),
+    cluster_pnl_pct: formatPercentNumber(trade.clusterPnlPct ?? null),
     llm_grade_notes: trade.llmGradeNotes ?? '',
-    ohlc_pct_open: formatNumber(trade.ohlcPct?.open ?? null),
-    ohlc_pct_high: formatNumber(trade.ohlcPct?.high ?? null),
-    ohlc_pct_low: formatNumber(trade.ohlcPct?.low ?? null),
-    ohlc_pct_close: formatNumber(trade.ohlcPct?.close ?? null),
+    ohlc_mc_open: formatNumber(trade.ohlcMc?.open ?? null),
+    ohlc_mc_high: formatNumber(trade.ohlcMc?.high ?? null),
+    ohlc_mc_low: formatNumber(trade.ohlcMc?.low ?? null),
+    ohlc_mc_close: formatNumber(trade.ohlcMc?.close ?? null),
+    ohlc_pct_high: formatPercentNumber(trade.ohlcPct?.high ?? null),
+    ohlc_pct_low: formatPercentNumber(trade.ohlcPct?.low ?? null),
+    ohlc_pct_close: formatPercentNumber(trade.ohlcPct?.close ?? null),
     ohlc_sol_open: formatNumber(trade.ohlcSol?.open ?? null),
     ohlc_sol_high: formatNumber(trade.ohlcSol?.high ?? null),
     ohlc_sol_low: formatNumber(trade.ohlcSol?.low ?? null),
     ohlc_sol_close: formatNumber(trade.ohlcSol?.close ?? null),
-    ohlc_observation_count: String(Math.max(1, trade.executions?.length ?? 0)),
-    ohlc_source: 'execution-ledger',
+    ohlc_source: trade.ohlcSource ?? 'execution-ledger',
   };
 }
 
@@ -4200,6 +4397,10 @@ function formatPercent(value: number | null): string {
 
 function formatNumber(value: number | null): string {
   return value === null ? '' : String(value);
+}
+
+function formatPercentNumber(value: number | null): string {
+  return value === null ? '' : value.toFixed(2);
 }
 
 function formatBoolean(value: boolean | null | undefined): string {
