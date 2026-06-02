@@ -1646,7 +1646,7 @@
     const pulseTarget = resolveAxiomPulseQuickBuyTarget(target, event);
     const quickBuyBox = pulseTarget?.box;
     if (!quickBuyBox) return refreshAxiomPulseQuickBuyLayer();
-    if (isWilyTraderModalOpen() || isAxiomPulseQuickBuyBoxCovered(quickBuyBox)) {
+    if (isWilyTraderModalOpen() || !getAxiomPulseQuickBuyVisibleRect(quickBuyBox, pulseTarget.row)) {
       refreshAxiomPulseQuickBuyLayer();
       return;
     }
@@ -1734,10 +1734,13 @@
       .map((box) => ({
         box,
         row: findAxiomPulseTokenRow(box),
-        rect: getClippedViewportRect(box.getBoundingClientRect()),
       }))
-      .filter(({ rect }) => rect.width > 0 && rect.height > 0)
-      .filter(({ box }) => !isAxiomPulseQuickBuyBoxCovered(box))
+      .map(({ box, row }) => ({
+        box,
+        row,
+        rect: getAxiomPulseQuickBuyVisibleRect(box, row),
+      }))
+      .filter(({ rect }) => rect && rect.width > 0 && rect.height > 0)
       .filter(({ row, box }) => isAxiomPulseTokenRowContentVisible(row, box))
       .sort(compareAxiomPulseQuickBuyTargets);
   }
@@ -1907,11 +1910,65 @@
   function isAxiomPulseQuickBuyBoxCurrentForHitTarget(hitTarget, box) {
     if (!box?.isConnected || !isAxiomPulseQuickBuyBoxElement(box)) return false;
     const hitRect = hitTarget.getBoundingClientRect();
-    const boxRect = getClippedViewportRect(box.getBoundingClientRect());
+    const boxRect = getAxiomPulseQuickBuyVisibleRect(box, findAxiomPulseTokenRow(box));
+    if (!boxRect) return false;
     return Math.abs(hitRect.left - boxRect.left) <= 4
       && Math.abs(hitRect.top - boxRect.top) <= 4
       && Math.abs(hitRect.width - boxRect.width) <= 8
       && Math.abs(hitRect.height - boxRect.height) <= 8;
+  }
+
+  function getAxiomPulseQuickBuyVisibleRect(box, row = null) {
+    if (!box?.getBoundingClientRect) return null;
+    let rect = getClippedViewportRect(box.getBoundingClientRect());
+    if (row?.getBoundingClientRect && row !== box) {
+      rect = intersectViewportRects(rect, getClippedViewportRect(row.getBoundingClientRect()));
+    }
+    if (rect.width <= 0 || rect.height <= 0) return null;
+
+    const xCandidates = [
+      rect.left + rect.width * 0.5,
+      rect.left + Math.min(16, rect.width * 0.35),
+      rect.right - Math.min(16, rect.width * 0.35),
+    ];
+    const visibleYs = [];
+    const step = Math.max(3, Math.min(8, rect.height / 12));
+    for (let y = rect.top + 1; y <= rect.bottom - 1; y += step) {
+      if (xCandidates.some((x) => isAxiomPulseQuickBuyPointVisible(box, x, y))) {
+        visibleYs.push(y);
+      }
+    }
+    const bottomProbe = rect.bottom - 1;
+    if (xCandidates.some((x) => isAxiomPulseQuickBuyPointVisible(box, x, bottomProbe))) {
+      visibleYs.push(bottomProbe);
+    }
+    if (visibleYs.length === 0) return null;
+
+    const visibleTop = Math.max(rect.top, Math.min(...visibleYs) - step);
+    const visibleBottom = Math.min(rect.bottom, Math.max(...visibleYs) + step);
+    return {
+      left: rect.left,
+      top: visibleTop,
+      right: rect.right,
+      bottom: visibleBottom,
+      width: rect.width,
+      height: Math.max(0, visibleBottom - visibleTop),
+    };
+  }
+
+  function intersectViewportRects(a, b) {
+    const left = Math.max(a.left, b.left);
+    const top = Math.max(a.top, b.top);
+    const right = Math.min(a.right, b.right);
+    const bottom = Math.min(a.bottom, b.bottom);
+    return {
+      left,
+      top,
+      right,
+      bottom,
+      width: Math.max(0, right - left),
+      height: Math.max(0, bottom - top),
+    };
   }
 
   function findAxiomPulseQuickBuyBoxAtPoint(x, y) {
@@ -1933,46 +1990,28 @@
     return Boolean(root?.querySelector(".wt-modal-open"));
   }
 
-  function isAxiomPulseQuickBuyBoxCovered(box) {
-    const rect = box.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return true;
-    const left = Math.max(0, rect.left);
-    const right = Math.min(window.innerWidth, rect.right);
-    const top = Math.max(0, rect.top);
-    const bottom = Math.min(window.innerHeight, rect.bottom);
-    if (right <= left || bottom <= top) return true;
+  function isAxiomPulseQuickBuyPointVisible(box, x, y) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+    if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) return false;
 
-    const points = [
-      [left + (right - left) / 2, top + (bottom - top) / 2],
-      [left + (right - left) / 2, bottom - Math.min(12, (bottom - top) / 4)],
-      [left + Math.min(12, (right - left) / 4), top + (bottom - top) / 2],
-      [right - Math.min(12, (right - left) / 4), top + (bottom - top) / 2],
-    ];
-    return points.some(([x, y]) => !isAxiomPulseQuickBuyPointClear(box, x, y));
-  }
-
-  function isAxiomPulseQuickBuyPointClear(box, x, y) {
     const stack = document.elementsFromPoint(x, y);
     for (const element of stack) {
       if (!element || element === document.documentElement || element === document.body) continue;
       if (root?.contains(element) || pulseQuickBuyLayer?.contains(element)) continue;
-      if (element === box || box.contains(element) || element.contains?.(box)) return true;
-      if (isAxiomPulseBlockingOverlayElement(element)) return false;
+      if (element === box || box.contains(element)) return true;
+      if (element.contains?.(box)) continue;
+      if (isAxiomPulseClippingElement(element)) return false;
     }
     return false;
   }
 
-  function isAxiomPulseBlockingOverlayElement(element) {
-    const text = `${element.id || ""} ${element.className || ""} ${element.getAttribute?.("role") || ""}`.toLowerCase();
-    if (element.tagName === "DIALOG" || element.getAttribute?.("aria-modal") === "true") return true;
-    if (/\b(modal|dialog|popover|drawer|sheet|overlay|portal|radix|floating)\b/.test(text)) return true;
-
+  function isAxiomPulseClippingElement(element) {
     const style = window.getComputedStyle(element);
     if (style.pointerEvents === "none" || style.visibility === "hidden" || style.display === "none") return false;
     if (style.position !== "fixed" && style.position !== "sticky") return false;
+
     const rect = element.getBoundingClientRect();
-    const area = rect.width * rect.height;
-    return rect.width >= 180 && rect.height >= 90 && area >= 18000;
+    return rect.width >= 80 && rect.height >= 20;
   }
 
   function isAxiomPulseQuickBuyBoxElement(element) {

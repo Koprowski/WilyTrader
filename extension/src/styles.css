@@ -27,6 +27,7 @@
   background: rgba(255, 214, 0, 0.12);
   border: 2px solid #ffd600;
   box-shadow: inset 0 0 0 1px rgba(17, 17, 17, 0.72), 0 0 0 1px rgba(255, 214, 0, 0.42), 0 0 18px rgba(255, 214, 0, 0.28);
+  overflow: hidden;
 }
 
 .wt-pulse-quick-buy-hit::after {
