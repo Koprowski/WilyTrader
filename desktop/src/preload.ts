@@ -13,6 +13,10 @@ const api = {
   startSession: () => ipcRenderer.invoke('session:start') as Promise<StartSessionResult>,
   stopSession: () => ipcRenderer.invoke('session:stop') as Promise<StopSessionResult>,
   abandonSession: () => ipcRenderer.invoke('session:abandon') as Promise<AbandonSessionResult>,
+  openActiveSessionFolder: () =>
+    ipcRenderer.invoke('session:open-active-folder') as Promise<{ ok: boolean; message: string; path?: string | null }>,
+  copyActiveSessionFolderLink: () =>
+    ipcRenderer.invoke('session:copy-active-folder-link') as Promise<{ ok: boolean; message: string; path?: string | null }>,
   openLastCompletedSessionFolder: () =>
     ipcRenderer.invoke('session:open-last-completed-folder') as Promise<{ ok: boolean; message: string; path?: string | null }>,
   copyLastCompletedSessionFolderLink: () =>

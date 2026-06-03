@@ -290,6 +290,8 @@ function registerIpc(): void {
   ipcMain.handle('session:start', async () => startSession());
   ipcMain.handle('session:stop', async () => stopSession());
   ipcMain.handle('session:abandon', async () => abandonSession());
+  ipcMain.handle('session:open-active-folder', async () => openActiveSessionFolder());
+  ipcMain.handle('session:copy-active-folder-link', async () => copyActiveSessionFolderLink());
   ipcMain.handle('session:open-last-completed-folder', async () => openLastCompletedSessionFolder());
   ipcMain.handle('session:copy-last-completed-folder-link', async () => copyLastCompletedSessionFolderLink());
   ipcMain.handle('session:status', async () => getStatus());
@@ -4010,6 +4012,30 @@ async function openLastCompletedSessionFolder(): Promise<{ ok: boolean; message:
   const openError = await shell.openPath(sessionDir);
   if (openError) return { ok: false, message: `Could not open session folder: ${openError}`, path: sessionDir };
   return { ok: true, message: `Opened session folder: ${sessionDir}`, path: sessionDir };
+}
+
+async function openActiveSessionFolder(): Promise<{ ok: boolean; message: string; path?: string | null }> {
+  const resolved = resolveActiveSessionFolder();
+  if (!resolved.ok) return resolved;
+  const openError = await shell.openPath(resolved.path);
+  if (openError) return { ok: false, message: `Could not open active session folder: ${openError}`, path: resolved.path };
+  return { ok: true, message: `Opened active session folder: ${resolved.path}`, path: resolved.path };
+}
+
+function copyActiveSessionFolderLink(): { ok: boolean; message: string; path?: string | null } {
+  const resolved = resolveActiveSessionFolder();
+  if (!resolved.ok) return resolved;
+  clipboard.writeText(resolved.path);
+  return { ok: true, message: `Copied active session folder link: ${resolved.path}`, path: resolved.path };
+}
+
+function resolveActiveSessionFolder(): { ok: true; message: string; path: string } | { ok: false; message: string; path?: string | null } {
+  const sessionDir = activeSession?.sessionDir ?? finalizingSession?.sessionDir ?? null;
+  if (!sessionDir) return { ok: false, message: 'No active WilyTrader session folder is available.', path: null };
+  if (!fs.existsSync(sessionDir)) {
+    return { ok: false, message: `Active session folder no longer exists: ${sessionDir}`, path: sessionDir };
+  }
+  return { ok: true, message: `Found active session folder: ${sessionDir}`, path: sessionDir };
 }
 
 function copyLastCompletedSessionFolderLink(): { ok: boolean; message: string; path?: string | null } {

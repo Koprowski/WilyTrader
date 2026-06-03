@@ -2392,6 +2392,16 @@
       return;
     }
     const sourceTokenMismatch = Boolean(pending.sourceTokenKey && token.key !== pending.sourceTokenKey);
+    if (sourceTokenMismatch) {
+      emitDiagnostic("pulse-auto-buy-token-mismatch", {
+        pendingTokenKey: pending.sourceTokenKey || null,
+        pendingTokenName: pending.tokenName || null,
+        openedToken: summarizeToken(token),
+      });
+      clearPendingPulseAutoBuy();
+      setStatus(`Pulse auto-buy cancelled: opened token did not match ${pending.tokenName || "the selected Pulse row"}.`);
+      return;
+    }
 
     const readiness = getPulseAutoBuyReadiness(token, pending);
     if (!readiness.ready) {
@@ -2416,24 +2426,14 @@
 
     pendingPulseAutoBuyInFlight = true;
     try {
-      if (sourceTokenMismatch) {
-        console.warn("[WilyTrader] Pulse token guess differed from opened token; auto-buying opened token page.", {
-          pendingToken: pending.sourceTokenKey,
-          pendingTokenName: pending.tokenName,
-          openedToken: token.key,
-          openedTokenName: token.name,
-        });
-      }
       emitDiagnostic("pulse-auto-buy-executing", {
-        sourceTokenMismatch,
+        sourceTokenMismatch: false,
         pendingTokenKey: pending.sourceTokenKey || null,
         pendingTokenName: pending.tokenName || null,
         openedToken: summarizeToken(token),
         amountNative,
       });
-      setStatus(sourceTokenMismatch
-        ? `Pulse target resolved to opened token ${token.name || shortenAddress(token.address)}; auto-buying ${formatters.native(pending.amountNative, token.chain)}.`
-        : `Auto-buying ${formatters.native(pending.amountNative, token.chain)} from Pulse.`);
+      setStatus(`Auto-buying ${formatters.native(pending.amountNative, token.chain)} from Pulse.`);
       const execution = await buy(amountNative, token, {
         resolveLatestToken: () => {
           updateActiveToken();
@@ -3513,7 +3513,7 @@
     if (typeof options.resolveLatestToken === "function") {
       const resolved = await Promise.resolve(options.resolveLatestToken(token));
       if (resolved?.key) activeToken = resolved;
-      return resolved || token;
+      return resolved || null;
     }
     updateActiveToken();
     return activeToken;
