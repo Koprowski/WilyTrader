@@ -2,7 +2,7 @@
   "use strict";
 
   const STORAGE_KEY = "wilytrader_state_v2";
-  const SCHEMA_VERSION = 13;
+  const SCHEMA_VERSION = 14;
   const PANEL_SCALE_MIN = 0.7;
   const PANEL_SCALE_MAX = 1.5;
   const PANEL_VIEWPORT_MARGIN = 8;
@@ -15,6 +15,8 @@
   const PULSE_AUTO_BUY_TTL_MS = 2 * 60 * 1000;
   const PULSE_AUTO_BUY_CHECK_MS = 350;
   const AXIOM_TARGET_TRIGGER_INTERVAL_MS = 500;
+  const MARKET_CAP_ROLLING_SAMPLE_INTERVAL_MS = 250;
+  const MARKET_CAP_ROLLING_PERSIST_THROTTLE_MS = 2_000;
   const EXIT_TARGET_MARKET_CAP_STEP = 1000;
   const EXIT_TARGET_MENU_MAX_OPTIONS = 60;
   const EXIT_TARGET_KINDS = {
@@ -197,6 +199,9 @@
   let lastPulseAutoBuyDiagnosticKey = "";
   let lastTradeButtonExecutionKey = "";
   let lastTradeButtonExecutionAt = 0;
+  let lastRollingMarketCapPersistAt = 0;
+  let lastRollingMarketCapDiagnosticAt = 0;
+  let lastRollingMarketCapDiagnosticKey = "";
   let pulseQuickBuyTokenLabels = new Map();
   let pendingPulseAutoBuyCheckId = null;
   let updateCheckTimerId = null;
@@ -246,6 +251,7 @@
     preloadTradeExecutionSound();
     schedulePendingPulseAutoBuyCheck();
     bindRouteWatcher();
+    bindRollingMarketCapSampler();
     bindLivePositionWatcher();
     bindExitTargetWatcher();
     bindDesktopStatusHeartbeat();
@@ -788,7 +794,7 @@
     };
   }
 
-  function buildDetectedToken(adapter, { address, chain = "SOL", platformChain = "solana", name, marketCap, url = window.location.href }) {
+  function buildDetectedToken(adapter, { address, chain = "SOL", platformChain = "solana", name, marketCap, marketCapSource = null, url = window.location.href }) {
     const unitPriceUsd = marketCap ? marketCap / MARKET_CAP_SUPPLY : null;
     const chainUsd = DEFAULT_PRICES[chain] || 1;
     const unitPriceNative = unitPriceUsd ? unitPriceUsd / chainUsd : null;
@@ -804,6 +810,7 @@
       key: `${adapter.id}:${chain}:${address}`,
       name: name || shortenAddress(address),
       marketCap,
+      marketCapSource,
       unitPriceUsd,
       unitPriceNative,
       url,
@@ -819,13 +826,14 @@
     const chain = chainSlug === "bsc" ? "BNB" : "SOL";
     const platformChain = chainSlug || "solana";
     const name = detectTokenName(address, adapter);
-    const marketCap = detectMarketCap();
+    const marketCapQuote = detectMarketCapQuote();
     return buildDetectedToken(adapter, {
       address,
       chain,
       platformChain,
       name,
-      marketCap,
+      marketCap: marketCapQuote?.marketCap ?? null,
+      marketCapSource: marketCapQuote?.source ?? null,
     });
   }
 
@@ -833,13 +841,14 @@
     const adapter = getPlatformAdapter(url.hostname);
     const address = detectAxiomTokenAddress(url);
     const name = detectTokenName(address, adapter);
-    const marketCap = detectMarketCap();
+    const marketCapQuote = detectMarketCapQuote();
     return buildDetectedToken(adapter, {
       address,
       chain: "SOL",
       platformChain: "solana",
       name,
-      marketCap,
+      marketCap: marketCapQuote?.marketCap ?? null,
+      marketCapSource: marketCapQuote?.source ?? null,
     });
   }
 
@@ -983,17 +992,25 @@
   }
 
   function detectMarketCap() {
+    return detectMarketCapQuote()?.marketCap ?? null;
+  }
+
+  function detectMarketCapQuote() {
     const visibleAxiomMarketCap = detectAxiomVisibleMarketCap();
-    if (visibleAxiomMarketCap) return visibleAxiomMarketCap;
+    if (visibleAxiomMarketCap) {
+      return { marketCap: visibleAxiomMarketCap, source: "axiom-visible-header" };
+    }
 
     const titleMarketCap = detectAxiomTitleMarketCap();
-    if (titleMarketCap) return titleMarketCap;
+    if (titleMarketCap) {
+      return { marketCap: titleMarketCap, source: "axiom-title" };
+    }
 
     const candidates = getPageTextCandidates(1200);
 
     for (const text of candidates) {
       const match = text.match(/(?:MC|MCap|Market Cap)\s*:?\s*\$?\s*([0-9.]+)\s*([KMB])?/i);
-      if (match) return parseCompactNumber(match[1], match[2]);
+      if (match) return { marketCap: parseCompactNumber(match[1], match[2]), source: "page-market-cap-text" };
     }
     return null;
   }
@@ -3351,45 +3368,125 @@
       sellCount: 0,
       openedAt: now,
       updatedAt: now,
-      highMarketCapAfterEntry: round(token.marketCap, 2),
-      highMarketCapAt: now,
-      lowMarketCapAfterEntry: round(token.marketCap, 2),
-      lowMarketCapAt: now,
+      highMarketCapAfterEntry: 0,
+      highMarketCapAt: null,
+      lowMarketCapAfterEntry: 0,
+      lowMarketCapAt: null,
+      ohlcSampleIntervalMs: MARKET_CAP_ROLLING_SAMPLE_INTERVAL_MS,
+      ohlcSampleCount: 0,
+      ohlcFirstSampleAt: null,
+      ohlcLastSampleAt: null,
+      ohlcOpenMarketCap: 0,
+      ohlcHighMarketCap: 0,
+      ohlcHighMarketCapAt: null,
+      ohlcLowMarketCap: 0,
+      ohlcLowMarketCapAt: null,
+      ohlcCloseMarketCap: 0,
+      ohlcSource: null,
       firstUrl: token.url,
       lastUrl: token.url,
     };
   }
 
-  function withUpdatedPositionMarketCapRange(position, token, timestampMs = Date.now()) {
+  function withUpdatedPositionMarketCapRange(position, token, timestampMs = Date.now(), options = {}) {
     const marketCap = round(token?.marketCap, 2);
     if (!position || !Number.isFinite(marketCap) || marketCap <= 0) return { position, changed: false };
     const timestamp = new Date(timestampMs).toISOString();
-    const currentHigh = Number(position.highMarketCapAfterEntry || 0);
-    const currentLow = Number(position.lowMarketCapAfterEntry || 0);
+    const countSample = options.countSample !== false;
+    const currentHigh = Number(position.ohlcHighMarketCap || position.highMarketCapAfterEntry || 0);
+    const currentLow = Number(position.ohlcLowMarketCap || position.lowMarketCapAfterEntry || 0);
+    const currentClose = Number(position.ohlcCloseMarketCap || 0);
+    const sampleCount = Number(position.ohlcSampleCount || 0);
+    const source = token?.marketCapSource || position.ohlcSource || "detected-market-cap";
     let changed = false;
+    let rangeChanged = false;
     const updated = { ...position };
-    if (!currentHigh || marketCap > currentHigh) {
-      updated.highMarketCapAfterEntry = marketCap;
-      updated.highMarketCapAt = timestamp;
+    if (!updated.ohlcOpenMarketCap) {
+      updated.ohlcOpenMarketCap = marketCap;
+      updated.ohlcFirstSampleAt = timestamp;
       changed = true;
+    }
+    if (countSample) {
+      updated.ohlcSampleCount = sampleCount + 1;
+      updated.ohlcLastSampleAt = timestamp;
+      updated.ohlcSampleIntervalMs = MARKET_CAP_ROLLING_SAMPLE_INTERVAL_MS;
+      changed = true;
+    }
+    if (currentClose !== marketCap) {
+      updated.ohlcCloseMarketCap = marketCap;
+      updated.ohlcLastSampleAt = timestamp;
+      changed = true;
+    }
+    if (updated.ohlcSource !== source) {
+      updated.ohlcSource = source;
+      changed = true;
+    }
+    if (!currentHigh || marketCap > currentHigh) {
+      updated.ohlcHighMarketCap = marketCap;
+      updated.ohlcHighMarketCapAt = timestamp;
+      changed = true;
+      rangeChanged = true;
     }
     if (!currentLow || marketCap < currentLow) {
-      updated.lowMarketCapAfterEntry = marketCap;
-      updated.lowMarketCapAt = timestamp;
+      updated.ohlcLowMarketCap = marketCap;
+      updated.ohlcLowMarketCapAt = timestamp;
       changed = true;
+      rangeChanged = true;
     }
-    return { position: updated, changed };
+    updated.highMarketCapAfterEntry = updated.ohlcHighMarketCap || marketCap;
+    updated.highMarketCapAt = updated.ohlcHighMarketCapAt || timestamp;
+    updated.lowMarketCapAfterEntry = updated.ohlcLowMarketCap || marketCap;
+    updated.lowMarketCapAt = updated.ohlcLowMarketCapAt || timestamp;
+    return { position: updated, changed, rangeChanged };
   }
 
-  function updateActivePositionMarketCapRange({ persistRange = true } = {}) {
+  function updateActivePositionMarketCapRange({ persistRange = true, forcePersist = false, reason = "position-range" } = {}) {
     const token = activeToken;
     const position = token?.key ? state.positions[token.key] : null;
     if (!position) return false;
     const result = withUpdatedPositionMarketCapRange(position, token);
     if (!result.changed) return false;
     state.positions[token.key] = result.position;
-    if (persistRange) runTask(persist());
+    const now = Date.now();
+    const shouldPersist = persistRange && (
+      forcePersist ||
+      result.rangeChanged ||
+      now - lastRollingMarketCapPersistAt >= MARKET_CAP_ROLLING_PERSIST_THROTTLE_MS
+    );
+    if (shouldPersist) {
+      lastRollingMarketCapPersistAt = now;
+      runTask(persist());
+    }
+    emitRollingMarketCapDiagnostic(reason, token, result.position, result.rangeChanged);
     return true;
+  }
+
+  function emitRollingMarketCapDiagnostic(reason, token, position, rangeChanged = false) {
+    const now = Date.now();
+    const key = [
+      position?.positionId || "",
+      round(position?.ohlcHighMarketCap || position?.highMarketCapAfterEntry, 2),
+      round(position?.ohlcLowMarketCap || position?.lowMarketCapAfterEntry, 2),
+      round(position?.ohlcCloseMarketCap, 2),
+    ].join("|");
+    if (!rangeChanged && now - lastRollingMarketCapDiagnosticAt < LIVE_POSITION_DIAGNOSTIC_MS) return;
+    lastRollingMarketCapDiagnosticKey = key;
+    lastRollingMarketCapDiagnosticAt = now;
+    emitDiagnostic("rolling-market-cap-ohlc", {
+      reason,
+      token: summarizeToken(token),
+      positionId: position?.positionId || null,
+      sampleIntervalMs: MARKET_CAP_ROLLING_SAMPLE_INTERVAL_MS,
+      sampleCount: position?.ohlcSampleCount || 0,
+      source: position?.ohlcSource || null,
+      openMarketCap: position?.ohlcOpenMarketCap || null,
+      highMarketCap: position?.ohlcHighMarketCap || null,
+      highMarketCapAt: position?.ohlcHighMarketCapAt || null,
+      lowMarketCap: position?.ohlcLowMarketCap || null,
+      lowMarketCapAt: position?.ohlcLowMarketCapAt || null,
+      closeMarketCap: position?.ohlcCloseMarketCap || null,
+      rangeChanged: Boolean(rangeChanged),
+    });
   }
 
   async function waitForSimulatedExecution(side, token, options = {}) {
@@ -3607,10 +3704,21 @@
       exitMarketCapVwapUsd: round(weightedAverageFirst(sells, ["executionMarketCapUsd", "marketCapUsd"], "tokenAmount"), 2),
       entrySourceMarketCapVwapUsd: round(weightedAverage(buys, "marketCapUsd", "tokenAmount"), 2),
       exitSourceMarketCapVwapUsd: round(weightedAverage(sells, "marketCapUsd", "tokenAmount"), 2),
-      highMarketCapAfterEntry: round(positionState?.highMarketCapAfterEntry, 2),
-      highMarketCapAt: positionState?.highMarketCapAt || null,
-      lowMarketCapAfterEntry: round(positionState?.lowMarketCapAfterEntry, 2),
-      lowMarketCapAt: positionState?.lowMarketCapAt || null,
+      highMarketCapAfterEntry: round(positionState?.ohlcHighMarketCap || positionState?.highMarketCapAfterEntry, 2),
+      highMarketCapAt: positionState?.ohlcHighMarketCapAt || positionState?.highMarketCapAt || null,
+      lowMarketCapAfterEntry: round(positionState?.ohlcLowMarketCap || positionState?.lowMarketCapAfterEntry, 2),
+      lowMarketCapAt: positionState?.ohlcLowMarketCapAt || positionState?.lowMarketCapAt || null,
+      ohlcSampleIntervalMs: positionState?.ohlcSampleIntervalMs || MARKET_CAP_ROLLING_SAMPLE_INTERVAL_MS,
+      ohlcSampleCount: Number(positionState?.ohlcSampleCount || 0),
+      ohlcFirstSampleAt: positionState?.ohlcFirstSampleAt || null,
+      ohlcLastSampleAt: positionState?.ohlcLastSampleAt || null,
+      ohlcOpenMarketCap: round(positionState?.ohlcOpenMarketCap, 2),
+      ohlcHighMarketCap: round(positionState?.ohlcHighMarketCap || positionState?.highMarketCapAfterEntry, 2),
+      ohlcHighMarketCapAt: positionState?.ohlcHighMarketCapAt || positionState?.highMarketCapAt || null,
+      ohlcLowMarketCap: round(positionState?.ohlcLowMarketCap || positionState?.lowMarketCapAfterEntry, 2),
+      ohlcLowMarketCapAt: positionState?.ohlcLowMarketCapAt || positionState?.lowMarketCapAt || null,
+      ohlcCloseMarketCap: round(positionState?.ohlcCloseMarketCap, 2),
+      ohlcSource: positionState?.ohlcSource || null,
       avgEntryNative: round(weightedAverage(buys, "unitPriceNative", "tokenAmount"), 12),
       avgExitNative: round(weightedAverage(sells, "unitPriceNative", "tokenAmount"), 12),
       executionIds: executions.map((execution) => execution.id),
@@ -3635,6 +3743,17 @@
         highMarketCapAt: position.highMarketCapAt || null,
         lowMarketCapAfterEntry: position.lowMarketCapAfterEntry || 0,
         lowMarketCapAt: position.lowMarketCapAt || null,
+        ohlcSampleIntervalMs: position.ohlcSampleIntervalMs || MARKET_CAP_ROLLING_SAMPLE_INTERVAL_MS,
+        ohlcSampleCount: position.ohlcSampleCount || 0,
+        ohlcFirstSampleAt: position.ohlcFirstSampleAt || null,
+        ohlcLastSampleAt: position.ohlcLastSampleAt || null,
+        ohlcOpenMarketCap: position.ohlcOpenMarketCap || 0,
+        ohlcHighMarketCap: position.ohlcHighMarketCap || position.highMarketCapAfterEntry || 0,
+        ohlcHighMarketCapAt: position.ohlcHighMarketCapAt || position.highMarketCapAt || null,
+        ohlcLowMarketCap: position.ohlcLowMarketCap || position.lowMarketCapAfterEntry || 0,
+        ohlcLowMarketCapAt: position.ohlcLowMarketCapAt || position.lowMarketCapAt || null,
+        ohlcCloseMarketCap: position.ohlcCloseMarketCap || 0,
+        ohlcSource: position.ohlcSource || null,
         id: position.id,
         platform: position.platform,
         pnlPercentage: position.pnlPct,
@@ -3710,7 +3829,6 @@
     if (!root || !state) return;
     const panelVisible = applyOverlayVisibility();
     updateActiveToken();
-    updateActivePositionMarketCapRange();
     renderFloatingTracker();
     syncActiveAxiomChartArtifacts();
     if (!panelVisible) return;
@@ -4964,6 +5082,16 @@
         schedulePendingPulseAutoBuyCheck();
       }
     }, 1000);
+  }
+
+  function bindRollingMarketCapSampler() {
+    window.setInterval(() => {
+      if (!extensionContextValid) return;
+      updateActiveToken();
+      const token = activeToken;
+      if (!token?.key || !state?.positions?.[token.key]) return;
+      updateActivePositionMarketCapRange({ reason: "rolling-sampler" });
+    }, MARKET_CAP_ROLLING_SAMPLE_INTERVAL_MS);
   }
 
   function bindLivePositionWatcher() {

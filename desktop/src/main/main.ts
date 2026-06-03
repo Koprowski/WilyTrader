@@ -67,6 +67,9 @@ interface NormalizedTrade {
   highMarketCapAtMs?: number | null;
   lowMarketCapAfterEntry: number | null;
   lowMarketCapAtMs?: number | null;
+  ohlcSampleCount?: number | null;
+  ohlcSampleIntervalMs?: number | null;
+  ohlcRangeSource?: string | null;
   solInvested: number | null;
   solReceived: number | null;
   buyFeesNative: number | null;
@@ -1647,6 +1650,9 @@ function normalizeWilyTraderTrades(parsed: unknown): NormalizedTrade[] {
       highMarketCapAtMs: parseTimestampMs(position.highMarketCapAt),
       lowMarketCapAfterEntry: numberOrNull(position.lowMarketCapAfterEntry),
       lowMarketCapAtMs: parseTimestampMs(position.lowMarketCapAt),
+      ohlcSampleCount: numberOrNull(position.ohlcSampleCount),
+      ohlcSampleIntervalMs: numberOrNull(position.ohlcSampleIntervalMs),
+      ohlcRangeSource: strOrNull(position.ohlcSource),
       solInvested: sumNullable(numberOrNull(position.investedNative), numberOrNull(position.buyFeesNative)),
       solReceived: coalesceNumber(
         numberOrNull(position.netReceivedNative),
@@ -1685,6 +1691,9 @@ function normalizeMockApeCompatibleTrades(value: unknown): NormalizedTrade[] {
       highMarketCapAtMs: parseTimestampMs(row.highMarketCapAt),
       lowMarketCapAfterEntry: numberOrNull(row.lowMarketCapAfterEntry),
       lowMarketCapAtMs: parseTimestampMs(row.lowMarketCapAt),
+      ohlcSampleCount: numberOrNull(row.ohlcSampleCount),
+      ohlcSampleIntervalMs: numberOrNull(row.ohlcSampleIntervalMs),
+      ohlcRangeSource: strOrNull(row.ohlcSource),
       solInvested: numberOrNull(row.solInvested),
       solReceived: coalesceNumber(
         numberOrNull(row.solReceived),
@@ -2012,7 +2021,9 @@ function reconcileTradeReviewFields(session: ActiveTradeSession, trades: Normali
       ohlcMc,
       ohlcPct: computeTradePctOhlc(trade, ohlcMc),
       ohlcSol,
-      ohlcSource: marketCapSeries.some((point) => point.source === 'position-summary-range')
+      ohlcSource: marketCapSeries.some((point) => point.source === 'rolling-sampler')
+        ? `rolling-sampler:${trade.ohlcRangeSource ?? 'detected-market-cap'}`
+        : marketCapSeries.some((point) => point.source === 'position-summary-range')
         ? 'position-summary-range'
         : marketCapSeries.some((point) => point.source === 'ledger-payload')
         ? 'market-cap-observations'
@@ -2147,13 +2158,14 @@ function buildTradeMarketCapSeries(
   if (entryMs !== null && trade.entryMarketCap !== null) {
     points.push({ timestampMs: entryMs, marketCapUsd: trade.entryMarketCap, source: 'position-summary' });
   }
+  const rangeSource = (trade.ohlcSampleCount ?? 0) > 0 ? 'rolling-sampler' : 'position-summary-range';
   const highMarketCapAtMs = trade.highMarketCapAtMs ?? entryMs;
   if (entryMs !== null && trade.highMarketCapAfterEntry !== null && isWithinTradeWindow(highMarketCapAtMs, entryMs, exitMs)) {
-    points.push({ timestampMs: highMarketCapAtMs, marketCapUsd: trade.highMarketCapAfterEntry, source: 'position-summary-range' });
+    points.push({ timestampMs: highMarketCapAtMs, marketCapUsd: trade.highMarketCapAfterEntry, source: rangeSource });
   }
   const lowMarketCapAtMs = trade.lowMarketCapAtMs ?? entryMs;
   if (entryMs !== null && trade.lowMarketCapAfterEntry !== null && isWithinTradeWindow(lowMarketCapAtMs, entryMs, exitMs)) {
-    points.push({ timestampMs: lowMarketCapAtMs, marketCapUsd: trade.lowMarketCapAfterEntry, source: 'position-summary-range' });
+    points.push({ timestampMs: lowMarketCapAtMs, marketCapUsd: trade.lowMarketCapAfterEntry, source: rangeSource });
   }
   if (exitMs !== null && trade.exitMarketCap !== null) {
     points.push({ timestampMs: exitMs, marketCapUsd: trade.exitMarketCap, source: 'position-summary' });
@@ -2479,6 +2491,7 @@ const XLSX_COLUMNS = [
   'ohlc_sol_high',
   'ohlc_sol_low',
   'ohlc_sol_close',
+  'ohlc_sample_count',
   'ohlc_source',
 ] as const;
 
@@ -2606,6 +2619,7 @@ function buildTradeRow(
     ohlc_sol_high: formatNumber(trade.ohlcSol?.high ?? null),
     ohlc_sol_low: formatNumber(trade.ohlcSol?.low ?? null),
     ohlc_sol_close: formatNumber(trade.ohlcSol?.close ?? null),
+    ohlc_sample_count: formatNumber(trade.ohlcSampleCount ?? null),
     ohlc_source: trade.ohlcSource ?? 'execution-ledger',
   };
 }
