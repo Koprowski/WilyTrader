@@ -2314,6 +2314,8 @@
 
   function writePendingPulseAutoBuy(token, amountNative) {
     if (!token?.address) return false;
+    const createdAt = Date.now();
+    const executionDelayMs = calculateExecutionDelay("buy");
     const pending = {
       sourceTokenAddress: token.address,
       sourceTokenKey: token.key,
@@ -2321,7 +2323,9 @@
       chain: token.chain || "SOL",
       amountNative,
       sourceUrl: window.location.href,
-      createdAt: Date.now(),
+      createdAt,
+      executionDelayMs,
+      executeAfterAt: createdAt + executionDelayMs,
     };
     try {
       window.sessionStorage.setItem(PULSE_AUTO_BUY_KEY, JSON.stringify(pending));
@@ -2392,16 +2396,6 @@
       return;
     }
     const sourceTokenMismatch = Boolean(pending.sourceTokenKey && token.key !== pending.sourceTokenKey);
-    if (sourceTokenMismatch) {
-      emitDiagnostic("pulse-auto-buy-token-mismatch", {
-        pendingTokenKey: pending.sourceTokenKey || null,
-        pendingTokenName: pending.tokenName || null,
-        openedToken: summarizeToken(token),
-      });
-      clearPendingPulseAutoBuy();
-      setStatus(`Pulse auto-buy cancelled: opened token did not match ${pending.tokenName || "the selected Pulse row"}.`);
-      return;
-    }
 
     const readiness = getPulseAutoBuyReadiness(token, pending);
     if (!readiness.ready) {
@@ -2426,15 +2420,25 @@
 
     pendingPulseAutoBuyInFlight = true;
     try {
+      const clickCreatedAt = Number(pending.createdAt || Date.now());
+      const executeAfterAt = Number(pending.executeAfterAt || clickCreatedAt);
+      const remainingDelayMs = Math.max(0, Math.round(executeAfterAt - Date.now()));
       emitDiagnostic("pulse-auto-buy-executing", {
-        sourceTokenMismatch: false,
+        sourceTokenMismatch,
         pendingTokenKey: pending.sourceTokenKey || null,
         pendingTokenName: pending.tokenName || null,
         openedToken: summarizeToken(token),
         amountNative,
+        clickCreatedAt,
+        executeAfterAt,
+        remainingDelayMs,
       });
-      setStatus(`Auto-buying ${formatters.native(pending.amountNative, token.chain)} from Pulse.`);
+      setStatus(sourceTokenMismatch
+        ? `Pulse opened ${token.name || shortenAddress(token.address)}; auto-buying page token ${formatters.native(pending.amountNative, token.chain)}.`
+        : `Auto-buying ${formatters.native(pending.amountNative, token.chain)} from Pulse.`);
       const execution = await buy(amountNative, token, {
+        delayMs: remainingDelayMs,
+        delayStartedAtMs: clickCreatedAt,
         resolveLatestToken: () => {
           updateActiveToken();
           const latest = activeToken?.key === token.key ? activeToken : null;
@@ -3490,7 +3494,12 @@
   }
 
   async function waitForSimulatedExecution(side, token, options = {}) {
-    const delayMs = calculateExecutionDelay(side);
+    const delayMs = Number.isFinite(Number(options.delayMs))
+      ? Math.max(0, Math.round(Number(options.delayMs)))
+      : calculateExecutionDelay(side);
+    const delayStartedAtMs = Number.isFinite(Number(options.delayStartedAtMs))
+      ? Number(options.delayStartedAtMs)
+      : Date.now();
     const priorityFee = Number(side === "buy" ? state.settings.buyPriorityFeeNative : state.settings.sellPriorityFeeNative) || 0;
     const bribeFee = Number(side === "buy" ? state.settings.buyBribeFeeNative : state.settings.sellBribeFeeNative) || 0;
     setStatus(`${side === "buy" ? "Buy" : "Sell"} pending (${delayMs}ms delay, prio ${priorityFee}, bribe ${bribeFee}).`);
@@ -3506,7 +3515,8 @@
       setStatus(`Execution cancelled: price moved ${Math.abs(priceMovePct).toFixed(2)}%.`);
       return null;
     }
-    return { ...delayedToken, executionDelayMs: delayMs, priceMovePct };
+    const totalExecutionDelayMs = Math.max(0, Math.round(Date.now() - delayStartedAtMs));
+    return { ...delayedToken, executionDelayMs: totalExecutionDelayMs, priceMovePct };
   }
 
   async function resolveExecutionTokenAfterDelay(token, options = {}) {
