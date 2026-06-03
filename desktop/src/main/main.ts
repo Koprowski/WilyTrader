@@ -137,6 +137,18 @@ interface TradeExecutionPoint {
   screenshotPath?: string | null;
 }
 
+type XlsxCell = string | {
+  text: string;
+  hyperlink?: string;
+  tooltip?: string;
+};
+
+interface XlsxHyperlink {
+  ref: string;
+  target: string;
+  tooltip?: string;
+}
+
 interface TradeOhlc {
   open: number;
   high: number;
@@ -2531,8 +2543,14 @@ async function writeTradeLogXlsx(session: ActiveTradeSession, trades: Normalized
   const xl = zip.folder('xl');
   xl?.file('workbook.xml', xmlWorkbook());
   xl?.folder('_rels')?.file('workbook.xml.rels', xmlWorkbookRels());
-  xl?.folder('worksheets')?.file('sheet1.xml', xmlWorksheet(XLSX_COLUMNS, rows));
-  xl?.folder('worksheets')?.file('sheet2.xml', xmlWorksheet(EXIT_LEG_COLUMNS, exitLegRows));
+  const tradeSheet = xmlWorksheet(XLSX_COLUMNS, rows);
+  const exitLegSheet = xmlWorksheet(EXIT_LEG_COLUMNS, exitLegRows);
+  const worksheets = xl?.folder('worksheets');
+  worksheets?.file('sheet1.xml', tradeSheet.xml);
+  worksheets?.file('sheet2.xml', exitLegSheet.xml);
+  const worksheetRels = worksheets?.folder('_rels');
+  if (tradeSheet.rels) worksheetRels?.file('sheet1.xml.rels', tradeSheet.rels);
+  if (exitLegSheet.rels) worksheetRels?.file('sheet2.xml.rels', exitLegSheet.rels);
   xl?.file('styles.xml', xmlStyles());
   zip.folder('docProps')?.file('app.xml', xmlAppProps());
   zip.folder('docProps')?.file('core.xml', xmlCoreProps());
@@ -2546,7 +2564,7 @@ function buildTradeRow(
   trade: NormalizedTrade,
   index: number,
   stoppedAtMs: number
-): Record<string, string> {
+): Record<string, XlsxCell> {
   const entry = trade.entryTimestampMs ? new Date(trade.entryTimestampMs) : null;
   const exit = trade.timestampMs ? new Date(trade.timestampMs) : null;
   const hour = entry?.getHours();
@@ -2554,6 +2572,8 @@ function buildTradeRow(
   const timeInTradeSeconds =
     trade.timeInTradeSeconds ??
     (entry && exit ? Math.max(0, Math.round((exit.getTime() - entry.getTime()) / 1000)) : null);
+  const ohlcSource = trade.ohlcSource ?? 'execution-ledger';
+  const ohlcScreenshot = selectTradeOhlcScreenshot(session, trade);
   return {
     source_session: path.basename(session.sessionDir),
     source_log_type: trade.enrichmentSource === 'llm' ? 'wilytrader-desktop-enriched' : 'wilytrader-desktop-audio',
@@ -2622,7 +2642,13 @@ function buildTradeRow(
     ohlc_sol_low: formatNumber(trade.ohlcSol?.low ?? null),
     ohlc_sol_close: formatNumber(trade.ohlcSol?.close ?? null),
     ohlc_sample_count: formatNumber(trade.ohlcSampleCount ?? null),
-    ohlc_source: trade.ohlcSource ?? 'execution-ledger',
+    ohlc_source: ohlcScreenshot
+      ? {
+          text: ohlcSource,
+          hyperlink: filePathToHyperlinkTarget(ohlcScreenshot),
+          tooltip: `Open chart screenshot: ${ohlcScreenshot}`,
+        }
+      : ohlcSource,
   };
 }
 
@@ -2630,7 +2656,7 @@ function buildExitLegRows(
   session: ActiveTradeSession,
   trade: NormalizedTrade,
   tradeIndex: number
-): Array<Record<string, string>> {
+): Array<Record<string, XlsxCell>> {
   const sellExecutions = (trade.executions ?? []).filter((execution) => execution.side === 'sell');
   if (sellExecutions.length === 0) return [];
   const buyExecutions = (trade.executions ?? []).filter((execution) => execution.side === 'buy');
@@ -2688,22 +2714,46 @@ function sumExecutionNumbers(executions: TradeExecutionPoint[], key: keyof Trade
   }, 0);
 }
 
-function xmlWorksheet(columns: readonly string[], rows: Array<Record<string, string>>): string {
+function xmlWorksheet(columns: readonly string[], rows: Array<Record<string, XlsxCell>>): { xml: string; rels: string | null } {
   const header = columns.map((column) => xlsxHeaderLabel(column));
   const allRows = [header, ...rows.map((row) => columns.map((column) => row[column] ?? ''))];
+  const hyperlinks: XlsxHyperlink[] = [];
   const sheetRows = allRows
     .map((row, rowIndex) => {
       const rowNumber = rowIndex + 1;
       const cells = row
         .map((value, columnIndex) => {
           const ref = `${columnLetters(columnIndex + 1)}${rowNumber}`;
-          return `<c r="${ref}" t="inlineStr"><is><t>${escapeXml(value)}</t></is></c>`;
+          const cell = normalizeXlsxCell(value);
+          if (cell.hyperlink) {
+            hyperlinks.push({
+              ref,
+              target: cell.hyperlink,
+              tooltip: cell.tooltip,
+            });
+          }
+          return `<c r="${ref}" t="inlineStr"><is><t>${escapeXml(cell.text)}</t></is></c>`;
         })
         .join('');
       return `<row r="${rowNumber}">${cells}</row>`;
     })
     .join('');
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${sheetRows}</sheetData></worksheet>`;
+  const hyperlinkXml = hyperlinks.length > 0
+    ? `<hyperlinks>${hyperlinks.map((link, index) => `<hyperlink ref="${link.ref}" r:id="rId${index + 1}"${link.tooltip ? ` tooltip="${escapeXmlAttribute(link.tooltip)}"` : ''}/>`).join('')}</hyperlinks>`
+    : '';
+  return {
+    xml: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData>${sheetRows}</sheetData>${hyperlinkXml}</worksheet>`,
+    rels: hyperlinks.length > 0 ? xmlWorksheetRels(hyperlinks) : null,
+  };
+}
+
+function normalizeXlsxCell(value: XlsxCell): { text: string; hyperlink?: string; tooltip?: string } {
+  if (typeof value === 'string') return { text: value };
+  return {
+    text: value.text,
+    hyperlink: value.hyperlink,
+    tooltip: value.tooltip,
+  };
 }
 
 function xlsxHeaderLabel(column: string): string {
@@ -2725,6 +2775,10 @@ function xmlWorkbook(): string {
 
 function xmlWorkbookRels(): string {
   return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>';
+}
+
+function xmlWorksheetRels(hyperlinks: XlsxHyperlink[]): string {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${hyperlinks.map((link, index) => `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="${escapeXmlAttribute(link.target)}" TargetMode="External"/>`).join('')}</Relationships>`;
 }
 
 function xmlStyles(): string {
@@ -2860,7 +2914,19 @@ function normalizeTradeExecutionPoint(execution: Record<string, unknown>): Trade
     costBasisNative: numberOrNull(execution.costBasisNative),
     pnlNative: numberOrNull(execution.pnlNative),
     pnlPct: numberOrNull(execution.pnlPct),
+    screenshotPath: strOrNull(execution.screenshotPath),
   };
+}
+
+function selectTradeOhlcScreenshot(session: ActiveTradeSession, trade: NormalizedTrade): string | null {
+  const fromExecutions = (trade.executions ?? [])
+    .map((execution) => execution.screenshotPath)
+    .filter((screenshotPath): screenshotPath is string => Boolean(screenshotPath && fs.existsSync(screenshotPath)));
+  const candidates = fromExecutions.length > 0 ? fromExecutions : findTradeScreenshots(session, trade);
+  if (candidates.length === 0) return null;
+  const sorted = [...new Set(candidates)].sort((a, b) => a.localeCompare(b));
+  const sellScreenshot = [...sorted].reverse().find((screenshot) => /(?:^|-|\\|\/)sell(?:-|\.|\\|\/)/i.test(screenshot));
+  return sellScreenshot ?? sorted[sorted.length - 1] ?? null;
 }
 
 function findTradeScreenshots(session: ActiveTradeSession, trade: NormalizedTrade): string[] {
@@ -4652,6 +4718,15 @@ function markdownPath(value: string): string {
   return value.replace(/\\/g, '/').split('/').map(encodeURIComponent).join('/');
 }
 
+function filePathToHyperlinkTarget(filePath: string): string {
+  const normalized = path.resolve(filePath).replace(/\\/g, '/');
+  const encoded = normalized
+    .split('/')
+    .map((segment, index) => (index === 0 && /^[A-Za-z]:$/.test(segment) ? segment : encodeURIComponent(segment)))
+    .join('/');
+  return `file:///${encoded}`;
+}
+
 function sanitizeFilePart(value: unknown): string {
   const cleaned = String(value ?? '').trim().replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '');
   return cleaned || 'wilytrader';
@@ -4675,6 +4750,10 @@ function escapeXml(value: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
+}
+
+function escapeXmlAttribute(value: string): string {
+  return escapeXml(value);
 }
 
 function writeJson(filePath: string, value: unknown): void {
