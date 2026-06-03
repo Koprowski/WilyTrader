@@ -4502,7 +4502,7 @@
       .filter((execution) => executionIds.has(execution.id) && getExecutionTimestampMs(execution) >= cutoffMs)
       .forEach((execution) => {
         const price = getAxiomExecutionMarkerPrice(execution, token);
-        const time = Math.floor(Date.now() / 1000);
+        const time = Math.floor((getExecutionTimestampMs(execution) || Date.now()) / 1000);
         if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(time)) return;
         postAxiomChartBridgeMessage({
           op: "upsertMarker",
@@ -4551,11 +4551,13 @@
 
   function buildAxiomExecutionMarkerStyle(execution, price) {
     const isBuy = execution.side === "buy";
+    const color = isBuy ? "#22c55e" : "#f97316";
+    const background = isBuy ? "rgba(34, 197, 94, 0.9)" : "rgba(249, 115, 22, 0.92)";
     return {
-      color: isBuy ? "#22c55e" : "#ef4444",
+      color,
       shape: "flag",
       text: `${isBuy ? "BUY" : "SELL"} ${formatters.usd(price)}`,
-      background: isBuy ? "rgba(34, 197, 94, 0.9)" : "rgba(239, 68, 68, 0.9)",
+      background,
       textColor: "#ffffff",
       fontSize: 10,
     };

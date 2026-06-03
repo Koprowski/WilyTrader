@@ -612,7 +612,7 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
   }
 
   function normalizeMarkerStyle(side: ExecutionMarkerSide, style: ExecutionMarkerStyle): ExecutionMarkerStyle {
-    const color = side === "buy" ? "#22c55e" : "#ef4444";
+    const color = side === "buy" ? "#22c55e" : "#f97316";
     return {
       color: style.color || color,
       textColor: "#ffffff",
