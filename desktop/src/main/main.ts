@@ -137,10 +137,13 @@ interface TradeExecutionPoint {
   screenshotPath?: string | null;
 }
 
-type XlsxCell = string | {
+type XlsxStyleKey = 'integer' | 'sol3' | 'percent1' | 'nativePrice';
+
+type XlsxCell = string | number | {
   text: string;
   hyperlink?: string;
   tooltip?: string;
+  style?: XlsxStyleKey;
 };
 
 interface XlsxHyperlink {
@@ -2533,6 +2536,70 @@ const EXIT_LEG_COLUMNS = [
   'leg_pnl_pct_after_allocated_entry_fee',
 ] as const;
 
+const XLSX_STYLE_IDS: Record<XlsxStyleKey, number> = {
+  integer: 1,
+  sol3: 2,
+  percent1: 3,
+  nativePrice: 4,
+};
+
+const TRADE_LOG_COLUMN_STYLES: Partial<Record<typeof XLSX_COLUMNS[number], XlsxStyleKey>> = {
+  trade_id: 'integer',
+  time_in_trade_seconds: 'integer',
+  entry_mc_actual: 'integer',
+  target_exit_low_mc: 'integer',
+  target_exit_high_mc: 'integer',
+  stop_loss_mc: 'integer',
+  exit_mc_actual: 'integer',
+  sol_invested: 'sol3',
+  sol_received: 'sol3',
+  pnl_sol: 'sol3',
+  pnl_percentage: 'percent1',
+  Hour: 'integer',
+  WeekdayNum: 'integer',
+  N_score: 'integer',
+  I_score: 'integer',
+  C_score: 'integer',
+  S_score: 'integer',
+  NICS_score: 'integer',
+  counts_toward_50: 'integer',
+  hard_reset: 'integer',
+  running_count: 'integer',
+  non_nics_pnl_pct: 'percent1',
+  cluster_pnl_pct: 'percent1',
+  ohlc_mc_open: 'integer',
+  ohlc_mc_high: 'integer',
+  ohlc_mc_low: 'integer',
+  ohlc_mc_close: 'integer',
+  ohlc_pct_high: 'percent1',
+  ohlc_pct_low: 'percent1',
+  ohlc_pct_close: 'percent1',
+  ohlc_sol_open: 'sol3',
+  ohlc_sol_high: 'sol3',
+  ohlc_sol_low: 'sol3',
+  ohlc_sol_close: 'sol3',
+  ohlc_sample_count: 'integer',
+};
+
+const EXIT_LEG_COLUMN_STYLES: Partial<Record<typeof EXIT_LEG_COLUMNS[number], XlsxStyleKey>> = {
+  trade_id: 'integer',
+  exit_leg_number: 'integer',
+  requested_sell_pct_of_remaining: 'percent1',
+  sell_pct_of_original_position: 'percent1',
+  tokens_sold: 'nativePrice',
+  exit_mc: 'integer',
+  exit_price_native: 'nativePrice',
+  gross_received: 'sol3',
+  exit_fee: 'sol3',
+  net_received: 'sol3',
+  allocated_entry_cost: 'sol3',
+  allocated_entry_fee: 'sol3',
+  leg_total_cost_basis: 'sol3',
+  leg_pnl_before_allocated_entry_fee: 'sol3',
+  leg_pnl_after_allocated_entry_fee: 'sol3',
+  leg_pnl_pct_after_allocated_entry_fee: 'percent1',
+};
+
 async function writeTradeLogXlsx(session: ActiveTradeSession, trades: NormalizedTrade[], stoppedAtMs: number): Promise<string> {
   const xlsxPath = path.join(session.sessionDir, 'trade_log.xlsx');
   const rows = trades.map((trade, index) => buildTradeRow(session, trade, index + 1, stoppedAtMs));
@@ -2543,8 +2610,8 @@ async function writeTradeLogXlsx(session: ActiveTradeSession, trades: Normalized
   const xl = zip.folder('xl');
   xl?.file('workbook.xml', xmlWorkbook());
   xl?.folder('_rels')?.file('workbook.xml.rels', xmlWorkbookRels());
-  const tradeSheet = xmlWorksheet(XLSX_COLUMNS, rows);
-  const exitLegSheet = xmlWorksheet(EXIT_LEG_COLUMNS, exitLegRows);
+  const tradeSheet = xmlWorksheet(XLSX_COLUMNS, rows, TRADE_LOG_COLUMN_STYLES);
+  const exitLegSheet = xmlWorksheet(EXIT_LEG_COLUMNS, exitLegRows, EXIT_LEG_COLUMN_STYLES);
   const worksheets = xl?.folder('worksheets');
   worksheets?.file('sheet1.xml', tradeSheet.xml);
   worksheets?.file('sheet2.xml', exitLegSheet.xml);
@@ -2579,7 +2646,7 @@ function buildTradeRow(
     source_log_type: trade.enrichmentSource === 'llm' ? 'wilytrader-desktop-enriched' : 'wilytrader-desktop-audio',
     source_folder_archived_path: session.sessionDir,
     processed_at: new Date().toISOString(),
-    trade_id: String(index),
+    trade_id: xlsxInteger(index),
     token_name: trade.tokenName,
     trade_date: formatTradeDate(tradeDate),
     video_start_time: formatTradeTime(session.sessionStartedAtMs),
@@ -2587,17 +2654,17 @@ function buildTradeRow(
     entry_time_inferred: formatTradeTime(trade.entryTimestampMs),
     exit_commentary_time: formatSessionOffsetTime(session, trade.exitCommentaryOffsetMs ?? null),
     exit_time_actual: formatTradeTime(trade.timestampMs),
-    time_in_trade_seconds: timeInTradeSeconds === null ? '' : String(timeInTradeSeconds),
+    time_in_trade_seconds: xlsxInteger(timeInTradeSeconds),
     video_end_time: formatTradeTime(stoppedAtMs),
-    entry_mc_actual: formatNumber(trade.entryMarketCap),
-    target_exit_low_mc: formatNumber(trade.targetLowMc ?? null),
-    target_exit_high_mc: formatNumber(trade.targetHighMc ?? null),
-    stop_loss_mc: formatNumber(trade.stopLossMc ?? null),
-    exit_mc_actual: formatNumber(trade.exitMarketCap),
-    sol_invested: formatNumber(trade.solInvested),
-    sol_received: formatNumber(normalizedSolReceived(trade)),
-    pnl_sol: formatNumber(normalizedPnlSol(trade)),
-    pnl_percentage: formatPercentNumber(normalizedPnlPercentage(trade)),
+    entry_mc_actual: xlsxInteger(trade.entryMarketCap),
+    target_exit_low_mc: xlsxInteger(trade.targetLowMc ?? null),
+    target_exit_high_mc: xlsxInteger(trade.targetHighMc ?? null),
+    stop_loss_mc: xlsxInteger(trade.stopLossMc ?? null),
+    exit_mc_actual: xlsxInteger(trade.exitMarketCap),
+    sol_invested: xlsxDecimal(trade.solInvested, 3),
+    sol_received: xlsxDecimal(normalizedSolReceived(trade), 3),
+    pnl_sol: xlsxDecimal(normalizedPnlSol(trade), 3),
+    pnl_percentage: xlsxPercent(normalizedPnlPercentage(trade)),
     rationale: trade.rationale ?? '',
     pre_transcript_excerpt: trade.preTranscriptExcerpt ?? '',
     post_transcript_excerpt: trade.postTranscriptExcerpt ?? '',
@@ -2605,43 +2672,43 @@ function buildTradeRow(
     notes: buildTradeNotes(trade, entry, exit),
     needs_review: formatBoolean(trade.needsReview),
     mockape_trade_id: trade.id,
-    Hour: hour === undefined ? '' : String(hour),
+    Hour: xlsxInteger(hour ?? null),
     Weekday: entry ? entry.toLocaleDateString('en-US', { weekday: 'long' }) : '',
-    WeekdayNum: entry ? String(entry.getDay()) : '',
+    WeekdayNum: xlsxInteger(entry ? entry.getDay() : null),
     TimeBucket: formatTradeTimeBucket(entry),
     meta_cluster_id: trade.metaClusterId ?? 'unknown',
     meta_name: trade.metaName ?? 'unknown',
-    N_score: formatNumber(trade.nScore ?? null),
+    N_score: xlsxInteger(trade.nScore ?? null),
     N_why: trade.nWhy ?? '',
-    I_score: formatNumber(trade.iScore ?? null),
+    I_score: xlsxInteger(trade.iScore ?? null),
     I_why: trade.iWhy ?? '',
-    C_score: formatNumber(trade.cScore ?? null),
+    C_score: xlsxInteger(trade.cScore ?? null),
     C_why: trade.cWhy ?? '',
-    S_score: formatNumber(trade.sScore ?? null),
+    S_score: xlsxInteger(trade.sScore ?? null),
     S_why: trade.sWhy ?? '',
-    NICS_score: formatNumber(trade.nicsScore ?? null),
+    NICS_score: xlsxInteger(trade.nicsScore ?? null),
     size_ok: formatBoolean(trade.sizeOk),
     zone_ok: formatBoolean(trade.zoneOk),
     cooldown_ok: formatBoolean(trade.cooldownOk),
     trade_type: trade.tradeType ?? '',
-    counts_toward_50: formatCount(trade.countsToward50),
-    hard_reset: formatBoolean(trade.hardReset),
-    running_count: formatNumber(trade.runningCount ?? null),
-    non_nics_pnl_pct: formatPercentNumber(trade.nonNicsPnlPct ?? null),
-    cluster_pnl_pct: formatPercentNumber(trade.clusterPnlPct ?? null),
+    counts_toward_50: xlsxBooleanCount(trade.countsToward50),
+    hard_reset: xlsxBooleanCount(trade.hardReset),
+    running_count: xlsxInteger(trade.runningCount ?? null),
+    non_nics_pnl_pct: xlsxPercent(trade.nonNicsPnlPct ?? null),
+    cluster_pnl_pct: xlsxPercent(trade.clusterPnlPct ?? null),
     llm_grade_notes: trade.llmGradeNotes ?? '',
-    ohlc_mc_open: formatNumber(trade.ohlcMc?.open ?? null),
-    ohlc_mc_high: formatNumber(trade.ohlcMc?.high ?? null),
-    ohlc_mc_low: formatNumber(trade.ohlcMc?.low ?? null),
-    ohlc_mc_close: formatNumber(trade.ohlcMc?.close ?? null),
-    ohlc_pct_high: formatPercentNumber(trade.ohlcPct?.high ?? null),
-    ohlc_pct_low: formatPercentNumber(trade.ohlcPct?.low ?? null),
-    ohlc_pct_close: formatPercentNumber(trade.ohlcPct?.close ?? null),
-    ohlc_sol_open: formatNumber(trade.ohlcSol?.open ?? null),
-    ohlc_sol_high: formatNumber(trade.ohlcSol?.high ?? null),
-    ohlc_sol_low: formatNumber(trade.ohlcSol?.low ?? null),
-    ohlc_sol_close: formatNumber(trade.ohlcSol?.close ?? null),
-    ohlc_sample_count: formatNumber(trade.ohlcSampleCount ?? null),
+    ohlc_mc_open: xlsxInteger(trade.ohlcMc?.open ?? null),
+    ohlc_mc_high: xlsxInteger(trade.ohlcMc?.high ?? null),
+    ohlc_mc_low: xlsxInteger(trade.ohlcMc?.low ?? null),
+    ohlc_mc_close: xlsxInteger(trade.ohlcMc?.close ?? null),
+    ohlc_pct_high: xlsxPercent(trade.ohlcPct?.high ?? null),
+    ohlc_pct_low: xlsxPercent(trade.ohlcPct?.low ?? null),
+    ohlc_pct_close: xlsxPercent(trade.ohlcPct?.close ?? null),
+    ohlc_sol_open: xlsxDecimal(trade.ohlcSol?.open ?? null, 3),
+    ohlc_sol_high: xlsxDecimal(trade.ohlcSol?.high ?? null, 3),
+    ohlc_sol_low: xlsxDecimal(trade.ohlcSol?.low ?? null, 3),
+    ohlc_sol_close: xlsxDecimal(trade.ohlcSol?.close ?? null, 3),
+    ohlc_sample_count: xlsxInteger(trade.ohlcSampleCount ?? null),
     ohlc_source: ohlcScreenshot
       ? {
           text: ohlcSource,
@@ -2683,26 +2750,26 @@ function buildExitLegRows(
       : null;
     return {
       source_session: path.basename(session.sessionDir),
-      trade_id: String(tradeIndex),
+      trade_id: xlsxInteger(tradeIndex),
       mockape_trade_id: trade.id,
       token_name: trade.tokenName,
-      exit_leg_number: String(legIndex + 1),
+      exit_leg_number: xlsxInteger(legIndex + 1),
       execution_id: execution.id ?? '',
       exit_time: formatTradeTime(execution.timestampMs),
-      requested_sell_pct_of_remaining: formatPercentNumber(execution.requestedSellPct),
-      sell_pct_of_original_position: formatPercentNumber(originalPositionRatio * 100),
-      tokens_sold: formatNumber(execution.tokenAmount),
-      exit_mc: formatNumber(execution.marketCapUsd),
-      exit_price_native: formatNumber(execution.unitPriceNative),
-      gross_received: formatNumber(grossReceived),
-      exit_fee: formatNumber(execution.feeNative),
-      net_received: formatNumber(netReceived),
-      allocated_entry_cost: formatNumber(allocatedEntryCost),
-      allocated_entry_fee: formatNumber(allocatedEntryFee),
-      leg_total_cost_basis: formatNumber(legTotalCostBasis),
-      leg_pnl_before_allocated_entry_fee: formatNumber(legPnlBeforeAllocatedEntryFee),
-      leg_pnl_after_allocated_entry_fee: formatNumber(legPnlAfterAllocatedEntryFee),
-      leg_pnl_pct_after_allocated_entry_fee: formatPercentNumber(legPnlPctAfterAllocatedEntryFee),
+      requested_sell_pct_of_remaining: xlsxPercent(execution.requestedSellPct),
+      sell_pct_of_original_position: xlsxPercent(originalPositionRatio * 100),
+      tokens_sold: xlsxDecimal(execution.tokenAmount, 6),
+      exit_mc: xlsxInteger(execution.marketCapUsd),
+      exit_price_native: xlsxDecimal(execution.unitPriceNative, 12),
+      gross_received: xlsxDecimal(grossReceived, 3),
+      exit_fee: xlsxDecimal(execution.feeNative, 3),
+      net_received: xlsxDecimal(netReceived, 3),
+      allocated_entry_cost: xlsxDecimal(allocatedEntryCost, 3),
+      allocated_entry_fee: xlsxDecimal(allocatedEntryFee, 3),
+      leg_total_cost_basis: xlsxDecimal(legTotalCostBasis, 3),
+      leg_pnl_before_allocated_entry_fee: xlsxDecimal(legPnlBeforeAllocatedEntryFee, 3),
+      leg_pnl_after_allocated_entry_fee: xlsxDecimal(legPnlAfterAllocatedEntryFee, 3),
+      leg_pnl_pct_after_allocated_entry_fee: xlsxPercent(legPnlPctAfterAllocatedEntryFee),
     };
   });
 }
@@ -2714,7 +2781,11 @@ function sumExecutionNumbers(executions: TradeExecutionPoint[], key: keyof Trade
   }, 0);
 }
 
-function xmlWorksheet(columns: readonly string[], rows: Array<Record<string, XlsxCell>>): { xml: string; rels: string | null } {
+function xmlWorksheet(
+  columns: readonly string[],
+  rows: Array<Record<string, XlsxCell>>,
+  columnStyles: Partial<Record<string, XlsxStyleKey>> = {}
+): { xml: string; rels: string | null } {
   const header = columns.map((column) => xlsxHeaderLabel(column));
   const allRows = [header, ...rows.map((row) => columns.map((column) => row[column] ?? ''))];
   const hyperlinks: XlsxHyperlink[] = [];
@@ -2724,7 +2795,9 @@ function xmlWorksheet(columns: readonly string[], rows: Array<Record<string, Xls
       const cells = row
         .map((value, columnIndex) => {
           const ref = `${columnLetters(columnIndex + 1)}${rowNumber}`;
-          const cell = normalizeXlsxCell(value);
+          const column = columns[columnIndex];
+          const style = rowIndex === 0 ? undefined : columnStyles[column];
+          const cell = normalizeXlsxCell(value, style);
           if (cell.hyperlink) {
             hyperlinks.push({
               ref,
@@ -2732,7 +2805,9 @@ function xmlWorksheet(columns: readonly string[], rows: Array<Record<string, Xls
               tooltip: cell.tooltip,
             });
           }
-          return `<c r="${ref}" t="inlineStr"><is><t>${escapeXml(cell.text)}</t></is></c>`;
+          const styleAttr = cell.styleId ? ` s="${cell.styleId}"` : '';
+          if (cell.number !== undefined) return `<c r="${ref}"${styleAttr}><v>${xlsxNumberValue(cell.number)}</v></c>`;
+          return `<c r="${ref}"${styleAttr} t="inlineStr"><is><t>${escapeXml(cell.text)}</t></is></c>`;
         })
         .join('');
       return `<row r="${rowNumber}">${cells}</row>`;
@@ -2747,13 +2822,27 @@ function xmlWorksheet(columns: readonly string[], rows: Array<Record<string, Xls
   };
 }
 
-function normalizeXlsxCell(value: XlsxCell): { text: string; hyperlink?: string; tooltip?: string } {
-  if (typeof value === 'string') return { text: value };
+function normalizeXlsxCell(
+  value: XlsxCell,
+  columnStyle?: XlsxStyleKey
+): { text: string; number?: number; hyperlink?: string; tooltip?: string; styleId?: number } {
+  const styleId = valueStyleId(typeof value === 'object' && value !== null ? value.style ?? columnStyle : columnStyle);
+  if (typeof value === 'number') return { text: '', number: value, styleId };
+  if (typeof value === 'string') return { text: value, styleId };
   return {
     text: value.text,
     hyperlink: value.hyperlink,
     tooltip: value.tooltip,
+    styleId,
   };
+}
+
+function valueStyleId(style?: XlsxStyleKey): number | undefined {
+  return style ? XLSX_STYLE_IDS[style] : undefined;
+}
+
+function xlsxNumberValue(value: number): string {
+  return Number.isFinite(value) ? String(value) : '0';
 }
 
 function xlsxHeaderLabel(column: string): string {
@@ -2782,7 +2871,28 @@ function xmlWorksheetRels(hyperlinks: XlsxHyperlink[]): string {
 }
 
 function xmlStyles(): string {
-  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="1"><xf xfId="0"/></cellXfs></styleSheet>';
+  return [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">',
+    '<numFmts count="3">',
+    '<numFmt numFmtId="164" formatCode="0.000"/>',
+    '<numFmt numFmtId="165" formatCode="0.0%"/>',
+    '<numFmt numFmtId="166" formatCode="0.000000000000"/>',
+    '</numFmts>',
+    '<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>',
+    '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>',
+    '<borders count="1"><border/></borders>',
+    '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>',
+    '<cellXfs count="5">',
+    '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>',
+    '<xf numFmtId="1" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>',
+    '<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>',
+    '<xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>',
+    '<xf numFmtId="166" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>',
+    '</cellXfs>',
+    '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>',
+    '</styleSheet>',
+  ].join('');
 }
 
 function xmlAppProps(): string {
@@ -4686,22 +4796,29 @@ function formatPercent(value: number | null): string {
   return value === null ? 'unknown' : `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
 }
 
-function formatNumber(value: number | null): string {
-  return value === null ? '' : String(value);
+function xlsxInteger(value: number | null | undefined): number | '' {
+  return Number.isFinite(Number(value)) ? Math.round(Number(value)) : '';
 }
 
-function formatPercentNumber(value: number | null): string {
-  return value === null ? '' : value.toFixed(2);
+function xlsxDecimal(value: number | null | undefined, decimals: number): number | '' {
+  if (!Number.isFinite(Number(value))) return '';
+  const factor = 10 ** decimals;
+  return Math.round(Number(value) * factor) / factor;
+}
+
+function xlsxPercent(value: number | null | undefined): number | '' {
+  if (!Number.isFinite(Number(value))) return '';
+  return xlsxDecimal(Number(value) / 100, 3);
+}
+
+function xlsxBooleanCount(value: boolean | null | undefined): number | '' {
+  if (value === null || value === undefined) return '';
+  return value ? 1 : 0;
 }
 
 function formatBoolean(value: boolean | null | undefined): string {
   if (value === null || value === undefined) return '';
   return value ? 'true' : 'false';
-}
-
-function formatCount(value: boolean | null | undefined): string {
-  if (value === null || value === undefined) return '';
-  return value ? '1' : '0';
 }
 
 function buildTradeNotes(trade: NormalizedTrade, entry: Date | null, exit: Date | null): string {
