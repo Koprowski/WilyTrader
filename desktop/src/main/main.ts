@@ -31,6 +31,7 @@ interface ActiveTradeSession {
   inputsDir: string;
   audioDir: string;
   screenshotDir: string;
+  screenshotMetadataDir: string;
   sessionStartedAtMs: number;
   transcriptSegments: TranscriptSegment[];
   audioChunks: AudioChunkMeta[];
@@ -63,7 +64,9 @@ interface NormalizedTrade {
   entryMarketCap: number | null;
   exitMarketCap: number | null;
   highMarketCapAfterEntry: number | null;
+  highMarketCapAtMs?: number | null;
   lowMarketCapAfterEntry: number | null;
+  lowMarketCapAtMs?: number | null;
   solInvested: number | null;
   solReceived: number | null;
   buyFeesNative: number | null;
@@ -487,14 +490,17 @@ function startSession(): WilyTraderDesktopStatus {
   const inputsDir = path.join(sessionDir, 'Inputs');
   const audioDir = path.join(inputsDir, 'audio');
   const screenshotDir = path.join(inputsDir, 'trade-screenshots');
+  const screenshotMetadataDir = path.join(inputsDir, 'trade-screenshot-metadata');
   fs.mkdirSync(audioDir, { recursive: true });
   fs.mkdirSync(screenshotDir, { recursive: true });
+  fs.mkdirSync(screenshotMetadataDir, { recursive: true });
 
   activeSession = {
     sessionDir,
     inputsDir,
     audioDir,
     screenshotDir,
+    screenshotMetadataDir,
     sessionStartedAtMs,
     transcriptSegments: [],
     audioChunks: [],
@@ -1041,10 +1047,11 @@ function saveBridgeScreenshot(
   const fileName = `${formatSessionStamp(new Date(capturedAtMs))}-${side}-${token}-${execution}.png`;
   const filePath = path.join(session.screenshotDir, fileName);
   fs.writeFileSync(filePath, Buffer.from(match[1], 'base64'));
-  writeJson(`${filePath}.json`, {
+  writeJson(path.join(session.screenshotMetadataDir, `${fileName}.json`), {
     capturedAt: new Date(capturedAtMs).toISOString(),
     capturedAtMs,
     capturedOffsetMs: capturedAtMs - session.sessionStartedAtMs,
+    screenshotPath: filePath,
     event,
     captureRect: screenshot.captureRect ?? null,
     source: screenshot.source ?? 'chrome-tab-capture',
@@ -1074,10 +1081,11 @@ async function saveDesktopTradeScreenshot(
     const fileName = `${formatSessionStamp(new Date(capturedAtMs))}-${side}-${token}-${execution}-desktop.png`;
     const filePath = path.join(session.screenshotDir, fileName);
     fs.writeFileSync(filePath, source.thumbnail.toPNG());
-    writeJson(`${filePath}.json`, {
+    writeJson(path.join(session.screenshotMetadataDir, `${fileName}.json`), {
       capturedAt: new Date(capturedAtMs).toISOString(),
       capturedAtMs,
       capturedOffsetMs: capturedAtMs - session.sessionStartedAtMs,
+      screenshotPath: filePath,
       event,
       source: 'electron-desktop-capturer',
       desktopSource: {
@@ -1636,7 +1644,9 @@ function normalizeWilyTraderTrades(parsed: unknown): NormalizedTrade[] {
       entryMarketCap: numberOrNull(position.entryMarketCapVwapUsd),
       exitMarketCap: numberOrNull(position.exitMarketCapVwapUsd),
       highMarketCapAfterEntry: numberOrNull(position.highMarketCapAfterEntry),
+      highMarketCapAtMs: parseTimestampMs(position.highMarketCapAt),
       lowMarketCapAfterEntry: numberOrNull(position.lowMarketCapAfterEntry),
+      lowMarketCapAtMs: parseTimestampMs(position.lowMarketCapAt),
       solInvested: sumNullable(numberOrNull(position.investedNative), numberOrNull(position.buyFeesNative)),
       solReceived: coalesceNumber(
         numberOrNull(position.netReceivedNative),
@@ -1672,7 +1682,9 @@ function normalizeMockApeCompatibleTrades(value: unknown): NormalizedTrade[] {
       entryMarketCap: numberOrNull(row.entryMarketCap),
       exitMarketCap: numberOrNull(row.exitMarketCap),
       highMarketCapAfterEntry: numberOrNull(row.highMarketCapAfterEntry),
+      highMarketCapAtMs: parseTimestampMs(row.highMarketCapAt),
       lowMarketCapAfterEntry: numberOrNull(row.lowMarketCapAfterEntry),
+      lowMarketCapAtMs: parseTimestampMs(row.lowMarketCapAt),
       solInvested: numberOrNull(row.solInvested),
       solReceived: coalesceNumber(
         numberOrNull(row.solReceived),
@@ -2135,11 +2147,13 @@ function buildTradeMarketCapSeries(
   if (entryMs !== null && trade.entryMarketCap !== null) {
     points.push({ timestampMs: entryMs, marketCapUsd: trade.entryMarketCap, source: 'position-summary' });
   }
-  if (entryMs !== null && trade.highMarketCapAfterEntry !== null) {
-    points.push({ timestampMs: entryMs, marketCapUsd: trade.highMarketCapAfterEntry, source: 'position-summary-range' });
+  const highMarketCapAtMs = trade.highMarketCapAtMs ?? entryMs;
+  if (entryMs !== null && trade.highMarketCapAfterEntry !== null && isWithinTradeWindow(highMarketCapAtMs, entryMs, exitMs)) {
+    points.push({ timestampMs: highMarketCapAtMs, marketCapUsd: trade.highMarketCapAfterEntry, source: 'position-summary-range' });
   }
-  if (entryMs !== null && trade.lowMarketCapAfterEntry !== null) {
-    points.push({ timestampMs: entryMs, marketCapUsd: trade.lowMarketCapAfterEntry, source: 'position-summary-range' });
+  const lowMarketCapAtMs = trade.lowMarketCapAtMs ?? entryMs;
+  if (entryMs !== null && trade.lowMarketCapAfterEntry !== null && isWithinTradeWindow(lowMarketCapAtMs, entryMs, exitMs)) {
+    points.push({ timestampMs: lowMarketCapAtMs, marketCapUsd: trade.lowMarketCapAfterEntry, source: 'position-summary-range' });
   }
   if (exitMs !== null && trade.exitMarketCap !== null) {
     points.push({ timestampMs: exitMs, marketCapUsd: trade.exitMarketCap, source: 'position-summary' });
@@ -2153,6 +2167,12 @@ function buildTradeMarketCapSeries(
       seen.add(key);
       return true;
     });
+}
+
+function isWithinTradeWindow(timestampMs: number | null, entryMs: number, exitMs: number | null): timestampMs is number {
+  if (timestampMs === null || !Number.isFinite(timestampMs)) return false;
+  if (timestampMs < entryMs) return false;
+  return exitMs === null || timestampMs <= exitMs;
 }
 
 function computeNumberOhlc(points: number[]): TradeOhlc | null {
@@ -2553,9 +2573,9 @@ function buildTradeRow(
     Hour: hour === undefined ? '' : String(hour),
     Weekday: entry ? entry.toLocaleDateString('en-US', { weekday: 'long' }) : '',
     WeekdayNum: entry ? String(entry.getDay()) : '',
-    TimeBucket: hour === undefined ? '' : hour < 6 ? 'Overnight' : hour < 12 ? 'Morning' : hour < 18 ? 'Afternoon' : 'Evening',
-    meta_cluster_id: trade.metaClusterId ?? '',
-    meta_name: trade.metaName ?? '',
+    TimeBucket: formatTradeTimeBucket(entry),
+    meta_cluster_id: trade.metaClusterId ?? 'unknown',
+    meta_name: trade.metaName ?? 'unknown',
     N_score: formatNumber(trade.nScore ?? null),
     N_why: trade.nWhy ?? '',
     I_score: formatNumber(trade.iScore ?? null),
@@ -2671,6 +2691,7 @@ function xmlWorksheet(columns: readonly string[], rows: Array<Record<string, str
 }
 
 function xlsxHeaderLabel(column: string): string {
+  if (column === 'mockape_trade_id') return 'source_trade_id';
   return column === 'entry_time_inferred' ? 'entry_time_actual' : column;
 }
 
@@ -2794,7 +2815,7 @@ function filterPositionExecutions(
     .filter((execution) => {
       if (executionIds.size > 0 && executionIds.has(strOrNull(execution.id) ?? '')) return true;
       if (positionId && strOrNull(execution.positionId) === positionId) return true;
-      if (tokenAddress && strOrNull(execution.tokenAddress) === tokenAddress) return true;
+      if (!positionId && executionIds.size === 0 && tokenAddress && strOrNull(execution.tokenAddress) === tokenAddress) return true;
       return false;
     })
     .sort((a, b) => (parseTimestampMs(a.timestampMs ?? a.timestamp) ?? 0) - (parseTimestampMs(b.timestampMs ?? b.timestamp) ?? 0));
@@ -4528,6 +4549,23 @@ function formatSessionOffsetTime(session: ActiveTradeSession, offsetMs: number |
   return offsetMs === null || !Number.isFinite(offsetMs)
     ? ''
     : formatTradeTime(session.sessionStartedAtMs + offsetMs);
+}
+
+function formatTradeTimeBucket(entry: Date | null): string {
+  if (!entry) return '';
+  const hour = entry.getHours();
+  const day = entry.getDay();
+  const isWeekend = day === 0 || day === 6;
+  if (isWeekend) {
+    if (hour < 2 || hour >= 18) return '6 PM - 2 AM';
+    if (hour < 6) return '2 AM - 6 AM';
+    if (hour < 12) return '6 AM - 12 PM';
+    return '12 PM - 6 PM';
+  }
+  if (hour < 6) return '12 AM - 6 AM';
+  if (hour < 12) return '6 AM - 12 PM';
+  if (hour < 18) return '12 PM - 6 PM';
+  return '6 PM - 12 AM';
 }
 
 function formatDollars(value: number | null): string {

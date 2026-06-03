@@ -195,6 +195,8 @@
   let lastLivePositionDiagnosticKey = "";
   let lastPulseAutoBuyDiagnosticAt = 0;
   let lastPulseAutoBuyDiagnosticKey = "";
+  let lastTradeButtonExecutionKey = "";
+  let lastTradeButtonExecutionAt = 0;
   let pulseQuickBuyTokenLabels = new Map();
   let pendingPulseAutoBuyCheckId = null;
   let updateCheckTimerId = null;
@@ -1346,6 +1348,7 @@
     `;
     document.documentElement.appendChild(root);
     root.addEventListener("pointerdown", stopOverlayEvent, true);
+    root.addEventListener("pointerup", handleTradeButtonPointerUp, true);
     root.addEventListener("mousedown", handleOverlayMouseDown, true);
     root.addEventListener("click", handleClick, true);
     root.addEventListener("contextmenu", handleOverlayContextMenu);
@@ -1445,6 +1448,48 @@
     if (!root?.contains(event.target)) return;
     if (event.button !== 2) return;
     logExitTargetDiagnostic("root-mousedown", event);
+  }
+
+  function handleTradeButtonPointerUp(event) {
+    if (!isPrimaryPointerEvent(event)) return;
+    const target = event.target?.closest?.("button");
+    if (!target || !root?.contains(target)) return;
+    const sellPercent = sellPercentFromButton(target);
+    if (sellPercent === null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+    executeSellButton(target, sellPercent, "pointerup");
+  }
+
+  function sellPercentFromButton(target) {
+    if (target.dataset.action === "sell-all") return 100;
+    if (!Object.hasOwn(target.dataset, "sellPct")) return null;
+    const percent = Number(target.dataset.sellPct);
+    return Number.isFinite(percent) && percent > 0 ? percent : null;
+  }
+
+  function markTradeButtonExecution(key) {
+    lastTradeButtonExecutionKey = key;
+    lastTradeButtonExecutionAt = Date.now();
+  }
+
+  function recentlyExecutedTradeButton(key) {
+    return Boolean(key && key === lastTradeButtonExecutionKey && Date.now() - lastTradeButtonExecutionAt < 700);
+  }
+
+  function executeSellButton(target, percent, source) {
+    const key = `sell:${percent}`;
+    if (recentlyExecutedTradeButton(key)) return;
+    markTradeButtonExecution(key);
+    emitDiagnostic("sell-button-execute", {
+      source,
+      percent,
+      buttonText: cleanText(target.textContent),
+      token: summarizeToken(activeToken),
+    });
+    primeTradeExecutionSound();
+    runTask(sell(percent));
   }
 
   function logTrackerResizeDiagnostic(stage, event = null, extra = {}, level = "debug") {
@@ -1587,12 +1632,14 @@
     const sellPct = target.dataset.sellPct;
     const hasBuyAmount = Object.hasOwn(target.dataset, "buyAmount");
     const hasSellPct = Object.hasOwn(target.dataset, "sellPct");
+    const sellPercent = sellPercentFromButton(target);
+    if (sellPercent !== null && recentlyExecutedTradeButton(`sell:${sellPercent}`)) return;
     if (hasBuyAmount || hasSellPct || action === "custom-buy" || action === "buy-default" || action === "sell-all") {
       primeTradeExecutionSound();
     }
 
     if (hasBuyAmount) runTask(buy(Number(buyAmount)));
-    else if (hasSellPct) runTask(sell(Number(sellPct)));
+    else if (sellPercent !== null) executeSellButton(target, sellPercent, "click");
     else if (action === "custom-buy") {
       const input = root.querySelector("[data-custom-buy]");
       const amount = Number(input.value);
