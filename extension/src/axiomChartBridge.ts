@@ -432,16 +432,18 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
   }
 
   async function upsertStoredMarker(boundChart: BoundChart, marker: StoredMarker): Promise<StoredMarker> {
+    const markerTime = resolveMarkerTime(boundChart, marker.time);
+    const point = { time: markerTime, price: marker.price };
     const entity = marker.entityId ? safeCall(() => boundChart.chart.getShapeById?.(marker.entityId)) : null;
     if (entity) {
-      safeCall(() => entity.setPoints?.([{ time: marker.time, price: marker.price }]));
+      safeCall(() => entity.setPoints?.([point]));
       safeCall(() => entity.setProperties?.(buildMarkerOverrides(marker)));
-      return marker;
+      return { ...marker, time: markerTime };
     }
     if (!boundChart.chart?.createShape) {
       throw new Error("No TradingView marker creation API found.");
     }
-    const id = await boundChart.chart.createShape({ time: marker.time, price: marker.price }, {
+    const id = await boundChart.chart.createShape(point, {
       shape: marker.style.shape || (marker.side === "buy" ? "arrow_up" : "arrow_down"),
       lock: true,
       disableSelection: false,
@@ -449,7 +451,7 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
       disableUndo: true,
       overrides: buildMarkerOverrides(marker),
     });
-    return { ...marker, entityId: id, mode: "public" };
+    return { ...marker, time: markerTime, entityId: id, mode: "public" };
   }
 
   function removeStoredMarker(boundChart: BoundChart, marker: StoredMarker) {
@@ -556,6 +558,40 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
     return safeCall(() => boundChart.chartWidget.getTimeScale?.().rightmostIndex?.())
       || safeCall(() => boundChart.chartWidget._model?.timeScale?.().rightmostIndex?.())
       || 0;
+  }
+
+  function resolveMarkerTime(boundChart: BoundChart, requestedTime: number) {
+    const time = Math.floor(Number(requestedTime));
+    if (!Number.isFinite(time) || time <= 0) return Math.floor(Date.now() / 1000);
+    const resolutionSeconds = resolveChartResolutionSeconds(boundChart);
+    if (!Number.isFinite(resolutionSeconds) || resolutionSeconds <= 1) return time;
+    return Math.floor(time / resolutionSeconds) * resolutionSeconds;
+  }
+
+  function resolveChartResolutionSeconds(boundChart: BoundChart) {
+    const resolution =
+      safeCall(() => boundChart.chart.resolution?.())
+      || safeCall(() => boundChart.chart.interval?.())
+      || safeCall(() => boundChart.api.activeChart?.().resolution?.())
+      || safeCall(() => boundChart.chartWidget.activeChart?.().resolution?.())
+      || safeCall(() => boundChart.chartWidget.symbolInterval?.().interval)
+      || safeCall(() => boundChart.chartWidget._model?.mainSeries?.().interval?.());
+    return parseChartResolutionSeconds(resolution);
+  }
+
+  function parseChartResolutionSeconds(value: unknown) {
+    const raw = String(value || "").trim().toUpperCase();
+    if (!raw) return 0;
+    const match = raw.match(/^(\d+(?:\.\d+)?)([A-Z]*)$/);
+    if (!match) return 0;
+    const amount = Number(match[1]);
+    if (!Number.isFinite(amount) || amount <= 0) return 0;
+    const unit = match[2] || "MIN";
+    if (unit === "S") return Math.round(amount);
+    if (unit === "D") return Math.round(amount * 86_400);
+    if (unit === "W") return Math.round(amount * 604_800);
+    if (unit === "M") return Math.round(amount * 2_592_000);
+    return Math.round(amount * 60);
   }
 
   function attachSymbolWatcher(boundChart: BoundChart) {

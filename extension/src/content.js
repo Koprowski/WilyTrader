@@ -4555,7 +4555,7 @@
     const background = isBuy ? "rgba(34, 197, 94, 0.9)" : "rgba(249, 115, 22, 0.92)";
     return {
       color,
-      shape: "flag",
+      shape: isBuy ? "arrow_up" : "arrow_down",
       text: `${isBuy ? "BUY" : "SELL"} ${formatters.usd(price)}`,
       background,
       textColor: "#ffffff",
