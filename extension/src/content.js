@@ -3838,8 +3838,6 @@
     const positionEl = root.querySelector(`#${selectors.position}`);
     const buyButtonsEl = root.querySelector("[data-buy-buttons]");
     const sellButtonsEl = root.querySelector("[data-sell-buttons]");
-    const buyChainEl = root.querySelector("[data-buy-chain]");
-    const sellAssetsEl = root.querySelector("[data-sell-assets]");
     const exitTargetSummaryEl = root.querySelector("[data-exit-target-summary]");
     const exitTargetListEl = root.querySelector("[data-exit-target-list]");
     const logEl = root.querySelector(`#${selectors.log}`);
@@ -3856,38 +3854,7 @@
     const position = token.key ? state.positions[token.key] : null;
     const summary = position ? buildPositionSummary(position.positionId, "open") : findLatestTokenPositionSummary(token);
     const chartSummary = buildChartArtifactSummary(summary);
-    const positionPnl = position ? calculateMarkedPositionMetrics(position, token) : null;
-    const closedSummary = findLatestClosedTokenPositionSummary(token);
-    const displayedPnl = positionPnl || closedSummary ? {
-      totalPnlNative: positionPnl?.totalPnlNative ?? closedSummary.pnlPostFeeNative,
-      totalPnlPct: positionPnl?.totalPnlPct ?? closedSummary.pnlPct,
-    } : null;
-    const pnlButton = root.querySelector("[data-action='view-closed-pnl']");
-
-    tokenEl.textContent = token.address
-      ? `${token.name} (${shortenAddress(token.address)})`
-      : "Open a supported token page";
-    balanceEl.textContent = `Bal ${formatters.compactNative(state.balances[token.chain] || 0, token.chain)}`;
-    positionEl.classList.toggle("wt-pnl-up", Boolean(displayedPnl) && displayedPnl.totalPnlNative > 0);
-    positionEl.classList.toggle("wt-pnl-down", Boolean(displayedPnl) && displayedPnl.totalPnlNative < 0);
-    positionEl.classList.toggle("wt-pnl-flat", Boolean(displayedPnl) && displayedPnl.totalPnlNative === 0);
-    positionEl.textContent = position
-      ? `Pos ${formatters.native(position.costNative, token.chain)} ${formatters.pct(positionPnl.totalPnlPct)}`
-      : closedSummary
-        ? `Closed ${formatters.pct(closedSummary.pnlPct)}`
-      : "Pos none";
-    positionEl.title = position
-      ? `Open P&L ${formatters.signedNative(positionPnl.totalPnlNative, token.chain)} (${formatters.pct(positionPnl.totalPnlPct)})`
-      : closedSummary
-        ? `Closed P&L ${formatters.signedNative(closedSummary.pnlPostFeeNative, closedSummary.chain)} (${formatters.pct(closedSummary.pnlPct)})`
-      : "";
-    if (pnlButton) pnlButton.hidden = !closedSummary;
-    if (buyChainEl) buyChainEl.textContent = token.chain;
-    if (sellAssetsEl) {
-      sellAssetsEl.textContent = position
-        ? `${round(position.tokenAmount, 4)} Asset - ${formatters.usd((position.tokenAmount || 0) * (token.unitPriceUsd || 0))}`
-        : "0 Asset - $0";
-    }
+    renderPositionQuoteUi(token);
 
     root.querySelectorAll("[data-quick-setting]").forEach((input) => {
       const key = input.dataset.quickSetting;
@@ -3949,6 +3916,51 @@
     }
     syncAxiomNativeChartLines(chartSummary, token);
     syncAxiomExitTargetLines(token);
+  }
+
+  function renderPositionQuoteUi(token = activeToken) {
+    if (!root || !state || !token) return false;
+    const tokenEl = root.querySelector(`#${selectors.token}`);
+    const balanceEl = root.querySelector(`#${selectors.balance}`);
+    const positionEl = root.querySelector(`#${selectors.position}`);
+    if (!tokenEl || !balanceEl || !positionEl) return false;
+
+    const buyChainEl = root.querySelector("[data-buy-chain]");
+    const sellAssetsEl = root.querySelector("[data-sell-assets]");
+    const pnlButton = root.querySelector("[data-action='view-closed-pnl']");
+    const position = token.key ? state.positions[token.key] : null;
+    const positionPnl = position ? calculateMarkedPositionMetrics(position, token) : null;
+    const closedSummary = findLatestClosedTokenPositionSummary(token);
+    const displayedPnl = positionPnl || closedSummary ? {
+      totalPnlNative: positionPnl?.totalPnlNative ?? closedSummary.pnlPostFeeNative,
+      totalPnlPct: positionPnl?.totalPnlPct ?? closedSummary.pnlPct,
+    } : null;
+
+    tokenEl.textContent = token.address
+      ? `${token.name} (${shortenAddress(token.address)})`
+      : "Open a supported token page";
+    balanceEl.textContent = `Bal ${formatters.compactNative(state.balances[token.chain] || 0, token.chain)}`;
+    positionEl.classList.toggle("wt-pnl-up", Boolean(displayedPnl) && displayedPnl.totalPnlNative > 0);
+    positionEl.classList.toggle("wt-pnl-down", Boolean(displayedPnl) && displayedPnl.totalPnlNative < 0);
+    positionEl.classList.toggle("wt-pnl-flat", Boolean(displayedPnl) && displayedPnl.totalPnlNative === 0);
+    positionEl.textContent = position
+      ? `Pos ${formatters.native(position.costNative, token.chain)} ${formatters.pct(positionPnl.totalPnlPct)}`
+      : closedSummary
+        ? `Closed ${formatters.pct(closedSummary.pnlPct)}`
+        : "Pos none";
+    positionEl.title = position
+      ? `Open P&L ${formatters.signedNative(positionPnl.totalPnlNative, token.chain)} (${formatters.pct(positionPnl.totalPnlPct)})`
+      : closedSummary
+        ? `Closed P&L ${formatters.signedNative(closedSummary.pnlPostFeeNative, closedSummary.chain)} (${formatters.pct(closedSummary.pnlPct)})`
+        : "";
+    if (pnlButton) pnlButton.hidden = !closedSummary;
+    if (buyChainEl) buyChainEl.textContent = token.chain;
+    if (sellAssetsEl) {
+      sellAssetsEl.textContent = position
+        ? `${round(position.tokenAmount, 4)} Asset - ${formatters.usd((position.tokenAmount || 0) * (token.unitPriceUsd || 0))}`
+        : "0 Asset - $0";
+    }
+    return true;
   }
 
   function syncActiveAxiomChartArtifacts() {
@@ -5091,6 +5103,7 @@
       const token = activeToken;
       if (!token?.key || !state?.positions?.[token.key]) return;
       updateActivePositionMarketCapRange({ reason: "rolling-sampler" });
+      renderPositionQuoteUi(token);
     }, MARKET_CAP_ROLLING_SAMPLE_INTERVAL_MS);
   }
 
