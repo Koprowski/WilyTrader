@@ -1188,7 +1188,7 @@
 
   function detectAxiomTitleMarketCap() {
     if (getPlatformAdapter(window.location.hostname)?.id !== "axiom") return null;
-    const titleMatch = (document.title || "").match(/\$([0-9.]+)\s*([KMB])?/i);
+    const titleMatch = (document.title || "").match(/\$([0-9,.]+)\s*([KMB])?/i);
     return titleMatch ? parseCompactNumber(titleMatch[1], titleMatch[2]) : null;
   }
 
@@ -1220,11 +1220,11 @@
     if (token?.platform !== "axiom" || !token?.key) return true;
     if (!isAxiomMemeRoute(new URL(window.location.href))) return false;
     if (/^\s*Axiom(?:\s+SOL)?\s*\|\s*Pulse\s*$/i.test(document.title || "")) return false;
-    return [
-      AXIOM_HEADER_MARKET_CAP_SOURCE,
-      AXIOM_TITLE_MARKET_CAP_SOURCE,
-      AXIOM_VISIBLE_MARKET_CAP_SOURCE,
-    ].includes(token.marketCapSource);
+    if (token.marketCapSource !== AXIOM_TITLE_MARKET_CAP_SOURCE) return false;
+    const mismatchPct = Number(token.marketCapMismatchPct || 0);
+    const rejectedMarketCap = Number(token.marketCapRejectedMarketCap || 0);
+    if (rejectedMarketCap > 0 && mismatchPct > AXIOM_MARKET_CAP_SOURCE_AGREEMENT_MAX_PCT) return false;
+    return true;
   }
 
   function parseCurrencyMarketCap(value) {
