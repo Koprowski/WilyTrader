@@ -385,6 +385,7 @@
       address: token.address || null,
       chain: token.chain || null,
       marketCap: round(token.marketCap, 2),
+      marketCapSource: token.marketCapSource || null,
       unitPriceNative: round(token.unitPriceNative, 12),
       url: token.url || null,
     };
@@ -406,10 +407,13 @@
   }
 
   function buildMarketCapDiagnostics() {
+    const selectedQuote = detectMarketCapQuote();
     return {
-      selected: round(detectMarketCap(), 2),
+      selected: round(selectedQuote?.marketCap, 2),
+      selectedSource: selectedQuote?.source || null,
       axiomTitle: round(detectAxiomTitleMarketCap(), 2),
       axiomVisible: round(detectAxiomVisibleMarketCap(), 2),
+      pageTitle: document.title || "",
     };
   }
 
@@ -1042,6 +1046,13 @@
       .filter((candidate) => candidate?.marketCap && candidate.marketCap >= 1_000)
       .sort((a, b) => a.left - b.left || a.top - b.top);
     return candidates[0]?.marketCap || null;
+  }
+
+  function isAuthoritativeAxiomTokenPageQuote(token) {
+    if (token?.platform !== "axiom" || !token?.key) return true;
+    if (!isAxiomMemeRoute(new URL(window.location.href))) return false;
+    if (/^\s*Axiom(?:\s+SOL)?\s*\|\s*Pulse\s*$/i.test(document.title || "")) return false;
+    return token.marketCapSource === "axiom-visible-header" || token.marketCapSource === "axiom-title";
   }
 
   function parseCurrencyMarketCap(value) {
@@ -2465,6 +2476,9 @@
     }
     if (!detectMarketCap()) {
       return { ready: false, message: `Waiting for Axiom market cap before auto-buying ${amount}.` };
+    }
+    if (!isAuthoritativeAxiomTokenPageQuote(token)) {
+      return { ready: false, message: `Waiting for Axiom token page header/title market cap before auto-buying ${amount}.` };
     }
     return { ready: true, message: "" };
   }
