@@ -95,6 +95,9 @@
   const SOLANA_ADDRESS_PATTERN = /[1-9A-HJ-NP-Za-km-z]{32,44}/;
   const ETHEREUM_ADDRESS_PATTERN = /0x[a-fA-F0-9]{40}/;
   const AXIOM_HEADER_MARKET_CAP_SOURCE = "axiom-header-market-cap-selector";
+  const AXIOM_TITLE_MARKET_CAP_SOURCE = "axiom-title";
+  const AXIOM_VISIBLE_MARKET_CAP_SOURCE = "axiom-visible-header";
+  const AXIOM_MARKET_CAP_SOURCE_AGREEMENT_MAX_PCT = 8;
   const AXIOM_HEADER_MARKET_CAP_SELECTORS = [
     String.raw`#platform-layout-container > div.hidden.flex-col.sm\:flex > div > div > div.flex.h-\[calc\(100vh\+360px\)\].min-w-0.flex-1.flex-col.border-primaryStroke.border-r > div.flex.min-h-\[0px\].flex-1.flex-col > div > div.flex.min-h-\[0px\].min-w-\[0px\].flex-1.flex-col > div.relative.flex.max-h-\[64px\].min-h-\[64px\].flex-row.items-center.justify-start.border-b.border-primaryStroke.sm\:pl-\[34px\] > div.flex.flex-1.flex-row.items-center.justify-start.overflow-x-auto.overflow-y-hidden.\[-ms-overflow-style\:none\].\[scrollbar-width\:none\].\[\&\:\:-webkit-scrollbar\]\:hidden > div > div:nth-child(2) > div > span > span`,
   ];
@@ -393,6 +396,11 @@
       marketCapRawText: token.marketCapRawText || null,
       marketCapSelector: token.marketCapSelector || null,
       marketCapReadAtMs: token.marketCapReadAtMs || null,
+      marketCapRejectedSource: token.marketCapRejectedSource || null,
+      marketCapRejectedRawText: token.marketCapRejectedRawText || null,
+      marketCapRejectedSelector: token.marketCapRejectedSelector || null,
+      marketCapRejectedMarketCap: round(token.marketCapRejectedMarketCap, 2),
+      marketCapMismatchPct: round(token.marketCapMismatchPct, 4),
       unitPriceNative: round(token.unitPriceNative, 12),
       url: token.url || null,
     };
@@ -421,6 +429,11 @@
       selectedSource: selectedQuote?.source || null,
       selectedRawText: selectedQuote?.rawText || null,
       selectedSelector: selectedQuote?.selector || null,
+      selectedRejectedSource: selectedQuote?.rejectedSource || null,
+      selectedRejectedRawText: selectedQuote?.rejectedRawText || null,
+      selectedRejectedSelector: selectedQuote?.rejectedSelector || null,
+      selectedRejectedMarketCap: round(selectedQuote?.rejectedMarketCap, 2),
+      selectedMismatchPct: round(selectedQuote?.mismatchPct, 4),
       axiomHeader: round(axiomHeaderQuote?.marketCap, 2),
       axiomHeaderRawText: axiomHeaderQuote?.rawText || null,
       axiomHeaderSelector: axiomHeaderQuote?.selector || null,
@@ -822,6 +835,11 @@
     marketCapSelector = null,
     marketCapReadAtMs = null,
     marketCapPageTitle = null,
+    marketCapRejectedSource = null,
+    marketCapRejectedRawText = null,
+    marketCapRejectedSelector = null,
+    marketCapRejectedMarketCap = null,
+    marketCapMismatchPct = null,
     url = window.location.href,
   }) {
     const unitPriceUsd = marketCap ? marketCap / MARKET_CAP_SUPPLY : null;
@@ -844,6 +862,11 @@
       marketCapSelector,
       marketCapReadAtMs,
       marketCapPageTitle,
+      marketCapRejectedSource,
+      marketCapRejectedRawText,
+      marketCapRejectedSelector,
+      marketCapRejectedMarketCap,
+      marketCapMismatchPct,
       unitPriceUsd,
       unitPriceNative,
       url,
@@ -871,6 +894,11 @@
       marketCapSelector: marketCapQuote?.selector ?? null,
       marketCapReadAtMs: marketCapQuote?.readAtMs ?? null,
       marketCapPageTitle: marketCapQuote?.pageTitle ?? null,
+      marketCapRejectedSource: marketCapQuote?.rejectedSource ?? null,
+      marketCapRejectedRawText: marketCapQuote?.rejectedRawText ?? null,
+      marketCapRejectedSelector: marketCapQuote?.rejectedSelector ?? null,
+      marketCapRejectedMarketCap: marketCapQuote?.rejectedMarketCap ?? null,
+      marketCapMismatchPct: marketCapQuote?.mismatchPct ?? null,
     });
   }
 
@@ -890,6 +918,11 @@
       marketCapSelector: marketCapQuote?.selector ?? null,
       marketCapReadAtMs: marketCapQuote?.readAtMs ?? null,
       marketCapPageTitle: marketCapQuote?.pageTitle ?? null,
+      marketCapRejectedSource: marketCapQuote?.rejectedSource ?? null,
+      marketCapRejectedRawText: marketCapQuote?.rejectedRawText ?? null,
+      marketCapRejectedSelector: marketCapQuote?.rejectedSelector ?? null,
+      marketCapRejectedMarketCap: marketCapQuote?.rejectedMarketCap ?? null,
+      marketCapMismatchPct: marketCapQuote?.mismatchPct ?? null,
     });
   }
 
@@ -1038,17 +1071,32 @@
 
   function detectMarketCapQuote() {
     const axiomHeaderQuote = detectAxiomHeaderMarketCapQuote();
-    if (axiomHeaderQuote?.marketCap) return axiomHeaderQuote;
+    const titleQuote = detectAxiomTitleMarketCapQuote();
+    if (axiomHeaderQuote?.marketCap && titleQuote?.marketCap) {
+      const mismatchPct = calculateMarketCapMismatchPct(titleQuote.marketCap, axiomHeaderQuote.marketCap);
+      if (mismatchPct <= AXIOM_MARKET_CAP_SOURCE_AGREEMENT_MAX_PCT) {
+        return {
+          ...axiomHeaderQuote,
+          titleMarketCap: titleQuote.marketCap,
+          mismatchPct: round(mismatchPct, 4),
+        };
+      }
+      return buildMarketCapQuoteWithRejectedSource(titleQuote, axiomHeaderQuote, mismatchPct);
+    }
+
+    if (titleQuote?.marketCap) return titleQuote;
 
     const visibleAxiomMarketCap = detectAxiomVisibleMarketCap();
-    if (visibleAxiomMarketCap) {
-      return { marketCap: visibleAxiomMarketCap, source: "axiom-visible-header" };
+    if (axiomHeaderQuote?.marketCap && visibleAxiomMarketCap) {
+      const visibleQuote = buildAxiomVisibleMarketCapQuote(visibleAxiomMarketCap);
+      const mismatchPct = calculateMarketCapMismatchPct(visibleQuote.marketCap, axiomHeaderQuote.marketCap);
+      if (mismatchPct <= AXIOM_MARKET_CAP_SOURCE_AGREEMENT_MAX_PCT) return axiomHeaderQuote;
+      return buildMarketCapQuoteWithRejectedSource(visibleQuote, axiomHeaderQuote, mismatchPct);
     }
 
-    const titleMarketCap = detectAxiomTitleMarketCap();
-    if (titleMarketCap) {
-      return { marketCap: titleMarketCap, source: "axiom-title" };
-    }
+    if (axiomHeaderQuote?.marketCap) return axiomHeaderQuote;
+
+    if (visibleAxiomMarketCap) return buildAxiomVisibleMarketCapQuote(visibleAxiomMarketCap);
 
     const candidates = getPageTextCandidates(1200);
 
@@ -1057,6 +1105,48 @@
       if (match) return { marketCap: parseCompactNumber(match[1], match[2]), source: "page-market-cap-text" };
     }
     return null;
+  }
+
+  function detectAxiomTitleMarketCapQuote() {
+    const marketCap = detectAxiomTitleMarketCap();
+    if (!marketCap) return null;
+    return {
+      marketCap,
+      source: AXIOM_TITLE_MARKET_CAP_SOURCE,
+      rawText: document.title || "",
+      selector: null,
+      readAtMs: Date.now(),
+      pageTitle: document.title || "",
+    };
+  }
+
+  function buildAxiomVisibleMarketCapQuote(marketCap) {
+    return {
+      marketCap,
+      source: AXIOM_VISIBLE_MARKET_CAP_SOURCE,
+      rawText: null,
+      selector: null,
+      readAtMs: Date.now(),
+      pageTitle: document.title || "",
+    };
+  }
+
+  function calculateMarketCapMismatchPct(primaryMarketCap, comparisonMarketCap) {
+    const primary = Number(primaryMarketCap);
+    const comparison = Number(comparisonMarketCap);
+    if (!Number.isFinite(primary) || primary <= 0 || !Number.isFinite(comparison) || comparison <= 0) return 0;
+    return Math.abs(((comparison - primary) / primary) * 100);
+  }
+
+  function buildMarketCapQuoteWithRejectedSource(selectedQuote, rejectedQuote, mismatchPct) {
+    return {
+      ...selectedQuote,
+      rejectedSource: rejectedQuote?.source || null,
+      rejectedRawText: rejectedQuote?.rawText || null,
+      rejectedSelector: rejectedQuote?.selector || null,
+      rejectedMarketCap: rejectedQuote?.marketCap || null,
+      mismatchPct: round(mismatchPct, 4),
+    };
   }
 
   function detectAxiomHeaderMarketCapQuote() {
@@ -1089,6 +1179,7 @@
   }
 
   function detectAxiomTitleMarketCap() {
+    if (getPlatformAdapter(window.location.hostname)?.id !== "axiom") return null;
     const titleMatch = (document.title || "").match(/\$([0-9.]+)\s*([KMB])?/i);
     return titleMatch ? parseCompactNumber(titleMatch[1], titleMatch[2]) : null;
   }
@@ -1121,7 +1212,11 @@
     if (token?.platform !== "axiom" || !token?.key) return true;
     if (!isAxiomMemeRoute(new URL(window.location.href))) return false;
     if (/^\s*Axiom(?:\s+SOL)?\s*\|\s*Pulse\s*$/i.test(document.title || "")) return false;
-    return token.marketCapSource === AXIOM_HEADER_MARKET_CAP_SOURCE;
+    return [
+      AXIOM_HEADER_MARKET_CAP_SOURCE,
+      AXIOM_TITLE_MARKET_CAP_SOURCE,
+      AXIOM_VISIBLE_MARKET_CAP_SOURCE,
+    ].includes(token.marketCapSource);
   }
 
   function parseCurrencyMarketCap(value) {
@@ -2564,9 +2659,7 @@
     if (!detectMarketCap()) {
       return { ready: false, message: `Waiting for Axiom market cap before auto-buying ${amount}.` };
     }
-    if (!isAuthoritativeAxiomTokenPageQuote(token)) {
-      return { ready: false, message: `Waiting for exact Axiom header market cap field before auto-buying ${amount}.` };
-    }
+    if (!isAuthoritativeAxiomTokenPageQuote(token)) return { ready: false, message: `Waiting for current Axiom market cap before auto-buying ${amount}.` };
     return { ready: true, message: "" };
   }
 
@@ -3247,8 +3340,8 @@
         return setStatus(`Price unavailable. Wait for ${token.platformLabel || "the platform"} market cap to load.`);
       }
       if (!isAuthoritativeAxiomTokenPageQuote(token)) {
-        emitDiagnostic("buy-blocked-no-exact-axiom-quote", { amountNative, token: summarizeToken(token), marketCaps: buildMarketCapDiagnostics() });
-        return setStatus("Waiting for Axiom header market cap field before buying.");
+        emitDiagnostic("buy-blocked-no-current-axiom-quote", { amountNative, token: summarizeToken(token), marketCaps: buildMarketCapDiagnostics() });
+        return setStatus("Waiting for current Axiom market cap before buying.");
       }
 
       const delayedToken = await waitForSimulatedExecution("buy", token, options);
@@ -3321,6 +3414,10 @@
         quoteRawText: execution.quoteRawText,
         quoteSelector: execution.quoteSelector,
         quoteReadAtMs: execution.quoteReadAtMs,
+        quoteRejectedSource: execution.quoteRejectedSource,
+        quoteRejectedRawText: execution.quoteRejectedRawText,
+        quoteRejectedMarketCapUsd: execution.quoteRejectedMarketCapUsd,
+        quoteMismatchPct: execution.quoteMismatchPct,
         unitPriceNative: execution.unitPriceNative,
         tokenAmount: execution.tokenAmount,
         positionAfter: summarizePosition(updated),
@@ -3359,8 +3456,8 @@
       return setStatus(`Price unavailable. Wait for ${token.platformLabel || "the platform"} market cap to load.`);
     }
     if (!isAuthoritativeAxiomTokenPageQuote(token)) {
-      emitDiagnostic("sell-blocked-no-exact-axiom-quote", { percent, token: summarizeToken(token), marketCaps: buildMarketCapDiagnostics() });
-      return setStatus("Waiting for Axiom header market cap field before selling.");
+      emitDiagnostic("sell-blocked-no-current-axiom-quote", { percent, token: summarizeToken(token), marketCaps: buildMarketCapDiagnostics() });
+      return setStatus("Waiting for current Axiom market cap before selling.");
     }
 
     const delayedToken = await waitForSimulatedExecution("sell", token);
@@ -3429,6 +3526,10 @@
       quoteRawText: execution.quoteRawText,
       quoteSelector: execution.quoteSelector,
       quoteReadAtMs: execution.quoteReadAtMs,
+      quoteRejectedSource: execution.quoteRejectedSource,
+      quoteRejectedRawText: execution.quoteRejectedRawText,
+      quoteRejectedMarketCapUsd: execution.quoteRejectedMarketCapUsd,
+      quoteMismatchPct: execution.quoteMismatchPct,
       unitPriceNative: execution.unitPriceNative,
       requestedSellPct: execution.requestedSellPct,
       tokenAmount: execution.tokenAmount,
@@ -3627,7 +3728,7 @@
       return null;
     }
     if (!isAuthoritativeAxiomTokenPageQuote(delayedToken)) {
-      setStatus("Execution cancelled: exact Axiom header market cap unavailable.");
+      setStatus("Execution cancelled: current Axiom market cap unavailable.");
       return null;
     }
     const slippageLimit = Number(side === "buy" ? state.settings.buySlippagePct : state.settings.sellSlippagePct) || 0;
@@ -3723,6 +3824,11 @@
       quoteReadAtMs: fields.token.marketCapReadAtMs || null,
       quoteReadAt: fields.token.marketCapReadAtMs ? new Date(fields.token.marketCapReadAtMs).toISOString() : null,
       quotePageTitle: fields.token.marketCapPageTitle || null,
+      quoteRejectedSource: fields.token.marketCapRejectedSource || null,
+      quoteRejectedRawText: fields.token.marketCapRejectedRawText || null,
+      quoteRejectedSelector: fields.token.marketCapRejectedSelector || null,
+      quoteRejectedMarketCapUsd: round(fields.token.marketCapRejectedMarketCap, 2),
+      quoteMismatchPct: round(fields.token.marketCapMismatchPct, 4),
       unitPriceNative: round(fields.executionPriceNative, 12),
       unitPriceUsd: round(fields.executionPriceNative * usdPrice, 12),
       requestedAmountNative: round(fields.requestedAmountNative),
@@ -4388,7 +4494,7 @@
       .filter((execution) => executionIds.has(execution.id) && getExecutionTimestampMs(execution) >= cutoffMs)
       .forEach((execution) => {
         const price = getAxiomExecutionMarkerPrice(execution, token);
-        const time = Math.floor((getExecutionTimestampMs(execution) || Date.now()) / 1000);
+        const time = Math.floor(Date.now() / 1000);
         if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(time)) return;
         postAxiomChartBridgeMessage({
           op: "upsertMarker",
