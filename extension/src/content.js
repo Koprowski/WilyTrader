@@ -97,6 +97,8 @@
   const AXIOM_HEADER_MARKET_CAP_SOURCE = "axiom-header-market-cap-selector";
   const AXIOM_TITLE_MARKET_CAP_SOURCE = "axiom-title";
   const AXIOM_VISIBLE_MARKET_CAP_SOURCE = "axiom-visible-header";
+  const AXIOM_CHART_MARKET_CAP_SOURCE = "axiom-chart-latest";
+  const AXIOM_CHART_MARKET_CAP_MAX_AGE_MS = 2_000;
   const AXIOM_MARKET_CAP_SOURCE_AGREEMENT_MAX_PCT = 8;
   const AXIOM_HEADER_MARKET_CAP_SELECTORS = [
     String.raw`#platform-layout-container > div.hidden.flex-col.sm\:flex > div > div > div.flex.h-\[calc\(100vh\+360px\)\].min-w-0.flex-1.flex-col.border-primaryStroke.border-r > div.flex.min-h-\[0px\].flex-1.flex-col > div > div.flex.min-h-\[0px\].min-w-\[0px\].flex-1.flex-col > div.relative.flex.max-h-\[64px\].min-h-\[64px\].flex-row.items-center.justify-start.border-b.border-primaryStroke.sm\:pl-\[34px\] > div.flex.flex-1.flex-row.items-center.justify-start.overflow-x-auto.overflow-y-hidden.\[-ms-overflow-style\:none\].\[scrollbar-width\:none\].\[\&\:\:-webkit-scrollbar\]\:hidden > div > div:nth-child(2) > div > span > span`,
@@ -189,6 +191,7 @@
   let lastAxiomChartArtifactKey = null;
   let lastAxiomExitTargetSyncKey = null;
   let lastAxiomExitTargetLineKeys = new Set();
+  let lastAxiomChartMarketCapQuote = null;
   let targetExitInFlight = null;
   let lastExitTargetMenuOpenedAt = 0;
   let pulseQuickBuyBound = false;
@@ -424,6 +427,7 @@
   function buildMarketCapDiagnostics() {
     const selectedQuote = detectMarketCapQuote();
     const axiomHeaderQuote = detectAxiomHeaderMarketCapQuote();
+    const axiomChartQuote = getFreshAxiomChartMarketCapQuote();
     return {
       selected: round(selectedQuote?.marketCap, 2),
       selectedSource: selectedQuote?.source || null,
@@ -439,6 +443,8 @@
       axiomHeaderSelector: axiomHeaderQuote?.selector || null,
       axiomTitle: round(detectAxiomTitleMarketCap(), 2),
       axiomVisible: round(detectAxiomVisibleMarketCap(), 2),
+      axiomChartLatest: round(axiomChartQuote?.marketCap, 2),
+      axiomChartLatestAgeMs: axiomChartQuote ? Math.max(0, Date.now() - Number(axiomChartQuote.readAtMs || 0)) : null,
       pageTitle: document.title || "",
     };
   }
@@ -871,6 +877,45 @@
       unitPriceNative,
       url,
     };
+  }
+
+  function cloneTokenWithMarketCapQuote(token, quote) {
+    const marketCap = Number(quote?.marketCap || 0);
+    if (!token?.key || !Number.isFinite(marketCap) || marketCap <= 0) return token;
+    const chainUsd = DEFAULT_PRICES[token.chain] || 1;
+    const unitPriceUsd = marketCap / MARKET_CAP_SUPPLY;
+    return {
+      ...token,
+      marketCap,
+      marketCapSource: quote.source || token.marketCapSource || null,
+      marketCapRawText: quote.rawText || token.marketCapRawText || null,
+      marketCapSelector: quote.selector || null,
+      marketCapReadAtMs: quote.readAtMs || Date.now(),
+      marketCapPageTitle: document.title || token.marketCapPageTitle || null,
+      marketCapRejectedSource: null,
+      marketCapRejectedRawText: null,
+      marketCapRejectedSelector: null,
+      marketCapRejectedMarketCap: 0,
+      marketCapMismatchPct: 0,
+      unitPriceUsd,
+      unitPriceNative: unitPriceUsd / chainUsd,
+    };
+  }
+
+  function getFreshAxiomChartMarketCapQuote(maxAgeMs = AXIOM_CHART_MARKET_CAP_MAX_AGE_MS) {
+    const quote = lastAxiomChartMarketCapQuote;
+    if (!quote?.marketCap || quote.source !== AXIOM_CHART_MARKET_CAP_SOURCE) return null;
+    const readAtMs = Number(quote.readAtMs || 0);
+    if (!Number.isFinite(readAtMs) || readAtMs <= 0) return null;
+    if (Date.now() - readAtMs > maxAgeMs) return null;
+    if (!isAxiomMemeRoute(new URL(window.location.href))) return null;
+    return quote;
+  }
+
+  function getMarketCapTrackingToken(token) {
+    if (token?.platform !== "axiom") return token;
+    const chartQuote = getFreshAxiomChartMarketCapQuote();
+    return chartQuote ? cloneTokenWithMarketCapQuote(token, chartQuote) : token;
   }
 
   function detectPadreToken(url) {
@@ -1616,11 +1661,24 @@
     if (data.event === "chartRebound" || data.event === "symbolChange") {
       lastAxiomChartArtifactKey = null;
       lastAxiomExitTargetSyncKey = null;
+      lastAxiomChartMarketCapQuote = null;
       injectAxiomChartBridgeScript();
       render();
       window.setTimeout(render, 500);
     } else if (data.event === "lineMoved") {
       runTask(handleAxiomExitTargetLineMoved(data));
+    } else if (data.event === "latestPrice") {
+      const marketCap = Number(data.price);
+      if (Number.isFinite(marketCap) && marketCap > 0) {
+        lastAxiomChartMarketCapQuote = {
+          marketCap,
+          source: AXIOM_CHART_MARKET_CAP_SOURCE,
+          rawText: data.rawText || `chart:${marketCap}`,
+          selector: null,
+          readAtMs: Number(data.readAtMs || Date.now()),
+          symbol: data.symbol || null,
+        };
+      }
     }
   }
 
@@ -3671,7 +3729,7 @@
   }
 
   function updateActivePositionMarketCapRange({ persistRange = true, forcePersist = false, reason = "position-range" } = {}) {
-    const token = activeToken;
+    const token = getMarketCapTrackingToken(activeToken);
     const position = token?.key ? state.positions[token.key] : null;
     if (!position) return false;
     const result = withUpdatedPositionMarketCapRange(position, token);
@@ -4283,7 +4341,8 @@
 
   function buildFloatingTrackerMetrics() {
     const latestExecution = state.executions[state.executions.length - 1] || null;
-    const chain = activeToken?.chain || latestExecution?.chain || "SOL";
+    const markedActiveToken = getMarketCapTrackingToken(activeToken);
+    const chain = markedActiveToken?.chain || latestExecution?.chain || "SOL";
     const buys = state.executions.filter((execution) => execution.chain === chain && execution.side === "buy");
     const sells = state.executions.filter((execution) => execution.chain === chain && execution.side === "sell");
     const positions = Object.values(state.positions).filter((position) => position.chain === chain);
@@ -4292,12 +4351,12 @@
     let markedOpenPnlNative = 0;
 
     positions.forEach((position) => {
-      const isActivePosition = activeToken?.key && (position.tokenKey === activeToken.key || state.positions[activeToken.key] === position);
-      const markNative = isActivePosition && activeToken?.unitPriceNative
-        ? Number(position.tokenAmount || 0) * Number(activeToken.unitPriceNative || 0)
+      const isActivePosition = markedActiveToken?.key && (position.tokenKey === markedActiveToken.key || state.positions[markedActiveToken.key] === position);
+      const markNative = isActivePosition && markedActiveToken?.unitPriceNative
+        ? Number(position.tokenAmount || 0) * Number(markedActiveToken.unitPriceNative || 0)
         : Number(position.costNative || 0);
       portfolioNative += markNative;
-      if (isActivePosition && activeToken?.unitPriceNative) {
+      if (isActivePosition && markedActiveToken?.unitPriceNative) {
         markedOpenPnlNative += markNative - Number(position.costNative || 0);
       }
     });
@@ -4326,6 +4385,7 @@
   }
 
   function calculateMarkedPositionMetrics(position, token) {
+    token = getMarketCapTrackingToken(token);
     const positionExecutions = state.executions.filter((execution) => execution.positionId === position.positionId);
     const buys = positionExecutions.filter((execution) => execution.side === "buy");
     const sells = positionExecutions.filter((execution) => execution.side === "sell");
@@ -5353,7 +5413,7 @@
     window.setInterval(() => {
       if (!extensionContextValid) return;
       updateActiveToken();
-      const token = activeToken;
+      const token = getMarketCapTrackingToken(activeToken);
       if (!token?.key || !state?.positions?.[token.key]) return;
       updateActivePositionMarketCapRange({ reason: "rolling-sampler" });
       renderPositionQuoteUi(token);
@@ -5411,7 +5471,8 @@
     if (!isAxiomMemeRoute(new URL(window.location.href))) return;
     updateActiveToken();
     const token = activeToken;
-    const marketCapUsd = Number(token?.marketCap || 0);
+    const triggerToken = getMarketCapTrackingToken(token);
+    const marketCapUsd = Number(triggerToken?.marketCap || 0);
     if (!token?.key || !Number.isFinite(marketCapUsd) || marketCapUsd <= 0) return;
     const position = state.positions[token.key];
     if (!position) return;
@@ -5426,6 +5487,15 @@
       await persistAndSync("exit-target-triggered");
       const sellPercent = normalizeTargetSellPercent(triggered.sellPercent);
       setStatus(`${formatExitTargetKind(triggered.kind)} ${formatTargetSellPercent(sellPercent)} touched ${formatters.usd(triggered.marketCapUsd)}.`);
+      logExitTargetDiagnostic("target-trigger-quote", null, {
+        id: triggered.id,
+        kind: triggered.kind,
+        sellPercent,
+        targetMarketCapUsd: triggered.marketCapUsd,
+        triggerMarketCapUsd: marketCapUsd,
+        triggerSource: triggerToken.marketCapSource || null,
+        triggerReadAtMs: triggerToken.marketCapReadAtMs || null,
+      });
       const execution = await sell(sellPercent);
       if (!execution && state.exitTargets[targetExitInFlight]) {
         state.exitTargets[targetExitInFlight].triggeredAt = null;

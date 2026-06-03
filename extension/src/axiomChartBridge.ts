@@ -110,6 +110,9 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
   let symbolUnsubscribe: (() => void) | null = null;
   let symbolPollId: number | null = null;
   let lineMovePollId: number | null = null;
+  let latestPricePollId: number | null = null;
+  let lastPostedLatestPrice = 0;
+  let lastPostedLatestPriceAt = 0;
   let lastSymbol = "";
   let flushScheduled = false;
 
@@ -243,6 +246,29 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
     lineMovePollId = window.setInterval(pollMovableLinePrices, 350);
   }
 
+  function startLatestPricePoll() {
+    if (latestPricePollId !== null) return;
+    latestPricePollId = window.setInterval(pollLatestPrice, 250);
+  }
+
+  function pollLatestPrice() {
+    if (!bound) return;
+    const price = readLatestChartPrice(bound as BoundChart);
+    if (!Number.isFinite(price) || Number(price) <= 0) return;
+    const now = Date.now();
+    if (Math.abs(Number(price) - lastPostedLatestPrice) < 1 && now - lastPostedLatestPriceAt < 1000) return;
+    lastPostedLatestPrice = Number(price);
+    lastPostedLatestPriceAt = now;
+    window.postMessage({
+      source: "wiley-chart-bridge",
+      event: "latestPrice",
+      price: Number(price),
+      rawText: String(price),
+      readAtMs: now,
+      symbol: safeGetSymbol(bound.chart),
+    }, window.location.origin);
+  }
+
   function pollMovableLinePrices() {
     if (!bound) return;
     desiredLines.forEach((line) => {
@@ -296,6 +322,7 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
     });
     bound = await bindPromise;
     attachSymbolWatcher(bound);
+    startLatestPricePoll();
     return bound;
   }
 
@@ -519,6 +546,58 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
     const sourcePoints = line.source ? readPointList(line.source) : null;
     const sourcePrice = extractPointPrice(sourcePoints?.[0]);
     return Number.isFinite(sourcePrice) ? sourcePrice : null;
+  }
+
+  function readLatestChartPrice(boundChart: BoundChart): number | null {
+    const series =
+      safeCall(() => boundChart.chartWidget._model?.mainSeries?.())
+      || safeCall(() => boundChart.chartWidget.model?.().mainSeries?.())
+      || safeCall(() => boundChart.chart.mainSeries?.());
+    const bars =
+      safeCall(() => series?.bars?.())
+      || safeCall(() => series?.data?.())
+      || safeCall(() => series?._data);
+    const lastIndex = safeCall(() => bars?.lastIndex?.());
+    const candidates = [
+      safeCall(() => bars?.last?.()),
+      safeCall(() => bars?.lastValue?.()),
+      safeCall(() => bars?.valueAt?.(lastIndex)),
+      safeCall(() => bars?.search?.(lastIndex)),
+      safeCall(() => series?.lastValueData?.()),
+      safeCall(() => series?.lastPriceData?.()),
+      safeCall(() => series?.priceScale?.().lastValue?.()),
+    ];
+    for (const candidate of candidates) {
+      const price = extractBarPrice(candidate);
+      if (Number.isFinite(price) && Number(price) > 0) return price;
+    }
+    return null;
+  }
+
+  function extractBarPrice(value: unknown): number | null {
+    if (typeof value === "number") return Number.isFinite(value) && value > 0 ? value : null;
+    if (!value || typeof value !== "object") return null;
+    if (Array.isArray(value)) {
+      const close = Number(value[4] ?? value[value.length - 1]);
+      return Number.isFinite(close) && close > 0 ? close : null;
+    }
+    const record = value as Record<string, unknown>;
+    const direct = Number(
+      record.close
+      ?? record.value
+      ?? record.price
+      ?? record.last
+      ?? record.lastPrice
+      ?? record._value
+      ?? record._close
+      ?? record._price,
+    );
+    if (Number.isFinite(direct) && direct > 0) return direct;
+    if (Array.isArray(record.value)) return extractBarPrice(record.value);
+    if (Array.isArray(record._value)) return extractBarPrice(record._value);
+    if (record.value && typeof record.value === "object") return extractBarPrice(record.value);
+    if (record._value && typeof record._value === "object") return extractBarPrice(record._value);
+    return null;
   }
 
   function readPointList(source: any): any[] | null {

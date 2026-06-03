@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WilyTrader Axiom Chart Bridge
 // @namespace    https://github.com/Koprowski/WilyTrader
-// @version      0.3.52
+// @version      0.3.53
 // @description  Draw WilyTrader average entry/exit lines as native TradingView chart shapes on axiom.trade.
 // @match        https://axiom.trade/*
 // @run-at       document-idle
@@ -40,6 +40,9 @@
     let symbolUnsubscribe = null;
     let symbolPollId = null;
     let lineMovePollId = null;
+    let latestPricePollId = null;
+    let lastPostedLatestPrice = 0;
+    let lastPostedLatestPriceAt = 0;
     let lastSymbol = "";
     let flushScheduled = false;
 
@@ -165,6 +168,29 @@
       lineMovePollId = window.setInterval(pollMovableLinePrices, 350);
     }
 
+    function startLatestPricePoll() {
+      if (latestPricePollId !== null) return;
+      latestPricePollId = window.setInterval(pollLatestPrice, 250);
+    }
+
+    function pollLatestPrice() {
+      if (!bound) return;
+      const price = readLatestChartPrice(bound);
+      if (!Number.isFinite(price) || Number(price) <= 0) return;
+      const now = Date.now();
+      if (Math.abs(Number(price) - lastPostedLatestPrice) < 1 && now - lastPostedLatestPriceAt < 1000) return;
+      lastPostedLatestPrice = Number(price);
+      lastPostedLatestPriceAt = now;
+      window.postMessage({
+        source: "wiley-chart-bridge",
+        event: "latestPrice",
+        price: Number(price),
+        rawText: String(price),
+        readAtMs: now,
+        symbol: safeGetSymbol(bound.chart),
+      }, window.location.origin);
+    }
+
     function pollMovableLinePrices() {
       if (!bound) return;
       desiredLines.forEach((line) => {
@@ -218,6 +244,7 @@
       });
       bound = await bindPromise;
       attachSymbolWatcher(bound);
+      startLatestPricePoll();
       return bound;
     }
 
@@ -439,6 +466,57 @@
       const sourcePoints = line.source ? readPointList(line.source) : null;
       const sourcePrice = extractPointPrice(sourcePoints?.[0]);
       return Number.isFinite(sourcePrice) ? sourcePrice : null;
+    }
+
+    function readLatestChartPrice(boundChart) {
+      const series =
+        safeCall(() => boundChart.chartWidget._model?.mainSeries?.())
+        || safeCall(() => boundChart.chartWidget.model?.().mainSeries?.())
+        || safeCall(() => boundChart.chart.mainSeries?.());
+      const bars =
+        safeCall(() => series?.bars?.())
+        || safeCall(() => series?.data?.())
+        || safeCall(() => series?._data);
+      const lastIndex = safeCall(() => bars?.lastIndex?.());
+      const candidates = [
+        safeCall(() => bars?.last?.()),
+        safeCall(() => bars?.lastValue?.()),
+        safeCall(() => bars?.valueAt?.(lastIndex)),
+        safeCall(() => bars?.search?.(lastIndex)),
+        safeCall(() => series?.lastValueData?.()),
+        safeCall(() => series?.lastPriceData?.()),
+        safeCall(() => series?.priceScale?.().lastValue?.()),
+      ];
+      for (const candidate of candidates) {
+        const price = extractBarPrice(candidate);
+        if (Number.isFinite(price) && Number(price) > 0) return price;
+      }
+      return null;
+    }
+
+    function extractBarPrice(value) {
+      if (typeof value === "number") return Number.isFinite(value) && value > 0 ? value : null;
+      if (!value || typeof value !== "object") return null;
+      if (Array.isArray(value)) {
+        const close = Number(value[4] ?? value[value.length - 1]);
+        return Number.isFinite(close) && close > 0 ? close : null;
+      }
+      const direct = Number(
+        value.close
+        ?? value.value
+        ?? value.price
+        ?? value.last
+        ?? value.lastPrice
+        ?? value._value
+        ?? value._close
+        ?? value._price,
+      );
+      if (Number.isFinite(direct) && direct > 0) return direct;
+      if (Array.isArray(value.value)) return extractBarPrice(value.value);
+      if (Array.isArray(value._value)) return extractBarPrice(value._value);
+      if (value.value && typeof value.value === "object") return extractBarPrice(value.value);
+      if (value._value && typeof value._value === "object") return extractBarPrice(value._value);
+      return null;
     }
 
     function readPointList(source) {
