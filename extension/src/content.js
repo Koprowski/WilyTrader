@@ -1072,25 +1072,33 @@
   function detectMarketCapQuote() {
     const axiomHeaderQuote = detectAxiomHeaderMarketCapQuote();
     const titleQuote = detectAxiomTitleMarketCapQuote();
-    if (axiomHeaderQuote?.marketCap && titleQuote?.marketCap) {
+    if (titleQuote?.marketCap && axiomHeaderQuote?.marketCap) {
       const mismatchPct = calculateMarketCapMismatchPct(titleQuote.marketCap, axiomHeaderQuote.marketCap);
-      if (mismatchPct <= AXIOM_MARKET_CAP_SOURCE_AGREEMENT_MAX_PCT) {
-        return {
-          ...axiomHeaderQuote,
-          titleMarketCap: titleQuote.marketCap,
-          mismatchPct: round(mismatchPct, 4),
-        };
+      if (mismatchPct > AXIOM_MARKET_CAP_SOURCE_AGREEMENT_MAX_PCT) {
+        return buildMarketCapQuoteWithRejectedSource(titleQuote, axiomHeaderQuote, mismatchPct);
       }
-      return buildMarketCapQuoteWithRejectedSource(titleQuote, axiomHeaderQuote, mismatchPct);
+      return {
+        ...titleQuote,
+        comparedSource: axiomHeaderQuote.source,
+        comparedMarketCap: axiomHeaderQuote.marketCap,
+        mismatchPct: round(mismatchPct, 4),
+      };
     }
 
     if (titleQuote?.marketCap) return titleQuote;
 
     const visibleAxiomMarketCap = detectAxiomVisibleMarketCap();
-    if (axiomHeaderQuote?.marketCap && visibleAxiomMarketCap) {
+    if (visibleAxiomMarketCap && axiomHeaderQuote?.marketCap) {
       const visibleQuote = buildAxiomVisibleMarketCapQuote(visibleAxiomMarketCap);
       const mismatchPct = calculateMarketCapMismatchPct(visibleQuote.marketCap, axiomHeaderQuote.marketCap);
-      if (mismatchPct <= AXIOM_MARKET_CAP_SOURCE_AGREEMENT_MAX_PCT) return axiomHeaderQuote;
+      if (mismatchPct <= AXIOM_MARKET_CAP_SOURCE_AGREEMENT_MAX_PCT) {
+        return {
+          ...axiomHeaderQuote,
+          comparedSource: visibleQuote.source,
+          comparedMarketCap: visibleQuote.marketCap,
+          mismatchPct: round(mismatchPct, 4),
+        };
+      }
       return buildMarketCapQuoteWithRejectedSource(visibleQuote, axiomHeaderQuote, mismatchPct);
     }
 
