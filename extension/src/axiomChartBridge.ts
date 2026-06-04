@@ -21,6 +21,11 @@ export interface ExecutionMarkerStyle {
   fontSize?: number;
 }
 
+export interface PriceLineMetadata {
+  targetId?: string;
+  tradePositionId?: string;
+}
+
 export interface AxiomChartBridgeHealth {
   ok: boolean;
   iframeFound: boolean;
@@ -35,7 +40,7 @@ export interface AxiomChartBridgeHealth {
 
 export interface AxiomChartBridge {
   ready(): Promise<void>;
-  upsertLine(positionId: string, kind: PriceLineKind, price: number, style: PriceLineStyle): Promise<void>;
+  upsertLine(positionId: string, kind: PriceLineKind, price: number, style: PriceLineStyle, metadata?: PriceLineMetadata): Promise<void>;
   removeLine(positionId: string, kind: PriceLineKind): Promise<void>;
   upsertMarker(positionId: string, markerId: string, side: ExecutionMarkerSide, time: number, price: number, style: ExecutionMarkerStyle): Promise<void>;
   removeMarker(markerId: string): Promise<void>;
@@ -55,6 +60,8 @@ type TradingViewWindow = Window & {
 
 type StoredLine = {
   positionId: string;
+  targetId?: string;
+  tradePositionId?: string;
   kind: PriceLineKind;
   price: number;
   style: PriceLineStyle;
@@ -68,6 +75,7 @@ type StoredMarker = {
   markerId: string;
   side: ExecutionMarkerSide;
   time: number;
+  requestedTime?: number;
   price: number;
   style: ExecutionMarkerStyle;
   entityId?: unknown;
@@ -109,6 +117,9 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
   let symbolUnsubscribe: (() => void) | null = null;
   let symbolPollId: number | null = null;
   let lineMovePollId: number | null = null;
+  let latestPricePollId: number | null = null;
+  let lastPostedLatestPrice = 0;
+  let lastPostedLatestPriceAt = 0;
   let lastSymbol = "";
   let flushScheduled = false;
 
@@ -118,12 +129,20 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
     await ensureBound();
   }
 
-  async function upsertLine(positionId: string, kind: PriceLineKind, price: number, style: PriceLineStyle): Promise<void> {
+  async function upsertLine(
+    positionId: string,
+    kind: PriceLineKind,
+    price: number,
+    style: PriceLineStyle,
+    metadata: PriceLineMetadata = {}
+  ): Promise<void> {
     if (!positionId || !Number.isFinite(price) || price <= 0) return;
     const key = lineKey(positionId, kind);
     desiredLines.set(key, {
       ...(desiredLines.get(key) || {}),
       positionId,
+      targetId: metadata.targetId,
+      tradePositionId: metadata.tradePositionId,
       kind,
       price,
       style: normalizeStyle(kind, style),
@@ -149,12 +168,15 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
     style: ExecutionMarkerStyle,
   ): Promise<void> {
     if (!positionId || !markerId || !Number.isFinite(time) || !Number.isFinite(price) || price <= 0) return;
+    const existing = desiredMarkers.get(markerId);
+    const pinnedTime = Number(existing?.time);
     desiredMarkers.set(markerId, {
-      ...(desiredMarkers.get(markerId) || {}),
+      ...(existing || {}),
       positionId,
       markerId,
       side,
-      time,
+      time: existing?.entityId && Number.isFinite(pinnedTime) && pinnedTime > 0 ? pinnedTime : time,
+      requestedTime: time,
       price,
       style: normalizeMarkerStyle(side, style),
     });
@@ -239,6 +261,29 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
     lineMovePollId = window.setInterval(pollMovableLinePrices, 350);
   }
 
+  function startLatestPricePoll() {
+    if (latestPricePollId !== null) return;
+    latestPricePollId = window.setInterval(pollLatestPrice, 250);
+  }
+
+  function pollLatestPrice() {
+    if (!bound) return;
+    const price = readLatestChartPrice(bound as BoundChart);
+    if (!Number.isFinite(price) || Number(price) <= 0) return;
+    const now = Date.now();
+    if (Math.abs(Number(price) - lastPostedLatestPrice) < 1 && now - lastPostedLatestPriceAt < 1000) return;
+    lastPostedLatestPrice = Number(price);
+    lastPostedLatestPriceAt = now;
+    window.postMessage({
+      source: "wiley-chart-bridge",
+      event: "latestPrice",
+      price: Number(price),
+      rawText: String(price),
+      readAtMs: now,
+      symbol: safeGetSymbol(bound.chart),
+    }, window.location.origin);
+  }
+
   function pollMovableLinePrices() {
     if (!bound) return;
     desiredLines.forEach((line) => {
@@ -250,6 +295,8 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
       window.postMessage({
         source: "wiley-chart-bridge",
         event: "lineMoved",
+        targetId: line.targetId || line.positionId,
+        tradePositionId: line.tradePositionId || null,
         positionId: line.positionId,
         kind: line.kind,
         price: line.price,
@@ -292,6 +339,7 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
     });
     bound = await bindPromise;
     attachSymbolWatcher(bound);
+    startLatestPricePoll();
     return bound;
   }
 
@@ -432,16 +480,18 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
   }
 
   async function upsertStoredMarker(boundChart: BoundChart, marker: StoredMarker): Promise<StoredMarker> {
+    const markerTime = marker.entityId ? marker.time : resolveMarkerTime(boundChart, marker.requestedTime || marker.time);
+    const point = { time: markerTime, price: marker.price };
     const entity = marker.entityId ? safeCall(() => boundChart.chart.getShapeById?.(marker.entityId)) : null;
     if (entity) {
-      safeCall(() => entity.setPoints?.([{ time: marker.time, price: marker.price }]));
+      safeCall(() => entity.setPoints?.([point]));
       safeCall(() => entity.setProperties?.(buildMarkerOverrides(marker)));
-      return marker;
+      return { ...marker, time: markerTime };
     }
     if (!boundChart.chart?.createShape) {
       throw new Error("No TradingView marker creation API found.");
     }
-    const id = await boundChart.chart.createShape({ time: marker.time, price: marker.price }, {
+    const id = await boundChart.chart.createShape(point, {
       shape: marker.style.shape || (marker.side === "buy" ? "arrow_up" : "arrow_down"),
       lock: true,
       disableSelection: false,
@@ -449,7 +499,7 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
       disableUndo: true,
       overrides: buildMarkerOverrides(marker),
     });
-    return { ...marker, entityId: id, mode: "public" };
+    return { ...marker, time: markerTime, entityId: id, mode: "public" };
   }
 
   function removeStoredMarker(boundChart: BoundChart, marker: StoredMarker) {
@@ -515,6 +565,58 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
     return Number.isFinite(sourcePrice) ? sourcePrice : null;
   }
 
+  function readLatestChartPrice(boundChart: BoundChart): number | null {
+    const series =
+      safeCall(() => boundChart.chartWidget._model?.mainSeries?.())
+      || safeCall(() => boundChart.chartWidget.model?.().mainSeries?.())
+      || safeCall(() => boundChart.chart.mainSeries?.());
+    const bars =
+      safeCall(() => series?.bars?.())
+      || safeCall(() => series?.data?.())
+      || safeCall(() => series?._data);
+    const lastIndex = safeCall(() => bars?.lastIndex?.());
+    const candidates = [
+      safeCall(() => bars?.last?.()),
+      safeCall(() => bars?.lastValue?.()),
+      safeCall(() => bars?.valueAt?.(lastIndex)),
+      safeCall(() => bars?.search?.(lastIndex)),
+      safeCall(() => series?.lastValueData?.()),
+      safeCall(() => series?.lastPriceData?.()),
+      safeCall(() => series?.priceScale?.().lastValue?.()),
+    ];
+    for (const candidate of candidates) {
+      const price = extractBarPrice(candidate);
+      if (Number.isFinite(price) && Number(price) > 0) return price;
+    }
+    return null;
+  }
+
+  function extractBarPrice(value: unknown): number | null {
+    if (typeof value === "number") return Number.isFinite(value) && value > 0 ? value : null;
+    if (!value || typeof value !== "object") return null;
+    if (Array.isArray(value)) {
+      const close = Number(value[4] ?? value[value.length - 1]);
+      return Number.isFinite(close) && close > 0 ? close : null;
+    }
+    const record = value as Record<string, unknown>;
+    const direct = Number(
+      record.close
+      ?? record.value
+      ?? record.price
+      ?? record.last
+      ?? record.lastPrice
+      ?? record._value
+      ?? record._close
+      ?? record._price,
+    );
+    if (Number.isFinite(direct) && direct > 0) return direct;
+    if (Array.isArray(record.value)) return extractBarPrice(record.value);
+    if (Array.isArray(record._value)) return extractBarPrice(record._value);
+    if (record.value && typeof record.value === "object") return extractBarPrice(record.value);
+    if (record._value && typeof record._value === "object") return extractBarPrice(record._value);
+    return null;
+  }
+
   function readPointList(source: any): any[] | null {
     const points = safeCall(() => source.getPoints?.())
       || safeCall(() => source.points?.())
@@ -556,6 +658,105 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
     return safeCall(() => boundChart.chartWidget.getTimeScale?.().rightmostIndex?.())
       || safeCall(() => boundChart.chartWidget._model?.timeScale?.().rightmostIndex?.())
       || 0;
+  }
+
+  function resolveMarkerTime(boundChart: BoundChart, requestedTime: number) {
+    const time = Math.floor(Number(requestedTime));
+    if (!Number.isFinite(time) || time <= 0) return Math.floor(Date.now() / 1000);
+    const barTime = resolveChartBarTimeAtOrBefore(boundChart, time);
+    if (barTime) return barTime;
+    const resolutionSeconds = resolveChartResolutionSeconds(boundChart);
+    if (!Number.isFinite(resolutionSeconds) || resolutionSeconds <= 1) return time;
+    return Math.floor(time / resolutionSeconds) * resolutionSeconds;
+  }
+
+  function resolveChartBarTimeAtOrBefore(boundChart: BoundChart, requestedTime: number) {
+    const times = collectChartBarTimes(boundChart)
+      .filter((time) => Number.isFinite(time) && time > 0 && time <= requestedTime)
+      .sort((a, b) => b - a);
+    return times[0] || null;
+  }
+
+  function collectChartBarTimes(boundChart: BoundChart) {
+    const series =
+      safeCall(() => boundChart.chartWidget._model?.mainSeries?.())
+      || safeCall(() => boundChart.chartWidget.model?.().mainSeries?.())
+      || safeCall(() => boundChart.chart.mainSeries?.());
+    const bars =
+      safeCall(() => series?.bars?.())
+      || safeCall(() => series?.data?.())
+      || safeCall(() => series?._data);
+    const values = [
+      safeCall(() => bars?.last?.()),
+      safeCall(() => bars?.lastValue?.()),
+      safeCall(() => bars?.valueAt?.(safeCall(() => bars?.lastIndex?.()))),
+      safeCall(() => bars?.search?.(safeCall(() => bars?.lastIndex?.()))),
+      ...extractCollectionValues(safeCall(() => bars?._items)),
+      ...extractCollectionValues(safeCall(() => bars?._data)),
+      ...extractCollectionValues(safeCall(() => bars?._bars)),
+      ...extractCollectionValues(safeCall(() => bars?._itemsByIndex)),
+      ...extractCollectionValues(safeCall(() => bars?._plotRows)),
+    ];
+    return Array.from(new Set(values.map(extractBarTimeSeconds).filter(Boolean) as number[]));
+  }
+
+  function extractCollectionValues(value: unknown) {
+    if (!value) return [];
+    if (Array.isArray(value)) return value;
+    if (value instanceof Map) return Array.from(value.values());
+    if (typeof value === "object") return Object.values(value as Record<string, unknown>);
+    return [];
+  }
+
+  function extractBarTimeSeconds(value: unknown): number | null {
+    if (typeof value === "number") return normalizeEpochSeconds(value);
+    if (!value || typeof value !== "object") return null;
+    const record = value as Record<string, unknown>;
+    const direct =
+      record.time
+      || record.timestamp
+      || record._time
+      || record._internal_time
+      || record.originalTime
+      || record._internal_originalTime;
+    if (direct) return extractBarTimeSeconds(direct);
+    if (Array.isArray(record.value) && record.value.length) return extractBarTimeSeconds(record.value[0]);
+    if (Array.isArray(record._value) && record._value.length) return extractBarTimeSeconds(record._value[0]);
+    if (record.value && typeof record.value === "object") return extractBarTimeSeconds(record.value);
+    return null;
+  }
+
+  function normalizeEpochSeconds(value: number) {
+    if (!Number.isFinite(value) || value <= 0) return null;
+    if (value > 1_000_000_000_000) return Math.floor(value / 1000);
+    if (value > 1_000_000_000) return Math.floor(value);
+    return null;
+  }
+
+  function resolveChartResolutionSeconds(boundChart: BoundChart) {
+    const resolution =
+      safeCall(() => boundChart.chart.resolution?.())
+      || safeCall(() => boundChart.chart.interval?.())
+      || safeCall(() => boundChart.api.activeChart?.().resolution?.())
+      || safeCall(() => boundChart.chartWidget.activeChart?.().resolution?.())
+      || safeCall(() => boundChart.chartWidget.symbolInterval?.().interval)
+      || safeCall(() => boundChart.chartWidget._model?.mainSeries?.().interval?.());
+    return parseChartResolutionSeconds(resolution);
+  }
+
+  function parseChartResolutionSeconds(value: unknown) {
+    const raw = String(value || "").trim().toUpperCase();
+    if (!raw) return 0;
+    const match = raw.match(/^(\d+(?:\.\d+)?)([A-Z]*)$/);
+    if (!match) return 0;
+    const amount = Number(match[1]);
+    if (!Number.isFinite(amount) || amount <= 0) return 0;
+    const unit = match[2] || "MIN";
+    if (unit === "S") return Math.round(amount);
+    if (unit === "D") return Math.round(amount * 86_400);
+    if (unit === "W") return Math.round(amount * 604_800);
+    if (unit === "M") return Math.round(amount * 2_592_000);
+    return Math.round(amount * 60);
   }
 
   function attachSymbolWatcher(boundChart: BoundChart) {
@@ -612,7 +813,7 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
   }
 
   function normalizeMarkerStyle(side: ExecutionMarkerSide, style: ExecutionMarkerStyle): ExecutionMarkerStyle {
-    const color = side === "buy" ? "#22c55e" : "#ef4444";
+    const color = side === "buy" ? "#22c55e" : "#f97316";
     return {
       color: style.color || color,
       textColor: "#ffffff",

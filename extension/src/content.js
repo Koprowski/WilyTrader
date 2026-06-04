@@ -2,7 +2,7 @@
   "use strict";
 
   const STORAGE_KEY = "wilytrader_state_v2";
-  const SCHEMA_VERSION = 13;
+  const SCHEMA_VERSION = 15;
   const PANEL_SCALE_MIN = 0.7;
   const PANEL_SCALE_MAX = 1.5;
   const PANEL_VIEWPORT_MARGIN = 8;
@@ -15,6 +15,10 @@
   const PULSE_AUTO_BUY_TTL_MS = 2 * 60 * 1000;
   const PULSE_AUTO_BUY_CHECK_MS = 350;
   const AXIOM_TARGET_TRIGGER_INTERVAL_MS = 500;
+  const AXIOM_QUOTE_HEARTBEAT_MS = 750;
+  const AXIOM_QUOTE_REGISTRY_MAX_AGE_MS = 5_000;
+  const MARKET_CAP_ROLLING_SAMPLE_INTERVAL_MS = 250;
+  const MARKET_CAP_ROLLING_PERSIST_THROTTLE_MS = 2_000;
   const EXIT_TARGET_MARKET_CAP_STEP = 1000;
   const EXIT_TARGET_MENU_MAX_OPTIONS = 60;
   const EXIT_TARGET_KINDS = {
@@ -81,6 +85,9 @@
     ["wily", "mem", "trader_state_v1"].join(""),
   ];
   const BRIDGE_BASE_URL = "http://127.0.0.1:17365/v1/wilytrader";
+  const DESKTOP_STATUS_HEARTBEAT_MS = 5_000;
+  const LIVE_POSITION_DIAGNOSTIC_MS = 3_000;
+  const PULSE_AUTO_BUY_DIAGNOSTIC_MS = 2_000;
   const TRADE_SOUND_PATH = "assets/cash-register-sound.mp3";
   const TRADE_SOUND_GAIN = 0.85;
   const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
@@ -89,6 +96,17 @@
   const DEFAULT_PRICES = { SOL: 190, BNB: 600 };
   const SOLANA_ADDRESS_PATTERN = /[1-9A-HJ-NP-Za-km-z]{32,44}/;
   const ETHEREUM_ADDRESS_PATTERN = /0x[a-fA-F0-9]{40}/;
+  const AXIOM_HEADER_MARKET_CAP_SOURCE = "axiom-header-market-cap-selector";
+  const AXIOM_TITLE_MARKET_CAP_SOURCE = "axiom-title";
+  const AXIOM_VISIBLE_MARKET_CAP_SOURCE = "axiom-visible-header";
+  const AXIOM_CHART_MARKET_CAP_SOURCE = "axiom-chart-latest";
+  const AXIOM_CHART_MARKET_CAP_MAX_AGE_MS = 2_000;
+  const AXIOM_MARKET_CAP_SOURCE_AGREEMENT_MAX_PCT = 8;
+  const AXIOM_EXECUTION_QUOTE_STABLE_MS = 900;
+  const AXIOM_EXECUTION_CHART_CONFIRM_MAX_MISMATCH_PCT = 12;
+  const AXIOM_HEADER_MARKET_CAP_SELECTORS = [
+    String.raw`#platform-layout-container > div.hidden.flex-col.sm\:flex > div > div > div.flex.h-\[calc\(100vh\+360px\)\].min-w-0.flex-1.flex-col.border-primaryStroke.border-r > div.flex.min-h-\[0px\].flex-1.flex-col > div > div.flex.min-h-\[0px\].min-w-\[0px\].flex-1.flex-col > div.relative.flex.max-h-\[64px\].min-h-\[64px\].flex-row.items-center.justify-start.border-b.border-primaryStroke.sm\:pl-\[34px\] > div.flex.flex-1.flex-row.items-center.justify-start.overflow-x-auto.overflow-y-hidden.\[-ms-overflow-style\:none\].\[scrollbar-width\:none\].\[\&\:\:-webkit-scrollbar\]\:hidden > div > div:nth-child(2) > div > span > span`,
+  ];
   const PLATFORM_ADAPTERS = [
     {
       id: "padre",
@@ -117,7 +135,7 @@
       defaultBuyAmount: 0.5,
       buyAmounts: [0.1, 0.25, 0.5, 1, 2, 5],
       sellPercents: [5, 10, 15, 33, 50, 67, 85, 100],
-      platformFeePct: 2,
+      platformFeePct: 0.95,
       buyGasFeeNative: AGGRESSIVE_MEME_FEES.gasFeeNative,
       sellGasFeeNative: AGGRESSIVE_MEME_FEES.gasFeeNative,
       buyPriorityFeeNative: AGGRESSIVE_MEME_FEES.priorityFeeNative,
@@ -134,7 +152,7 @@
       trackerPosition: null,
       trackerSize: null,
       trackerScale: 1,
-      bridgeEnabled: false,
+      bridgeEnabled: true,
       autoScreenshotOnTrade: true,
       fallbackDownloadsEnabled: true,
       updateChecksEnabled: true,
@@ -177,6 +195,8 @@
   let lastAxiomChartArtifactKey = null;
   let lastAxiomExitTargetSyncKey = null;
   let lastAxiomExitTargetLineKeys = new Set();
+  let lastAxiomChartMarketCapQuote = null;
+  let lastAxiomExecutionQuoteStability = null;
   let targetExitInFlight = null;
   let lastExitTargetMenuOpenedAt = 0;
   let pulseQuickBuyBound = false;
@@ -188,6 +208,15 @@
   let pulseQuickBuyTargetSeq = 0;
   let pulseQuickBuyTargets = new Map();
   let pulseQuickBuyLabelSeq = 0;
+  let lastLivePositionDiagnosticAt = 0;
+  let lastLivePositionDiagnosticKey = "";
+  let lastPulseAutoBuyDiagnosticAt = 0;
+  let lastPulseAutoBuyDiagnosticKey = "";
+  let lastTradeButtonExecutionKey = "";
+  let lastTradeButtonExecutionAt = 0;
+  let lastRollingMarketCapPersistAt = 0;
+  let lastRollingMarketCapDiagnosticAt = 0;
+  let lastRollingMarketCapDiagnosticKey = "";
   let pulseQuickBuyTokenLabels = new Map();
   let pendingPulseAutoBuyCheckId = null;
   let updateCheckTimerId = null;
@@ -237,7 +266,11 @@
     preloadTradeExecutionSound();
     schedulePendingPulseAutoBuyCheck();
     bindRouteWatcher();
+    bindRollingMarketCapSampler();
+    bindLivePositionWatcher();
     bindExitTargetWatcher();
+    bindAxiomQuoteHeartbeat();
+    bindDesktopStatusHeartbeat();
     startUpdateChecks();
     runTask(sendDesktopExtensionStatus("startup"));
     if (isOverlayVisibleRoute()) void syncBridge("startup");
@@ -324,6 +357,106 @@
         console.error("[WilyTrader]", error);
       }
     });
+  }
+
+  function emitDiagnostic(stage, details = {}, options = {}) {
+    const payload = {
+      stage,
+      at: new Date().toISOString(),
+      installedVersion: getInstalledExtensionVersion(),
+      pageUrl: window.location.href,
+      pageTitle: document.title,
+      bridgeEnabled: Boolean(state?.settings?.bridgeEnabled),
+      executionCount: Array.isArray(state?.executions) ? state.executions.length : null,
+      lastSyncedExecutionId,
+      activeToken: summarizeToken(activeToken),
+      details,
+    };
+    console.debug("[WilyTrader][diagnostic]", payload);
+    if (options.desktop !== false) runTask(postDesktopDiagnostic(payload));
+  }
+
+  async function postDesktopDiagnostic(payload) {
+    if (!extensionContextValid) return;
+    await fetch(`${BRIDGE_BASE_URL}/diagnostics`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  }
+
+  function getInstalledExtensionVersion() {
+    try {
+      return chrome?.runtime?.getManifest?.()?.version || null;
+    } catch {
+      return null;
+    }
+  }
+
+  function summarizeToken(token) {
+    if (!token) return null;
+    return {
+      key: token.key || null,
+      name: token.name || null,
+      address: token.address || null,
+      chain: token.chain || null,
+      marketCap: round(token.marketCap, 2),
+      marketCapSource: token.marketCapSource || null,
+      marketCapRawText: token.marketCapRawText || null,
+      marketCapSelector: token.marketCapSelector || null,
+      marketCapReadAtMs: token.marketCapReadAtMs || null,
+      marketCapRejectedSource: token.marketCapRejectedSource || null,
+      marketCapRejectedRawText: token.marketCapRejectedRawText || null,
+      marketCapRejectedSelector: token.marketCapRejectedSelector || null,
+      marketCapRejectedMarketCap: round(token.marketCapRejectedMarketCap, 2),
+      marketCapMismatchPct: round(token.marketCapMismatchPct, 4),
+      unitPriceNative: round(token.unitPriceNative, 12),
+      url: token.url || null,
+    };
+  }
+
+  function summarizePosition(position) {
+    if (!position) return null;
+    return {
+      positionId: position.positionId || null,
+      tokenKey: position.tokenKey || null,
+      tokenName: position.tokenName || null,
+      costNative: round(position.costNative),
+      tokenAmount: round(position.tokenAmount, 12),
+      avgEntryNative: round(position.avgEntryNative, 12),
+      buyCount: position.buyCount || 0,
+      sellCount: position.sellCount || 0,
+      updatedAt: position.updatedAt || null,
+    };
+  }
+
+  function buildMarketCapDiagnostics() {
+    const selectedQuote = detectMarketCapQuote();
+    const axiomHeaderQuote = detectAxiomHeaderMarketCapQuote();
+    const axiomChartQuote = getFreshAxiomChartMarketCapQuote();
+    return {
+      selected: round(selectedQuote?.marketCap, 2),
+      selectedSource: selectedQuote?.source || null,
+      selectedRawText: selectedQuote?.rawText || null,
+      selectedSelector: selectedQuote?.selector || null,
+      selectedRejectedSource: selectedQuote?.rejectedSource || null,
+      selectedRejectedRawText: selectedQuote?.rejectedRawText || null,
+      selectedRejectedSelector: selectedQuote?.rejectedSelector || null,
+      selectedRejectedMarketCap: round(selectedQuote?.rejectedMarketCap, 2),
+      selectedMismatchPct: round(selectedQuote?.mismatchPct, 4),
+      axiomHeader: round(axiomHeaderQuote?.marketCap, 2),
+      axiomHeaderRawText: axiomHeaderQuote?.rawText || null,
+      axiomHeaderSelector: axiomHeaderQuote?.selector || null,
+      axiomTitle: round(detectAxiomTitleMarketCap(), 2),
+      axiomVisible: round(detectAxiomVisibleMarketCap(), 2),
+      axiomChartLatest: round(axiomChartQuote?.marketCap, 2),
+      axiomChartLatestAgeMs: axiomChartQuote ? Math.max(0, Date.now() - Number(axiomChartQuote.readAtMs || 0)) : null,
+      axiomExecutionQuoteStableMs: lastAxiomExecutionQuoteStability
+        ? Math.max(0, Date.now() - Number(lastAxiomExecutionQuoteStability.firstSeenAtMs || 0))
+        : null,
+      axiomExecutionQuoteKey: lastAxiomExecutionQuoteStability?.quoteKey || null,
+      pageTitle: document.title || "",
+    };
   }
 
   function preloadTradeExecutionSound() {
@@ -568,6 +701,9 @@
     if (Number(storedSettings.sellBribeFeeNative) === 0.003) {
       settings.sellBribeFeeNative = DEFAULT_STATE.settings.sellBribeFeeNative;
     }
+    if (Number(storedSettings.platformFeePct) === 2 || storedSettings.platformFeePct === undefined) {
+      settings.platformFeePct = DEFAULT_STATE.settings.platformFeePct;
+    }
     if (storedSettings.useCustomDelay === undefined || storedSettings.useCustomDelay === false) {
       settings.useCustomDelay = DEFAULT_STATE.settings.useCustomDelay;
     }
@@ -707,7 +843,24 @@
     };
   }
 
-  function buildDetectedToken(adapter, { address, chain = "SOL", platformChain = "solana", name, marketCap, url = window.location.href }) {
+  function buildDetectedToken(adapter, {
+    address,
+    chain = "SOL",
+    platformChain = "solana",
+    name,
+    marketCap,
+    marketCapSource = null,
+    marketCapRawText = null,
+    marketCapSelector = null,
+    marketCapReadAtMs = null,
+    marketCapPageTitle = null,
+    marketCapRejectedSource = null,
+    marketCapRejectedRawText = null,
+    marketCapRejectedSelector = null,
+    marketCapRejectedMarketCap = null,
+    marketCapMismatchPct = null,
+    url = window.location.href,
+  }) {
     const unitPriceUsd = marketCap ? marketCap / MARKET_CAP_SUPPLY : null;
     const chainUsd = DEFAULT_PRICES[chain] || 1;
     const unitPriceNative = unitPriceUsd ? unitPriceUsd / chainUsd : null;
@@ -723,10 +876,86 @@
       key: `${adapter.id}:${chain}:${address}`,
       name: name || shortenAddress(address),
       marketCap,
+      marketCapSource,
+      marketCapRawText,
+      marketCapSelector,
+      marketCapReadAtMs,
+      marketCapPageTitle,
+      marketCapRejectedSource,
+      marketCapRejectedRawText,
+      marketCapRejectedSelector,
+      marketCapRejectedMarketCap,
+      marketCapMismatchPct,
       unitPriceUsd,
       unitPriceNative,
       url,
     };
+  }
+
+  function cloneTokenWithMarketCapQuote(token, quote) {
+    const marketCap = Number(quote?.marketCap || 0);
+    if (!token?.key || !Number.isFinite(marketCap) || marketCap <= 0) return token;
+    const chainUsd = DEFAULT_PRICES[token.chain] || 1;
+    const unitPriceUsd = marketCap / MARKET_CAP_SUPPLY;
+    return {
+      ...token,
+      marketCap,
+      marketCapSource: quote.source || token.marketCapSource || null,
+      marketCapRawText: quote.rawText || token.marketCapRawText || null,
+      marketCapSelector: quote.selector || null,
+      marketCapReadAtMs: quote.readAtMs || Date.now(),
+      marketCapPageTitle: document.title || token.marketCapPageTitle || null,
+      marketCapRejectedSource: null,
+      marketCapRejectedRawText: null,
+      marketCapRejectedSelector: null,
+      marketCapRejectedMarketCap: 0,
+      marketCapMismatchPct: 0,
+      unitPriceUsd,
+      unitPriceNative: unitPriceUsd / chainUsd,
+    };
+  }
+
+  function getFreshAxiomChartMarketCapQuote(maxAgeMs = AXIOM_CHART_MARKET_CAP_MAX_AGE_MS) {
+    const quote = lastAxiomChartMarketCapQuote;
+    if (!quote?.marketCap || quote.source !== AXIOM_CHART_MARKET_CAP_SOURCE) return null;
+    const readAtMs = Number(quote.readAtMs || 0);
+    if (!Number.isFinite(readAtMs) || readAtMs <= 0) return null;
+    if (Date.now() - readAtMs > maxAgeMs) return null;
+    if (!isAxiomMemeRoute(new URL(window.location.href))) return null;
+    return quote;
+  }
+
+  function getMarketCapTrackingToken(token) {
+    if (token?.platform !== "axiom") return token;
+    const chartQuote = getFreshAxiomChartMarketCapQuote();
+    return chartQuote ? cloneTokenWithMarketCapQuote(token, chartQuote) : token;
+  }
+
+  async function getRegistryMarketCapTrackingToken(token) {
+    if (token?.platform !== "axiom" || !token?.key) return token;
+    const response = await sendRuntimeMessage({
+      type: "WILYTRADER_GET_TOKEN_QUOTE",
+      tokenKey: token.key,
+      tokenAddress: token.address || null,
+      maxAgeMs: AXIOM_QUOTE_REGISTRY_MAX_AGE_MS,
+    });
+    const quote = response?.quote || null;
+    if (!quote?.marketCap) return token;
+    return cloneTokenWithMarketCapQuote(token, {
+      marketCap: Number(quote.marketCap),
+      source: quote.source || "quote-registry",
+      rawText: quote.rawText || quote.title || null,
+      selector: null,
+      readAtMs: quote.readAtMs || Date.now(),
+    });
+  }
+
+  async function getExitTargetTriggerToken(token) {
+    const localToken = getMarketCapTrackingToken(token);
+    const registryToken = await getRegistryMarketCapTrackingToken(localToken);
+    const localReadAtMs = Number(localToken?.marketCapReadAtMs || 0);
+    const registryReadAtMs = Number(registryToken?.marketCapReadAtMs || 0);
+    return registryReadAtMs >= localReadAtMs ? registryToken : localToken;
   }
 
   function detectPadreToken(url) {
@@ -738,13 +967,23 @@
     const chain = chainSlug === "bsc" ? "BNB" : "SOL";
     const platformChain = chainSlug || "solana";
     const name = detectTokenName(address, adapter);
-    const marketCap = detectMarketCap();
+    const marketCapQuote = detectMarketCapQuote();
     return buildDetectedToken(adapter, {
       address,
       chain,
       platformChain,
       name,
-      marketCap,
+      marketCap: marketCapQuote?.marketCap ?? null,
+      marketCapSource: marketCapQuote?.source ?? null,
+      marketCapRawText: marketCapQuote?.rawText ?? null,
+      marketCapSelector: marketCapQuote?.selector ?? null,
+      marketCapReadAtMs: marketCapQuote?.readAtMs ?? null,
+      marketCapPageTitle: marketCapQuote?.pageTitle ?? null,
+      marketCapRejectedSource: marketCapQuote?.rejectedSource ?? null,
+      marketCapRejectedRawText: marketCapQuote?.rejectedRawText ?? null,
+      marketCapRejectedSelector: marketCapQuote?.rejectedSelector ?? null,
+      marketCapRejectedMarketCap: marketCapQuote?.rejectedMarketCap ?? null,
+      marketCapMismatchPct: marketCapQuote?.mismatchPct ?? null,
     });
   }
 
@@ -752,13 +991,23 @@
     const adapter = getPlatformAdapter(url.hostname);
     const address = detectAxiomTokenAddress(url);
     const name = detectTokenName(address, adapter);
-    const marketCap = detectMarketCap();
+    const marketCapQuote = detectMarketCapQuote();
     return buildDetectedToken(adapter, {
       address,
       chain: "SOL",
       platformChain: "solana",
       name,
-      marketCap,
+      marketCap: marketCapQuote?.marketCap ?? null,
+      marketCapSource: marketCapQuote?.source ?? null,
+      marketCapRawText: marketCapQuote?.rawText ?? null,
+      marketCapSelector: marketCapQuote?.selector ?? null,
+      marketCapReadAtMs: marketCapQuote?.readAtMs ?? null,
+      marketCapPageTitle: marketCapQuote?.pageTitle ?? null,
+      marketCapRejectedSource: marketCapQuote?.rejectedSource ?? null,
+      marketCapRejectedRawText: marketCapQuote?.rejectedRawText ?? null,
+      marketCapRejectedSelector: marketCapQuote?.rejectedSelector ?? null,
+      marketCapRejectedMarketCap: marketCapQuote?.rejectedMarketCap ?? null,
+      marketCapMismatchPct: marketCapQuote?.mismatchPct ?? null,
     });
   }
 
@@ -810,8 +1059,9 @@
     if (headingText && !findTokenAddress(headingText)) return headingText;
 
     const title = document.title || "";
-    const titleMatch = title.match(/^([^|$]+?)(?:\s*[|$]|$)/);
-    const fromTitle = cleanText(titleMatch?.[1]);
+    const fromTitle = adapter?.id === "axiom"
+      ? extractAxiomTitleTokenName(title)
+      : cleanText(title.match(/^([^|$]+?)(?:\s*[|$]|$)/)?.[1]);
     if (fromTitle && !fromTitle.toLowerCase().includes(adapter?.id || "")) return fromTitle;
 
     return address ? shortenAddress(address) : "Unknown token";
@@ -883,26 +1133,306 @@
     return options.allowPlainName ? cleanTokenDisplayName(text) : null;
   }
 
-  function cleanTokenDisplayName(value) {
+  function extractAxiomTitleTokenName(value) {
     const text = cleanText(value);
+    if (!text || /axiom/i.test(text) && !/\$[0-9]/.test(text)) return null;
+    const beforeMarketCap = text.match(/^(.+?)\s+(?:[↑↓↗↘▲▼]\s*)?\$[0-9,.]+(?:\.[0-9]+)?\s*[KMB]?\b/i)?.[1];
+    const beforeSeparator = text.match(/^([^|]+?)(?:\s*\||$)/)?.[1];
+    return cleanTokenDisplayName(beforeMarketCap || beforeSeparator);
+  }
+
+  function cleanTokenDisplayName(value) {
+    const text = cleanText(value).replace(/[↑↓↗↘▲▼]/g, "").trim();
     if (!text || text.length < 2 || text.length > 80) return null;
-    if (/^(price|market|chart|trade|token|usd|sol)$/i.test(text)) return null;
-    if (/^[A-Z0-9$]{2,16}$/.test(text)) return null;
+    if (/^\$?\s*[0-9,.]+(?:\.[0-9]+)?\s*[KMB]?$/i.test(text)) return null;
+    if (/^(price|market|chart|trade|token|usd|sol|mc|mcap|tx|vol|buys|sells|net|holders|liq|p1|p2|p3|f)$/i.test(text)) return null;
     if (!/[A-Za-z]/.test(text)) return null;
     return text;
   }
 
   function detectMarketCap() {
-    const titleMatch = (document.title || "").match(/\$([0-9.]+)\s*([KMB])?/i);
-    if (titleMatch) return parseCompactNumber(titleMatch[1], titleMatch[2]);
+    return detectMarketCapQuote()?.marketCap ?? null;
+  }
+
+  function detectMarketCapQuote() {
+    const axiomHeaderQuote = detectAxiomHeaderMarketCapQuote();
+    const titleQuote = detectAxiomTitleMarketCapQuote();
+    if (titleQuote?.marketCap && axiomHeaderQuote?.marketCap) {
+      const mismatchPct = calculateMarketCapMismatchPct(titleQuote.marketCap, axiomHeaderQuote.marketCap);
+      if (mismatchPct > AXIOM_MARKET_CAP_SOURCE_AGREEMENT_MAX_PCT) {
+        return buildMarketCapQuoteWithRejectedSource(titleQuote, axiomHeaderQuote, mismatchPct);
+      }
+      return {
+        ...titleQuote,
+        comparedSource: axiomHeaderQuote.source,
+        comparedMarketCap: axiomHeaderQuote.marketCap,
+        mismatchPct: round(mismatchPct, 4),
+      };
+    }
+
+    if (titleQuote?.marketCap) return titleQuote;
+
+    const visibleAxiomMarketCap = detectAxiomVisibleMarketCap();
+    if (visibleAxiomMarketCap && axiomHeaderQuote?.marketCap) {
+      const visibleQuote = buildAxiomVisibleMarketCapQuote(visibleAxiomMarketCap);
+      const mismatchPct = calculateMarketCapMismatchPct(visibleQuote.marketCap, axiomHeaderQuote.marketCap);
+      if (mismatchPct <= AXIOM_MARKET_CAP_SOURCE_AGREEMENT_MAX_PCT) {
+        return {
+          ...axiomHeaderQuote,
+          comparedSource: visibleQuote.source,
+          comparedMarketCap: visibleQuote.marketCap,
+          mismatchPct: round(mismatchPct, 4),
+        };
+      }
+      return buildMarketCapQuoteWithRejectedSource(visibleQuote, axiomHeaderQuote, mismatchPct);
+    }
+
+    if (axiomHeaderQuote?.marketCap) return axiomHeaderQuote;
+
+    if (visibleAxiomMarketCap) return buildAxiomVisibleMarketCapQuote(visibleAxiomMarketCap);
 
     const candidates = getPageTextCandidates(1200);
 
     for (const text of candidates) {
       const match = text.match(/(?:MC|MCap|Market Cap)\s*:?\s*\$?\s*([0-9.]+)\s*([KMB])?/i);
-      if (match) return parseCompactNumber(match[1], match[2]);
+      if (match) return { marketCap: parseCompactNumber(match[1], match[2]), source: "page-market-cap-text" };
     }
     return null;
+  }
+
+  function detectAxiomTitleMarketCapQuote() {
+    const marketCap = detectAxiomTitleMarketCap();
+    if (!marketCap) return null;
+    return {
+      marketCap,
+      source: AXIOM_TITLE_MARKET_CAP_SOURCE,
+      rawText: document.title || "",
+      selector: null,
+      readAtMs: Date.now(),
+      pageTitle: document.title || "",
+    };
+  }
+
+  function buildAxiomVisibleMarketCapQuote(marketCap) {
+    return {
+      marketCap,
+      source: AXIOM_VISIBLE_MARKET_CAP_SOURCE,
+      rawText: null,
+      selector: null,
+      readAtMs: Date.now(),
+      pageTitle: document.title || "",
+    };
+  }
+
+  function calculateMarketCapMismatchPct(primaryMarketCap, comparisonMarketCap) {
+    const primary = Number(primaryMarketCap);
+    const comparison = Number(comparisonMarketCap);
+    if (!Number.isFinite(primary) || primary <= 0 || !Number.isFinite(comparison) || comparison <= 0) return 0;
+    return Math.abs(((comparison - primary) / primary) * 100);
+  }
+
+  function buildMarketCapQuoteWithRejectedSource(selectedQuote, rejectedQuote, mismatchPct) {
+    return {
+      ...selectedQuote,
+      rejectedSource: rejectedQuote?.source || null,
+      rejectedRawText: rejectedQuote?.rawText || null,
+      rejectedSelector: rejectedQuote?.selector || null,
+      rejectedMarketCap: rejectedQuote?.marketCap || null,
+      mismatchPct: round(mismatchPct, 4),
+    };
+  }
+
+  function detectAxiomHeaderMarketCapQuote() {
+    if (getPlatformAdapter(window.location.hostname)?.id !== "axiom") return null;
+    if (!isAxiomMemeRoute(new URL(window.location.href))) return null;
+
+    for (const selector of AXIOM_HEADER_MARKET_CAP_SELECTORS) {
+      const element = queryFirstPageElement(selector);
+      const rawText = cleanText(element?.textContent);
+      const marketCap = parseCurrencyMarketCap(rawText);
+      if (!element || !marketCap || !isVisiblePageElement(element)) continue;
+      const rect = element.getBoundingClientRect();
+      return {
+        marketCap,
+        source: AXIOM_HEADER_MARKET_CAP_SOURCE,
+        rawText,
+        selector,
+        readAtMs: Date.now(),
+        pageTitle: document.title || "",
+        rect: {
+          left: round(rect.left, 2),
+          top: round(rect.top, 2),
+          width: round(rect.width, 2),
+          height: round(rect.height, 2),
+        },
+      };
+    }
+
+    return null;
+  }
+
+  function detectAxiomTitleMarketCap() {
+    if (getPlatformAdapter(window.location.hostname)?.id !== "axiom") return null;
+    const titleMatch = (document.title || "").match(/\$([0-9,.]+)\s*([KMB])?/i);
+    return titleMatch ? parseCompactNumber(titleMatch[1], titleMatch[2]) : null;
+  }
+
+  function detectAxiomVisibleMarketCap() {
+    if (getPlatformAdapter(window.location.hostname)?.id !== "axiom") return null;
+    const candidates = Array.from(document.querySelectorAll("body *"))
+      .filter((element) => !root?.contains(element))
+      .map((element) => {
+        const text = cleanText(element.textContent);
+        if (!/^\$[0-9,.]+(?:\.[0-9]+)?\s*[KMB]$/i.test(text)) return null;
+        const rect = element.getBoundingClientRect();
+        if (!rect || rect.width <= 0 || rect.height <= 0) return null;
+        if (rect.top < 0 || rect.top > 155 || rect.left < 0 || rect.right > window.innerWidth) return null;
+        const style = window.getComputedStyle(element);
+        if (style.visibility === "hidden" || style.display === "none" || Number(style.opacity) === 0) return null;
+        return {
+          text,
+          marketCap: parseCurrencyMarketCap(text),
+          left: rect.left,
+          top: rect.top,
+        };
+      })
+      .filter((candidate) => candidate?.marketCap && candidate.marketCap >= 1_000)
+      .sort((a, b) => a.left - b.left || a.top - b.top);
+    return candidates[0]?.marketCap || null;
+  }
+
+  function getAxiomExecutionQuoteReadiness(token) {
+    if (token?.platform !== "axiom" || !token?.key) return { ready: true, reason: "non-axiom" };
+    if (!isAxiomMemeRoute(new URL(window.location.href))) {
+      resetAxiomExecutionQuoteStability();
+      return { ready: false, message: "Waiting for Axiom token page before execution." };
+    }
+    if (/^\s*Axiom(?:\s+SOL)?\s*\|\s*Pulse\s*$/i.test(document.title || "")) {
+      resetAxiomExecutionQuoteStability();
+      return { ready: false, message: "Waiting for Axiom token title before execution." };
+    }
+    const mismatchPct = Number(token.marketCapMismatchPct || 0);
+    const rejectedMarketCap = Number(token.marketCapRejectedMarketCap || 0);
+    if (rejectedMarketCap > 0 && mismatchPct > AXIOM_MARKET_CAP_SOURCE_AGREEMENT_MAX_PCT) {
+      resetAxiomExecutionQuoteStability();
+      return {
+        ready: false,
+        message: "Waiting for Axiom title/header market caps to agree before execution.",
+        mismatchPct: round(mismatchPct, 4),
+      };
+    }
+
+    const stability = updateAxiomExecutionQuoteStability(token);
+    const chartQuote = getFreshAxiomChartMarketCapQuote();
+    if (chartQuote?.marketCap) {
+      const chartMismatchPct = calculateMarketCapMismatchPct(token.marketCap, chartQuote.marketCap);
+      if (chartMismatchPct <= AXIOM_EXECUTION_CHART_CONFIRM_MAX_MISMATCH_PCT) {
+        return {
+          ready: true,
+          reason: token.marketCapSource === AXIOM_TITLE_MARKET_CAP_SOURCE ? "chart-confirmed" : "chart-confirmed-non-title-source",
+          stableMs: stability.stableMs,
+          chartMarketCap: round(chartQuote.marketCap, 2),
+          chartMismatchPct: round(chartMismatchPct, 4),
+          marketCapSource: token.marketCapSource || null,
+        };
+      }
+      return {
+        ready: false,
+        message: token.marketCapSource === AXIOM_TITLE_MARKET_CAP_SOURCE
+          ? "Waiting for Axiom title market cap to match the live chart before execution."
+          : "Waiting for Axiom market cap to match the live chart before execution.",
+        stableMs: stability.stableMs,
+        chartMarketCap: round(chartQuote.marketCap, 2),
+        chartMismatchPct: round(chartMismatchPct, 4),
+        marketCapSource: token.marketCapSource || null,
+      };
+    }
+
+    if (token.marketCapSource !== AXIOM_TITLE_MARKET_CAP_SOURCE) {
+      resetAxiomExecutionQuoteStability();
+      return { ready: false, message: "Waiting for current Axiom market cap before execution.", marketCapSource: token.marketCapSource || null };
+    }
+
+    if (stability.stableMs >= AXIOM_EXECUTION_QUOTE_STABLE_MS) {
+      return { ready: true, reason: "quote-stable", stableMs: stability.stableMs };
+    }
+
+    return {
+      ready: false,
+      message: "Waiting for Axiom market cap to hydrate before execution.",
+      stableMs: stability.stableMs,
+    };
+  }
+
+  function isAuthoritativeAxiomTokenPageQuote(token) {
+    return Boolean(getAxiomExecutionQuoteReadiness(token).ready);
+  }
+
+  async function waitForAxiomExecutionQuoteReady(token, timeoutMs = AXIOM_EXECUTION_QUOTE_STABLE_MS + 1_100) {
+    let latestToken = token;
+    let latestReadiness = getAxiomExecutionQuoteReadiness(latestToken);
+    if (latestReadiness.ready) return { ready: true, token: latestToken, quoteReadiness: latestReadiness };
+
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
+      updateActiveToken();
+      if (activeToken?.key && activeToken.key !== token?.key) {
+        return {
+          ready: false,
+          token: activeToken,
+          quoteReadiness: { ready: false, message: "Execution cancelled: token changed while waiting for Axiom market cap." },
+        };
+      }
+      latestToken = activeToken?.key === token?.key ? activeToken : latestToken;
+      latestReadiness = getAxiomExecutionQuoteReadiness(latestToken);
+      if (latestReadiness.ready) return { ready: true, token: latestToken, quoteReadiness: latestReadiness };
+    }
+
+    return { ready: false, token: latestToken, quoteReadiness: latestReadiness };
+  }
+
+  function updateAxiomExecutionQuoteStability(token) {
+    const now = Date.now();
+    const quoteKey = axiomExecutionQuoteKey(token);
+    const routeKey = `${window.location.pathname}${window.location.search}`;
+    if (
+      !lastAxiomExecutionQuoteStability ||
+      lastAxiomExecutionQuoteStability.quoteKey !== quoteKey ||
+      lastAxiomExecutionQuoteStability.routeKey !== routeKey ||
+      lastAxiomExecutionQuoteStability.tokenKey !== token.key
+    ) {
+      lastAxiomExecutionQuoteStability = {
+        quoteKey,
+        routeKey,
+        tokenKey: token.key,
+        firstSeenAtMs: now,
+      };
+    }
+    return {
+      ...lastAxiomExecutionQuoteStability,
+      stableMs: Math.max(0, now - Number(lastAxiomExecutionQuoteStability.firstSeenAtMs || now)),
+    };
+  }
+
+  function resetAxiomExecutionQuoteStability() {
+    lastAxiomExecutionQuoteStability = null;
+  }
+
+  function axiomExecutionQuoteKey(token) {
+    return [
+      token?.key || "",
+      round(token?.marketCap, 2) || "",
+      token?.marketCapSource || "",
+      token?.marketCapRawText || "",
+      token?.marketCapRejectedMarketCap || "",
+      round(token?.marketCapMismatchPct, 4) || "",
+    ].join("|");
+  }
+
+  function parseCurrencyMarketCap(value) {
+    const match = String(value || "").match(/^\$?\s*([0-9,.]+(?:\.[0-9]+)?)\s*([KMB])?$/i);
+    return match ? parseCompactNumber(match[1], match[2]) : null;
   }
 
   function parseCompactNumber(value, suffix = "") {
@@ -918,6 +1448,24 @@
 
   function queryPageSelector(selector) {
     return Array.from(document.querySelectorAll(selector)).find((element) => !root?.contains(element)) || null;
+  }
+
+  function queryFirstPageElement(selector) {
+    try {
+      return Array.from(document.querySelectorAll(selector)).find((element) => !root?.contains(element)) || null;
+    } catch (error) {
+      console.debug("[WilyTrader] Invalid or unavailable selector.", selector, error);
+      return null;
+    }
+  }
+
+  function isVisiblePageElement(element) {
+    if (!element || root?.contains(element)) return false;
+    const rect = element.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+    if (rect.bottom < 0 || rect.right < 0 || rect.left > window.innerWidth || rect.top > window.innerHeight) return false;
+    const style = window.getComputedStyle(element);
+    return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity) !== 0;
   }
 
   function getPageTextCandidates(limit = 1200) {
@@ -1122,7 +1670,7 @@
               </div>
               <div class="wt-setting-group">
                 <label class="wt-label" for="wt-platform-fee">Platform fee %</label>
-                <input id="wt-platform-fee" class="wt-input" data-setting="platformFeePct" type="number" min="0" step="0.1" />
+                <input id="wt-platform-fee" class="wt-input" data-setting="platformFeePct" type="number" min="0" step="0.01" />
               </div>
               <div class="wt-setting-group">
                 <label class="wt-label" for="wt-delay">Custom delay ms</label>
@@ -1221,6 +1769,7 @@
     `;
     document.documentElement.appendChild(root);
     root.addEventListener("pointerdown", stopOverlayEvent, true);
+    root.addEventListener("pointerup", handleTradeButtonPointerUp, true);
     root.addEventListener("mousedown", handleOverlayMouseDown, true);
     root.addEventListener("click", handleClick, true);
     root.addEventListener("contextmenu", handleOverlayContextMenu);
@@ -1270,11 +1819,25 @@
     if (data.event === "chartRebound" || data.event === "symbolChange") {
       lastAxiomChartArtifactKey = null;
       lastAxiomExitTargetSyncKey = null;
+      lastAxiomChartMarketCapQuote = null;
+      resetAxiomExecutionQuoteStability();
       injectAxiomChartBridgeScript();
       render();
       window.setTimeout(render, 500);
     } else if (data.event === "lineMoved") {
       runTask(handleAxiomExitTargetLineMoved(data));
+    } else if (data.event === "latestPrice") {
+      const marketCap = Number(data.price);
+      if (Number.isFinite(marketCap) && marketCap > 0) {
+        lastAxiomChartMarketCapQuote = {
+          marketCap,
+          source: AXIOM_CHART_MARKET_CAP_SOURCE,
+          rawText: data.rawText || `chart:${marketCap}`,
+          selector: null,
+          readAtMs: Number(data.readAtMs || Date.now()),
+          symbol: data.symbol || null,
+        };
+      }
     }
   }
 
@@ -1320,6 +1883,48 @@
     if (!root?.contains(event.target)) return;
     if (event.button !== 2) return;
     logExitTargetDiagnostic("root-mousedown", event);
+  }
+
+  function handleTradeButtonPointerUp(event) {
+    if (!isPrimaryPointerEvent(event)) return;
+    const target = event.target?.closest?.("button");
+    if (!target || !root?.contains(target)) return;
+    const sellPercent = sellPercentFromButton(target);
+    if (sellPercent === null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+    executeSellButton(target, sellPercent, "pointerup");
+  }
+
+  function sellPercentFromButton(target) {
+    if (target.dataset.action === "sell-all") return 100;
+    if (!Object.hasOwn(target.dataset, "sellPct")) return null;
+    const percent = Number(target.dataset.sellPct);
+    return Number.isFinite(percent) && percent > 0 ? percent : null;
+  }
+
+  function markTradeButtonExecution(key) {
+    lastTradeButtonExecutionKey = key;
+    lastTradeButtonExecutionAt = Date.now();
+  }
+
+  function recentlyExecutedTradeButton(key) {
+    return Boolean(key && key === lastTradeButtonExecutionKey && Date.now() - lastTradeButtonExecutionAt < 700);
+  }
+
+  function executeSellButton(target, percent, source) {
+    const key = `sell:${percent}`;
+    if (recentlyExecutedTradeButton(key)) return;
+    markTradeButtonExecution(key);
+    emitDiagnostic("sell-button-execute", {
+      source,
+      percent,
+      buttonText: cleanText(target.textContent),
+      token: summarizeToken(activeToken),
+    });
+    primeTradeExecutionSound();
+    runTask(sell(percent));
   }
 
   function logTrackerResizeDiagnostic(stage, event = null, extra = {}, level = "debug") {
@@ -1462,12 +2067,14 @@
     const sellPct = target.dataset.sellPct;
     const hasBuyAmount = Object.hasOwn(target.dataset, "buyAmount");
     const hasSellPct = Object.hasOwn(target.dataset, "sellPct");
+    const sellPercent = sellPercentFromButton(target);
+    if (sellPercent !== null && recentlyExecutedTradeButton(`sell:${sellPercent}`)) return;
     if (hasBuyAmount || hasSellPct || action === "custom-buy" || action === "buy-default" || action === "sell-all") {
       primeTradeExecutionSound();
     }
 
     if (hasBuyAmount) runTask(buy(Number(buyAmount)));
-    else if (hasSellPct) runTask(sell(Number(sellPct)));
+    else if (sellPercent !== null) executeSellButton(target, sellPercent, "click");
     else if (action === "custom-buy") {
       const input = root.querySelector("[data-custom-buy]");
       const amount = Number(input.value);
@@ -1614,7 +2221,7 @@
     const pulseTarget = resolveAxiomPulseQuickBuyTarget(target, event);
     const quickBuyBox = pulseTarget?.box;
     if (!quickBuyBox) return refreshAxiomPulseQuickBuyLayer();
-    if (isWilyTraderModalOpen() || isAxiomPulseQuickBuyBoxCovered(quickBuyBox)) {
+    if (isWilyTraderModalOpen() || !getAxiomPulseQuickBuyVisibleRect(quickBuyBox, pulseTarget.row)) {
       refreshAxiomPulseQuickBuyLayer();
       return;
     }
@@ -1640,7 +2247,16 @@
     const row = context.row || findAxiomPulseTokenRow(quickBuyBox);
     const navigationTarget = context.navigationTarget || findAxiomPulseRowNavigationTarget(row, quickBuyBox);
     const token = context.token || detectAxiomPulseQuickBuyToken(quickBuyBox, { row, navigationTarget });
+    emitDiagnostic("pulse-auto-buy-queue", {
+      token: summarizeToken(token),
+      navigationHref: navigationTarget?.getAttribute?.("href") || navigationTarget?.href || null,
+      amountNative: getDefaultBuyAmount(),
+    });
     if (!token?.key) {
+      emitDiagnostic("pulse-auto-buy-queue-failed", {
+        reason: "missing-token",
+        navigationHref: navigationTarget?.getAttribute?.("href") || navigationTarget?.href || null,
+      });
       flashAxiomPulseQuickBuyBox(quickBuyBox, "wt-axiom-pulse-quick-buy-error", 900);
       setStatus("Pulse quick buy could not find that token address.");
       return;
@@ -1702,10 +2318,13 @@
       .map((box) => ({
         box,
         row: findAxiomPulseTokenRow(box),
-        rect: getClippedViewportRect(box.getBoundingClientRect()),
       }))
-      .filter(({ rect }) => rect.width > 0 && rect.height > 0)
-      .filter(({ box }) => !isAxiomPulseQuickBuyBoxCovered(box))
+      .map(({ box, row }) => ({
+        box,
+        row,
+        rect: getAxiomPulseQuickBuyVisibleRect(box, row),
+      }))
+      .filter(({ rect }) => rect && rect.width > 0 && rect.height > 0)
       .filter(({ row, box }) => isAxiomPulseTokenRowContentVisible(row, box))
       .sort(compareAxiomPulseQuickBuyTargets);
   }
@@ -1875,11 +2494,65 @@
   function isAxiomPulseQuickBuyBoxCurrentForHitTarget(hitTarget, box) {
     if (!box?.isConnected || !isAxiomPulseQuickBuyBoxElement(box)) return false;
     const hitRect = hitTarget.getBoundingClientRect();
-    const boxRect = getClippedViewportRect(box.getBoundingClientRect());
+    const boxRect = getAxiomPulseQuickBuyVisibleRect(box, findAxiomPulseTokenRow(box));
+    if (!boxRect) return false;
     return Math.abs(hitRect.left - boxRect.left) <= 4
       && Math.abs(hitRect.top - boxRect.top) <= 4
       && Math.abs(hitRect.width - boxRect.width) <= 8
       && Math.abs(hitRect.height - boxRect.height) <= 8;
+  }
+
+  function getAxiomPulseQuickBuyVisibleRect(box, row = null) {
+    if (!box?.getBoundingClientRect) return null;
+    let rect = getClippedViewportRect(box.getBoundingClientRect());
+    if (row?.getBoundingClientRect && row !== box) {
+      rect = intersectViewportRects(rect, getClippedViewportRect(row.getBoundingClientRect()));
+    }
+    if (rect.width <= 0 || rect.height <= 0) return null;
+
+    const xCandidates = [
+      rect.left + rect.width * 0.5,
+      rect.left + Math.min(16, rect.width * 0.35),
+      rect.right - Math.min(16, rect.width * 0.35),
+    ];
+    const visibleYs = [];
+    const step = Math.max(3, Math.min(8, rect.height / 12));
+    for (let y = rect.top + 1; y <= rect.bottom - 1; y += step) {
+      if (xCandidates.some((x) => isAxiomPulseQuickBuyPointVisible(box, x, y))) {
+        visibleYs.push(y);
+      }
+    }
+    const bottomProbe = rect.bottom - 1;
+    if (xCandidates.some((x) => isAxiomPulseQuickBuyPointVisible(box, x, bottomProbe))) {
+      visibleYs.push(bottomProbe);
+    }
+    if (visibleYs.length === 0) return null;
+
+    const visibleTop = Math.max(rect.top, Math.min(...visibleYs) - step);
+    const visibleBottom = Math.min(rect.bottom, Math.max(...visibleYs) + step);
+    return {
+      left: rect.left,
+      top: visibleTop,
+      right: rect.right,
+      bottom: visibleBottom,
+      width: rect.width,
+      height: Math.max(0, visibleBottom - visibleTop),
+    };
+  }
+
+  function intersectViewportRects(a, b) {
+    const left = Math.max(a.left, b.left);
+    const top = Math.max(a.top, b.top);
+    const right = Math.min(a.right, b.right);
+    const bottom = Math.min(a.bottom, b.bottom);
+    return {
+      left,
+      top,
+      right,
+      bottom,
+      width: Math.max(0, right - left),
+      height: Math.max(0, bottom - top),
+    };
   }
 
   function findAxiomPulseQuickBuyBoxAtPoint(x, y) {
@@ -1901,46 +2574,28 @@
     return Boolean(root?.querySelector(".wt-modal-open"));
   }
 
-  function isAxiomPulseQuickBuyBoxCovered(box) {
-    const rect = box.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return true;
-    const left = Math.max(0, rect.left);
-    const right = Math.min(window.innerWidth, rect.right);
-    const top = Math.max(0, rect.top);
-    const bottom = Math.min(window.innerHeight, rect.bottom);
-    if (right <= left || bottom <= top) return true;
+  function isAxiomPulseQuickBuyPointVisible(box, x, y) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+    if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) return false;
 
-    const points = [
-      [left + (right - left) / 2, top + (bottom - top) / 2],
-      [left + (right - left) / 2, bottom - Math.min(12, (bottom - top) / 4)],
-      [left + Math.min(12, (right - left) / 4), top + (bottom - top) / 2],
-      [right - Math.min(12, (right - left) / 4), top + (bottom - top) / 2],
-    ];
-    return points.some(([x, y]) => !isAxiomPulseQuickBuyPointClear(box, x, y));
-  }
-
-  function isAxiomPulseQuickBuyPointClear(box, x, y) {
     const stack = document.elementsFromPoint(x, y);
     for (const element of stack) {
       if (!element || element === document.documentElement || element === document.body) continue;
       if (root?.contains(element) || pulseQuickBuyLayer?.contains(element)) continue;
-      if (element === box || box.contains(element) || element.contains?.(box)) return true;
-      if (isAxiomPulseBlockingOverlayElement(element)) return false;
+      if (element === box || box.contains(element)) return true;
+      if (element.contains?.(box)) continue;
+      if (isAxiomPulseClippingElement(element)) return false;
     }
     return false;
   }
 
-  function isAxiomPulseBlockingOverlayElement(element) {
-    const text = `${element.id || ""} ${element.className || ""} ${element.getAttribute?.("role") || ""}`.toLowerCase();
-    if (element.tagName === "DIALOG" || element.getAttribute?.("aria-modal") === "true") return true;
-    if (/\b(modal|dialog|popover|drawer|sheet|overlay|portal|radix|floating)\b/.test(text)) return true;
-
+  function isAxiomPulseClippingElement(element) {
     const style = window.getComputedStyle(element);
     if (style.pointerEvents === "none" || style.visibility === "hidden" || style.display === "none") return false;
     if (style.position !== "fixed" && style.position !== "sticky") return false;
+
     const rect = element.getBoundingClientRect();
-    const area = rect.width * rect.height;
-    return rect.width >= 180 && rect.height >= 90 && area >= 18000;
+    return rect.width >= 80 && rect.height >= 20;
   }
 
   function isAxiomPulseQuickBuyBoxElement(element) {
@@ -2077,6 +2732,8 @@
 
   function writePendingPulseAutoBuy(token, amountNative) {
     if (!token?.address) return false;
+    const createdAt = Date.now();
+    const executionDelayMs = calculateExecutionDelay("buy");
     const pending = {
       sourceTokenAddress: token.address,
       sourceTokenKey: token.key,
@@ -2084,7 +2741,9 @@
       chain: token.chain || "SOL",
       amountNative,
       sourceUrl: window.location.href,
-      createdAt: Date.now(),
+      createdAt,
+      executionDelayMs,
+      executeAfterAt: createdAt + executionDelayMs,
     };
     try {
       window.sessionStorage.setItem(PULSE_AUTO_BUY_KEY, JSON.stringify(pending));
@@ -2139,6 +2798,11 @@
     const pending = readPendingPulseAutoBuy();
     if (!pending) return;
     if (!isAxiomMemeRoute(new URL(window.location.href))) {
+      emitPulseAutoBuyDiagnostic("pulse-auto-buy-wait-route", {
+        pageUrl: window.location.href,
+        pendingTokenKey: pending.sourceTokenKey || null,
+        pendingTokenName: pending.tokenName || null,
+      });
       schedulePendingPulseAutoBuyCheck(PULSE_AUTO_BUY_CHECK_MS);
       return;
     }
@@ -2150,11 +2814,26 @@
       return;
     }
     const sourceTokenMismatch = Boolean(pending.sourceTokenKey && token.key !== pending.sourceTokenKey);
+    if (sourceTokenMismatch) {
+      emitDiagnostic("pulse-auto-buy-source-mismatch-blocked", {
+        pendingTokenKey: pending.sourceTokenKey || null,
+        pendingTokenName: pending.tokenName || null,
+        openedToken: summarizeToken(token),
+      });
+      clearPendingPulseAutoBuy();
+      setStatus(`Pulse opened ${token.name || shortenAddress(token.address)}, but it did not match the queued token. Auto-buy cancelled.`);
+      return;
+    }
 
-    if (!token.unitPriceNative) {
-      setStatus(sourceTokenMismatch
-        ? `Pulse opened ${token.name || shortenAddress(token.address)}; waiting for price.`
-        : `Waiting for token page price before auto-buying ${formatters.native(pending.amountNative, pending.chain || token.chain)}.`);
+    const readiness = getPulseAutoBuyReadiness(token, pending);
+    if (!readiness.ready) {
+      emitPulseAutoBuyDiagnostic("pulse-auto-buy-wait-readiness", {
+        message: readiness.message,
+        token: summarizeToken(token),
+        pendingTokenKey: pending.sourceTokenKey || null,
+        pendingTokenName: pending.tokenName || null,
+      });
+      setStatus(readiness.message);
       schedulePendingPulseAutoBuyCheck(PULSE_AUTO_BUY_CHECK_MS);
       return;
     }
@@ -2169,21 +2848,27 @@
 
     pendingPulseAutoBuyInFlight = true;
     try {
-      if (sourceTokenMismatch) {
-        console.warn("[WilyTrader] Pulse token guess differed from opened token; auto-buying opened token page.", {
-          pendingToken: pending.sourceTokenKey,
-          pendingTokenName: pending.tokenName,
-          openedToken: token.key,
-          openedTokenName: token.name,
-        });
-      }
-      setStatus(sourceTokenMismatch
-        ? `Pulse target resolved to opened token ${token.name || shortenAddress(token.address)}; auto-buying ${formatters.native(pending.amountNative, token.chain)}.`
-        : `Auto-buying ${formatters.native(pending.amountNative, token.chain)} from Pulse.`);
+      const clickCreatedAt = Number(pending.createdAt || Date.now());
+      const executeAfterAt = Number(pending.executeAfterAt || clickCreatedAt);
+      const remainingDelayMs = Math.max(0, Math.round(executeAfterAt - Date.now()));
+      emitDiagnostic("pulse-auto-buy-executing", {
+        sourceTokenMismatch,
+        pendingTokenKey: pending.sourceTokenKey || null,
+        pendingTokenName: pending.tokenName || null,
+        openedToken: summarizeToken(token),
+        amountNative,
+        clickCreatedAt,
+        executeAfterAt,
+        remainingDelayMs,
+      });
+      setStatus(`Auto-buying ${formatters.native(pending.amountNative, token.chain)} from Pulse.`);
       const execution = await buy(amountNative, token, {
+        delayMs: remainingDelayMs,
+        delayStartedAtMs: clickCreatedAt,
         resolveLatestToken: () => {
           updateActiveToken();
-          return activeToken?.key === token.key && activeToken.unitPriceNative ? activeToken : token;
+          const latest = activeToken?.key === token.key ? activeToken : null;
+          return latest && getPulseAutoBuyReadiness(latest, pending).ready ? latest : null;
         },
       });
       if (execution?.id) {
@@ -2194,6 +2879,31 @@
     } finally {
       pendingPulseAutoBuyInFlight = false;
     }
+  }
+
+  function getPulseAutoBuyReadiness(token, pending) {
+    const amount = formatters.native(pending.amountNative, pending.chain || token?.chain || "SOL");
+    if (!token?.key) {
+      return { ready: false, message: `Waiting for Axiom token page before auto-buying ${amount}.` };
+    }
+    if (!token.unitPriceNative || !Number.isFinite(Number(token.marketCap)) || Number(token.marketCap) <= 0) {
+      return { ready: false, message: `Waiting for token page price before auto-buying ${amount}.` };
+    }
+    if (!detectMarketCap()) {
+      return { ready: false, message: `Waiting for Axiom market cap before auto-buying ${amount}.` };
+    }
+    const quoteReadiness = getAxiomExecutionQuoteReadiness(token);
+    if (!quoteReadiness.ready) return { ready: false, message: `Waiting for current Axiom market cap before auto-buying ${amount}.` };
+    return { ready: true, message: "" };
+  }
+
+  function emitPulseAutoBuyDiagnostic(stage, details) {
+    const key = `${stage}|${details?.message || ""}|${details?.pageUrl || ""}|${details?.token?.key || ""}|${details?.pendingTokenKey || ""}`;
+    const now = Date.now();
+    if (key === lastPulseAutoBuyDiagnosticKey && now - lastPulseAutoBuyDiagnosticAt < PULSE_AUTO_BUY_DIAGNOSTIC_MS) return;
+    lastPulseAutoBuyDiagnosticKey = key;
+    lastPulseAutoBuyDiagnosticAt = now;
+    emitDiagnostic(stage, details);
   }
 
   function detectAxiomPulseMarketCap(row, quickBuyBox) {
@@ -2786,26 +3496,63 @@
     logExitTargetDiagnostic("chart-line-moved-message", null, data);
     const kind = data.kind === EXIT_TARGET_KINDS.takeProfit ? EXIT_TARGET_KINDS.takeProfit : data.kind === EXIT_TARGET_KINDS.stopLoss ? EXIT_TARGET_KINDS.stopLoss : null;
     const marketCapUsd = Number(data.price);
-    if (!kind || !Number.isFinite(marketCapUsd) || marketCapUsd <= 0 || !data.positionId) {
-      logExitTargetDiagnostic("chart-line-moved-ignored-invalid", null, data, "warn");
+    const targetId = normalizeBridgeString(data.targetId) || normalizeBridgeString(data.positionId);
+    if (!kind || !Number.isFinite(marketCapUsd) || marketCapUsd <= 0 || !targetId) {
+      logExitTargetDiagnostic("chart-line-moved-ignored-invalid", null, {
+        ...data,
+        resolvedTargetId: targetId,
+      }, "warn");
       return;
     }
-    const target = state.exitTargets[data.positionId] || Object.values(state.exitTargets || {}).find((item) => item?.positionId === data.positionId && item.kind === kind);
+    const target = findExitTargetForChartMove(targetId, kind, data);
     if (!target) {
-      logExitTargetDiagnostic("chart-line-moved-ignored-no-target", null, data, "warn");
+      logExitTargetDiagnostic("chart-line-moved-ignored-no-target", null, {
+        ...data,
+        resolvedTargetId: targetId,
+        activeTargetIds: Object.keys(state.exitTargets || {}),
+      }, "warn");
       return;
     }
     if (Math.abs(Number(target.marketCapUsd || 0) - marketCapUsd) < 1) {
-      logExitTargetDiagnostic("chart-line-moved-ignored-same-price", null, data);
+      logExitTargetDiagnostic("chart-line-moved-ignored-same-price", null, {
+        ...data,
+        resolvedTargetId: targetId,
+        matchedTargetId: target.id,
+      });
       return;
     }
+    const previousMarketCapUsd = Number(target.marketCapUsd || 0);
     target.marketCapUsd = marketCapUsd;
     target.updatedAt = new Date().toISOString();
     target.triggeredAt = null;
     lastAxiomExitTargetSyncKey = null;
     await persistAndSync("exit-target-moved");
     render();
+    logExitTargetDiagnostic("chart-line-moved-applied", null, {
+      ...data,
+      resolvedTargetId: targetId,
+      matchedTargetId: target.id,
+      previousMarketCapUsd,
+      marketCapUsd,
+    });
     setStatus(`${formatExitTargetKind(kind)} moved to ${formatters.usd(marketCapUsd)}.`);
+  }
+
+  function normalizeBridgeString(value) {
+    if (typeof value !== "string" && typeof value !== "number") return null;
+    const text = String(value || "").trim();
+    return text || null;
+  }
+
+  function findExitTargetForChartMove(targetId, kind, data = {}) {
+    const byId = targetId ? state.exitTargets?.[targetId] : null;
+    if (byId?.kind === kind) return byId;
+    const actualPositionId = normalizeBridgeString(data.tradePositionId) || normalizeBridgeString(data.actualPositionId);
+    return Object.values(state.exitTargets || {}).find((item) => {
+      if (!item || item.kind !== kind) return false;
+      if (targetId && item.id === targetId) return true;
+      return Boolean(actualPositionId && item.positionId === actualPositionId);
+    }) || null;
   }
 
   function parseMarketCapInput(value) {
@@ -2848,13 +3595,44 @@
     if (!Number.isFinite(amountNative) || amountNative <= 0) return setStatus("Enter a valid buy amount.");
     tradeInFlight = true;
     try {
-      const token = tokenOverride || (updateActiveToken(), activeToken);
+      let token = tokenOverride || (updateActiveToken(), activeToken);
       if (tokenOverride) activeToken = tokenOverride;
-      if (!token.key) return setStatus("Open a supported token page first.");
-      if (!token.unitPriceNative) return setStatus(`Price unavailable. Wait for ${token.platformLabel || "the platform"} market cap to load.`);
+      emitDiagnostic("buy-start", {
+        amountNative,
+        token: summarizeToken(token),
+        marketCaps: buildMarketCapDiagnostics(),
+      });
+      if (!token.key) {
+        emitDiagnostic("buy-blocked-no-token", { amountNative, token: summarizeToken(token) });
+        return setStatus("Open a supported token page first.");
+      }
+      if (!token.unitPriceNative) {
+        emitDiagnostic("buy-blocked-no-price", { amountNative, token: summarizeToken(token), marketCaps: buildMarketCapDiagnostics() });
+        return setStatus(`Price unavailable. Wait for ${token.platformLabel || "the platform"} market cap to load.`);
+      }
+      const quoteReady = await waitForAxiomExecutionQuoteReady(token);
+      token = quoteReady.token || token;
+      if (!quoteReady.ready) {
+        emitDiagnostic("buy-blocked-no-current-axiom-quote", {
+          amountNative,
+          token: summarizeToken(token),
+          quoteReadiness: quoteReady.quoteReadiness,
+          marketCaps: buildMarketCapDiagnostics(),
+        });
+        return setStatus(quoteReady.quoteReadiness?.message || "Waiting for current Axiom market cap before buying.");
+      }
 
       const delayedToken = await waitForSimulatedExecution("buy", token, options);
-      if (!delayedToken) return;
+      if (!delayedToken) {
+        emitDiagnostic("buy-blocked-no-delayed-token", { amountNative, token: summarizeToken(token) });
+        return;
+      }
+      emitDiagnostic("buy-delayed-token", {
+        amountNative,
+        originalToken: summarizeToken(token),
+        delayedToken: summarizeToken(delayedToken),
+        marketCaps: buildMarketCapDiagnostics(),
+      });
 
       const chain = delayedToken.chain;
       const fees = calculateFees("buy", amountNative, delayedToken.executionDelayMs);
@@ -2905,6 +3683,23 @@
         positionAfter: snapshotPosition(updated),
         costBasisNative: 0,
       });
+      emitDiagnostic("execution-recorded", {
+        side: "buy",
+        executionId: execution.id,
+        positionId: execution.positionId,
+        executionMarketCapUsd: execution.executionMarketCapUsd,
+        quoteSource: execution.quoteSource,
+        quoteRawText: execution.quoteRawText,
+        quoteSelector: execution.quoteSelector,
+        quoteReadAtMs: execution.quoteReadAtMs,
+        quoteRejectedSource: execution.quoteRejectedSource,
+        quoteRejectedRawText: execution.quoteRejectedRawText,
+        quoteRejectedMarketCapUsd: execution.quoteRejectedMarketCapUsd,
+        quoteMismatchPct: execution.quoteMismatchPct,
+        unitPriceNative: execution.unitPriceNative,
+        tokenAmount: execution.tokenAmount,
+        positionAfter: summarizePosition(updated),
+      });
       playTradeExecutionSound();
 
       await persistAndSync("buy");
@@ -2922,13 +3717,39 @@
     tradeInFlight = true;
     try {
     updateActiveToken();
-    const token = activeToken;
+    let token = activeToken;
     const position = token.key ? state.positions[token.key] : null;
-    if (!token.key || !position) return setStatus("No open paper position for this token.");
-    if (!token.unitPriceNative) return setStatus(`Price unavailable. Wait for ${token.platformLabel || "the platform"} market cap to load.`);
+    emitDiagnostic("sell-start", {
+      percent,
+      token: summarizeToken(token),
+      position: summarizePosition(position),
+      marketCaps: buildMarketCapDiagnostics(),
+    });
+    if (!token.key || !position) {
+      emitDiagnostic("sell-blocked-no-position", { percent, token: summarizeToken(token), positionKeys: Object.keys(state.positions || {}) });
+      return setStatus("No open paper position for this token.");
+    }
+    if (!token.unitPriceNative) {
+      emitDiagnostic("sell-blocked-no-price", { percent, token: summarizeToken(token), marketCaps: buildMarketCapDiagnostics() });
+      return setStatus(`Price unavailable. Wait for ${token.platformLabel || "the platform"} market cap to load.`);
+    }
+    const quoteReady = await waitForAxiomExecutionQuoteReady(token);
+    token = quoteReady.token || token;
+    if (!quoteReady.ready) {
+      emitDiagnostic("sell-blocked-no-current-axiom-quote", {
+        percent,
+        token: summarizeToken(token),
+        quoteReadiness: quoteReady.quoteReadiness,
+        marketCaps: buildMarketCapDiagnostics(),
+      });
+      return setStatus(quoteReady.quoteReadiness?.message || "Waiting for current Axiom market cap before selling.");
+    }
 
     const delayedToken = await waitForSimulatedExecution("sell", token);
-    if (!delayedToken) return;
+    if (!delayedToken) {
+      emitDiagnostic("sell-blocked-no-delayed-token", { percent, token: summarizeToken(token) });
+      return;
+    }
 
     const chain = delayedToken.chain;
     const sellRatio = normalizeSellRatio(percent);
@@ -2980,6 +3801,25 @@
       positionBefore: before,
       positionAfter: after,
       costBasisNative: costBasis,
+    });
+    emitDiagnostic("execution-recorded", {
+      side: "sell",
+      executionId: execution.id,
+      positionId: execution.positionId,
+      executionMarketCapUsd: execution.executionMarketCapUsd,
+      quoteSource: execution.quoteSource,
+      quoteRawText: execution.quoteRawText,
+      quoteSelector: execution.quoteSelector,
+      quoteReadAtMs: execution.quoteReadAtMs,
+      quoteRejectedSource: execution.quoteRejectedSource,
+      quoteRejectedRawText: execution.quoteRejectedRawText,
+      quoteRejectedMarketCapUsd: execution.quoteRejectedMarketCapUsd,
+      quoteMismatchPct: execution.quoteMismatchPct,
+      unitPriceNative: execution.unitPriceNative,
+      requestedSellPct: execution.requestedSellPct,
+      tokenAmount: execution.tokenAmount,
+      pnlNative: execution.pnlNative,
+      positionAfter: summarizePosition(after),
     });
     playTradeExecutionSound();
 
@@ -3035,49 +3875,134 @@
       sellCount: 0,
       openedAt: now,
       updatedAt: now,
-      highMarketCapAfterEntry: round(token.marketCap, 2),
-      highMarketCapAt: now,
-      lowMarketCapAfterEntry: round(token.marketCap, 2),
-      lowMarketCapAt: now,
+      highMarketCapAfterEntry: 0,
+      highMarketCapAt: null,
+      lowMarketCapAfterEntry: 0,
+      lowMarketCapAt: null,
+      ohlcSampleIntervalMs: MARKET_CAP_ROLLING_SAMPLE_INTERVAL_MS,
+      ohlcSampleCount: 0,
+      ohlcFirstSampleAt: null,
+      ohlcLastSampleAt: null,
+      ohlcOpenMarketCap: 0,
+      ohlcHighMarketCap: 0,
+      ohlcHighMarketCapAt: null,
+      ohlcLowMarketCap: 0,
+      ohlcLowMarketCapAt: null,
+      ohlcCloseMarketCap: 0,
+      ohlcSource: null,
       firstUrl: token.url,
       lastUrl: token.url,
     };
   }
 
-  function withUpdatedPositionMarketCapRange(position, token, timestampMs = Date.now()) {
+  function withUpdatedPositionMarketCapRange(position, token, timestampMs = Date.now(), options = {}) {
     const marketCap = round(token?.marketCap, 2);
     if (!position || !Number.isFinite(marketCap) || marketCap <= 0) return { position, changed: false };
     const timestamp = new Date(timestampMs).toISOString();
-    const currentHigh = Number(position.highMarketCapAfterEntry || 0);
-    const currentLow = Number(position.lowMarketCapAfterEntry || 0);
+    const countSample = options.countSample !== false;
+    const currentHigh = Number(position.ohlcHighMarketCap || position.highMarketCapAfterEntry || 0);
+    const currentLow = Number(position.ohlcLowMarketCap || position.lowMarketCapAfterEntry || 0);
+    const currentClose = Number(position.ohlcCloseMarketCap || 0);
+    const sampleCount = Number(position.ohlcSampleCount || 0);
+    const source = token?.marketCapSource || position.ohlcSource || "detected-market-cap";
     let changed = false;
+    let rangeChanged = false;
     const updated = { ...position };
-    if (!currentHigh || marketCap > currentHigh) {
-      updated.highMarketCapAfterEntry = marketCap;
-      updated.highMarketCapAt = timestamp;
+    if (!updated.ohlcOpenMarketCap) {
+      updated.ohlcOpenMarketCap = marketCap;
+      updated.ohlcFirstSampleAt = timestamp;
       changed = true;
+    }
+    if (countSample) {
+      updated.ohlcSampleCount = sampleCount + 1;
+      updated.ohlcLastSampleAt = timestamp;
+      updated.ohlcSampleIntervalMs = MARKET_CAP_ROLLING_SAMPLE_INTERVAL_MS;
+      changed = true;
+    }
+    if (currentClose !== marketCap) {
+      updated.ohlcCloseMarketCap = marketCap;
+      updated.ohlcLastSampleAt = timestamp;
+      changed = true;
+    }
+    if (updated.ohlcSource !== source) {
+      updated.ohlcSource = source;
+      changed = true;
+    }
+    if (!currentHigh || marketCap > currentHigh) {
+      updated.ohlcHighMarketCap = marketCap;
+      updated.ohlcHighMarketCapAt = timestamp;
+      changed = true;
+      rangeChanged = true;
     }
     if (!currentLow || marketCap < currentLow) {
-      updated.lowMarketCapAfterEntry = marketCap;
-      updated.lowMarketCapAt = timestamp;
+      updated.ohlcLowMarketCap = marketCap;
+      updated.ohlcLowMarketCapAt = timestamp;
       changed = true;
+      rangeChanged = true;
     }
-    return { position: updated, changed };
+    updated.highMarketCapAfterEntry = updated.ohlcHighMarketCap || marketCap;
+    updated.highMarketCapAt = updated.ohlcHighMarketCapAt || timestamp;
+    updated.lowMarketCapAfterEntry = updated.ohlcLowMarketCap || marketCap;
+    updated.lowMarketCapAt = updated.ohlcLowMarketCapAt || timestamp;
+    return { position: updated, changed, rangeChanged };
   }
 
-  function updateActivePositionMarketCapRange({ persistRange = true } = {}) {
-    const token = activeToken;
+  function updateActivePositionMarketCapRange({ persistRange = true, forcePersist = false, reason = "position-range" } = {}) {
+    const token = getMarketCapTrackingToken(activeToken);
     const position = token?.key ? state.positions[token.key] : null;
     if (!position) return false;
     const result = withUpdatedPositionMarketCapRange(position, token);
     if (!result.changed) return false;
     state.positions[token.key] = result.position;
-    if (persistRange) runTask(persist());
+    const now = Date.now();
+    const shouldPersist = persistRange && (
+      forcePersist ||
+      result.rangeChanged ||
+      now - lastRollingMarketCapPersistAt >= MARKET_CAP_ROLLING_PERSIST_THROTTLE_MS
+    );
+    if (shouldPersist) {
+      lastRollingMarketCapPersistAt = now;
+      runTask(persist());
+    }
+    emitRollingMarketCapDiagnostic(reason, token, result.position, result.rangeChanged);
     return true;
   }
 
+  function emitRollingMarketCapDiagnostic(reason, token, position, rangeChanged = false) {
+    const now = Date.now();
+    const key = [
+      position?.positionId || "",
+      round(position?.ohlcHighMarketCap || position?.highMarketCapAfterEntry, 2),
+      round(position?.ohlcLowMarketCap || position?.lowMarketCapAfterEntry, 2),
+      round(position?.ohlcCloseMarketCap, 2),
+    ].join("|");
+    if (!rangeChanged && now - lastRollingMarketCapDiagnosticAt < LIVE_POSITION_DIAGNOSTIC_MS) return;
+    lastRollingMarketCapDiagnosticKey = key;
+    lastRollingMarketCapDiagnosticAt = now;
+    emitDiagnostic("rolling-market-cap-ohlc", {
+      reason,
+      token: summarizeToken(token),
+      positionId: position?.positionId || null,
+      sampleIntervalMs: MARKET_CAP_ROLLING_SAMPLE_INTERVAL_MS,
+      sampleCount: position?.ohlcSampleCount || 0,
+      source: position?.ohlcSource || null,
+      openMarketCap: position?.ohlcOpenMarketCap || null,
+      highMarketCap: position?.ohlcHighMarketCap || null,
+      highMarketCapAt: position?.ohlcHighMarketCapAt || null,
+      lowMarketCap: position?.ohlcLowMarketCap || null,
+      lowMarketCapAt: position?.ohlcLowMarketCapAt || null,
+      closeMarketCap: position?.ohlcCloseMarketCap || null,
+      rangeChanged: Boolean(rangeChanged),
+    });
+  }
+
   async function waitForSimulatedExecution(side, token, options = {}) {
-    const delayMs = calculateExecutionDelay(side);
+    const delayMs = Number.isFinite(Number(options.delayMs))
+      ? Math.max(0, Math.round(Number(options.delayMs)))
+      : calculateExecutionDelay(side);
+    const delayStartedAtMs = Number.isFinite(Number(options.delayStartedAtMs))
+      ? Number(options.delayStartedAtMs)
+      : Date.now();
     const priorityFee = Number(side === "buy" ? state.settings.buyPriorityFeeNative : state.settings.sellPriorityFeeNative) || 0;
     const bribeFee = Number(side === "buy" ? state.settings.buyBribeFeeNative : state.settings.sellBribeFeeNative) || 0;
     setStatus(`${side === "buy" ? "Buy" : "Sell"} pending (${delayMs}ms delay, prio ${priorityFee}, bribe ${bribeFee}).`);
@@ -3087,20 +4012,33 @@
       setStatus("Execution cancelled: token or price changed.");
       return null;
     }
+    const quoteReady = await waitForAxiomExecutionQuoteReady(delayedToken, AXIOM_EXECUTION_QUOTE_STABLE_MS + 600);
+    const executionToken = quoteReady.token || delayedToken;
+    if (!quoteReady.ready) {
+      emitDiagnostic(`${side}-blocked-no-current-axiom-quote-after-delay`, {
+        originalToken: summarizeToken(token),
+        delayedToken: summarizeToken(executionToken),
+        quoteReadiness: quoteReady.quoteReadiness,
+        marketCaps: buildMarketCapDiagnostics(),
+      });
+      setStatus(quoteReady.quoteReadiness?.message || "Execution cancelled: current Axiom market cap unavailable.");
+      return null;
+    }
     const slippageLimit = Number(side === "buy" ? state.settings.buySlippagePct : state.settings.sellSlippagePct) || 0;
-    const priceMovePct = calculatePriceMovePct(token.unitPriceNative, delayedToken.unitPriceNative);
+    const priceMovePct = calculatePriceMovePct(token.unitPriceNative, executionToken.unitPriceNative);
     if (Math.abs(priceMovePct) > slippageLimit) {
       setStatus(`Execution cancelled: price moved ${Math.abs(priceMovePct).toFixed(2)}%.`);
       return null;
     }
-    return { ...delayedToken, executionDelayMs: delayMs, priceMovePct };
+    const totalExecutionDelayMs = Math.max(0, Math.round(Date.now() - delayStartedAtMs));
+    return { ...executionToken, executionDelayMs: totalExecutionDelayMs, priceMovePct };
   }
 
   async function resolveExecutionTokenAfterDelay(token, options = {}) {
     if (typeof options.resolveLatestToken === "function") {
       const resolved = await Promise.resolve(options.resolveLatestToken(token));
       if (resolved?.key) activeToken = resolved;
-      return resolved || token;
+      return resolved || null;
     }
     updateActiveToken();
     return activeToken;
@@ -3150,7 +4088,9 @@
     const usdPrice = DEFAULT_PRICES[fields.chain] || 1;
     const timestampMs = Date.now();
     const sourceMarketCapUsd = round(fields.token.marketCap, 2);
-    const executionMarketCapUsd = round(fields.executionPriceNative * usdPrice * MARKET_CAP_SUPPLY, 2);
+    const executionMarketCapUsd = Number(sourceMarketCapUsd) > 0
+      ? sourceMarketCapUsd
+      : round(fields.executionPriceNative * usdPrice * MARKET_CAP_SUPPLY, 2);
     const costBasisNative = round(fields.costBasisNative);
     const pnlNative = round(fields.pnlNative);
     const pnlPct = costBasisNative > 0 ? round((pnlNative / costBasisNative) * 100, 4) : 0;
@@ -3171,6 +4111,17 @@
       marketCapUsd: sourceMarketCapUsd,
       sourceMarketCapUsd,
       executionMarketCapUsd,
+      quoteSource: fields.token.marketCapSource || null,
+      quoteRawText: fields.token.marketCapRawText || null,
+      quoteSelector: fields.token.marketCapSelector || null,
+      quoteReadAtMs: fields.token.marketCapReadAtMs || null,
+      quoteReadAt: fields.token.marketCapReadAtMs ? new Date(fields.token.marketCapReadAtMs).toISOString() : null,
+      quotePageTitle: fields.token.marketCapPageTitle || null,
+      quoteRejectedSource: fields.token.marketCapRejectedSource || null,
+      quoteRejectedRawText: fields.token.marketCapRejectedRawText || null,
+      quoteRejectedSelector: fields.token.marketCapRejectedSelector || null,
+      quoteRejectedMarketCapUsd: round(fields.token.marketCapRejectedMarketCap, 2),
+      quoteMismatchPct: round(fields.token.marketCapMismatchPct, 4),
       unitPriceNative: round(fields.executionPriceNative, 12),
       unitPriceUsd: round(fields.executionPriceNative * usdPrice, 12),
       requestedAmountNative: round(fields.requestedAmountNative),
@@ -3289,10 +4240,21 @@
       exitMarketCapVwapUsd: round(weightedAverageFirst(sells, ["executionMarketCapUsd", "marketCapUsd"], "tokenAmount"), 2),
       entrySourceMarketCapVwapUsd: round(weightedAverage(buys, "marketCapUsd", "tokenAmount"), 2),
       exitSourceMarketCapVwapUsd: round(weightedAverage(sells, "marketCapUsd", "tokenAmount"), 2),
-      highMarketCapAfterEntry: round(positionState?.highMarketCapAfterEntry, 2),
-      highMarketCapAt: positionState?.highMarketCapAt || null,
-      lowMarketCapAfterEntry: round(positionState?.lowMarketCapAfterEntry, 2),
-      lowMarketCapAt: positionState?.lowMarketCapAt || null,
+      highMarketCapAfterEntry: round(positionState?.ohlcHighMarketCap || positionState?.highMarketCapAfterEntry, 2),
+      highMarketCapAt: positionState?.ohlcHighMarketCapAt || positionState?.highMarketCapAt || null,
+      lowMarketCapAfterEntry: round(positionState?.ohlcLowMarketCap || positionState?.lowMarketCapAfterEntry, 2),
+      lowMarketCapAt: positionState?.ohlcLowMarketCapAt || positionState?.lowMarketCapAt || null,
+      ohlcSampleIntervalMs: positionState?.ohlcSampleIntervalMs || MARKET_CAP_ROLLING_SAMPLE_INTERVAL_MS,
+      ohlcSampleCount: Number(positionState?.ohlcSampleCount || 0),
+      ohlcFirstSampleAt: positionState?.ohlcFirstSampleAt || null,
+      ohlcLastSampleAt: positionState?.ohlcLastSampleAt || null,
+      ohlcOpenMarketCap: round(positionState?.ohlcOpenMarketCap, 2),
+      ohlcHighMarketCap: round(positionState?.ohlcHighMarketCap || positionState?.highMarketCapAfterEntry, 2),
+      ohlcHighMarketCapAt: positionState?.ohlcHighMarketCapAt || positionState?.highMarketCapAt || null,
+      ohlcLowMarketCap: round(positionState?.ohlcLowMarketCap || positionState?.lowMarketCapAfterEntry, 2),
+      ohlcLowMarketCapAt: positionState?.ohlcLowMarketCapAt || positionState?.lowMarketCapAt || null,
+      ohlcCloseMarketCap: round(positionState?.ohlcCloseMarketCap, 2),
+      ohlcSource: positionState?.ohlcSource || null,
       avgEntryNative: round(weightedAverage(buys, "unitPriceNative", "tokenAmount"), 12),
       avgExitNative: round(weightedAverage(sells, "unitPriceNative", "tokenAmount"), 12),
       executionIds: executions.map((execution) => execution.id),
@@ -3317,12 +4279,25 @@
         highMarketCapAt: position.highMarketCapAt || null,
         lowMarketCapAfterEntry: position.lowMarketCapAfterEntry || 0,
         lowMarketCapAt: position.lowMarketCapAt || null,
+        ohlcSampleIntervalMs: position.ohlcSampleIntervalMs || MARKET_CAP_ROLLING_SAMPLE_INTERVAL_MS,
+        ohlcSampleCount: position.ohlcSampleCount || 0,
+        ohlcFirstSampleAt: position.ohlcFirstSampleAt || null,
+        ohlcLastSampleAt: position.ohlcLastSampleAt || null,
+        ohlcOpenMarketCap: position.ohlcOpenMarketCap || 0,
+        ohlcHighMarketCap: position.ohlcHighMarketCap || position.highMarketCapAfterEntry || 0,
+        ohlcHighMarketCapAt: position.ohlcHighMarketCapAt || position.highMarketCapAt || null,
+        ohlcLowMarketCap: position.ohlcLowMarketCap || position.lowMarketCapAfterEntry || 0,
+        ohlcLowMarketCapAt: position.ohlcLowMarketCapAt || position.lowMarketCapAt || null,
+        ohlcCloseMarketCap: position.ohlcCloseMarketCap || 0,
+        ohlcSource: position.ohlcSource || null,
         id: position.id,
         platform: position.platform,
-        pnlPercentage: position.pnlPct,
-        pnlSol: position.pnlPostFeeNative,
-        solInvested: position.investedNative + position.buyFeesNative,
+        pnlPercentage: position.investedNative > 0 ? ((position.netReceivedNative - position.investedNative) / position.investedNative) * 100 : position.pnlPct,
+        pnlSol: position.netReceivedNative - position.investedNative,
+        solInvested: position.investedNative,
         solReceived: position.netReceivedNative,
+        buyFeesNative: position.buyFeesNative,
+        sellFeesNative: position.sellFeesNative,
         timestamp: Date.parse(position.finalExitAt),
         entryTimestamp: Date.parse(position.firstEntryAt),
         firstEntryAt: position.firstEntryAt,
@@ -3367,11 +4342,21 @@
   async function persistAndSync(reason) {
     await persist();
     const latestExecution = state.executions[state.executions.length - 1] || null;
+    const previousLastSyncedExecutionId = lastSyncedExecutionId;
     const isNewTradeExecution =
       (reason === "buy" || reason === "sell") &&
       latestExecution?.id &&
       latestExecution.id !== lastSyncedExecutionId;
     const shouldCaptureScreenshot = Boolean(state.settings.autoScreenshotOnTrade) && isNewTradeExecution;
+    emitDiagnostic("persist-sync", {
+      reason,
+      latestExecutionId: latestExecution?.id || null,
+      previousLastSyncedExecutionId,
+      isNewTradeExecution: Boolean(isNewTradeExecution),
+      shouldCaptureScreenshot,
+      bridgeEnabled: Boolean(state.settings.bridgeEnabled),
+      fallbackDownloadsEnabled: Boolean(state.settings.fallbackDownloadsEnabled),
+    });
     if (latestExecution?.id) lastSyncedExecutionId = latestExecution.id;
     runTask(syncTradeArtifacts(reason, isNewTradeExecution ? latestExecution : null, shouldCaptureScreenshot));
   }
@@ -3390,8 +4375,6 @@
     const positionEl = root.querySelector(`#${selectors.position}`);
     const buyButtonsEl = root.querySelector("[data-buy-buttons]");
     const sellButtonsEl = root.querySelector("[data-sell-buttons]");
-    const buyChainEl = root.querySelector("[data-buy-chain]");
-    const sellAssetsEl = root.querySelector("[data-sell-assets]");
     const exitTargetSummaryEl = root.querySelector("[data-exit-target-summary]");
     const exitTargetListEl = root.querySelector("[data-exit-target-list]");
     const logEl = root.querySelector(`#${selectors.log}`);
@@ -3408,38 +4391,7 @@
     const position = token.key ? state.positions[token.key] : null;
     const summary = position ? buildPositionSummary(position.positionId, "open") : findLatestTokenPositionSummary(token);
     const chartSummary = buildChartArtifactSummary(summary);
-    const positionPnl = position ? calculateMarkedPositionMetrics(position, token) : null;
-    const closedSummary = findLatestClosedTokenPositionSummary(token);
-    const displayedPnl = positionPnl || closedSummary ? {
-      totalPnlNative: positionPnl?.totalPnlNative ?? closedSummary.pnlPostFeeNative,
-      totalPnlPct: positionPnl?.totalPnlPct ?? closedSummary.pnlPct,
-    } : null;
-    const pnlButton = root.querySelector("[data-action='view-closed-pnl']");
-
-    tokenEl.textContent = token.address
-      ? `${token.name} (${shortenAddress(token.address)})`
-      : "Open a supported token page";
-    balanceEl.textContent = `Bal ${formatters.compactNative(state.balances[token.chain] || 0, token.chain)}`;
-    positionEl.classList.toggle("wt-pnl-up", Boolean(displayedPnl) && displayedPnl.totalPnlNative > 0);
-    positionEl.classList.toggle("wt-pnl-down", Boolean(displayedPnl) && displayedPnl.totalPnlNative < 0);
-    positionEl.classList.toggle("wt-pnl-flat", Boolean(displayedPnl) && displayedPnl.totalPnlNative === 0);
-    positionEl.textContent = position
-      ? `Pos ${formatters.native(position.costNative, token.chain)} ${formatters.pct(positionPnl.totalPnlPct)}`
-      : closedSummary
-        ? `Closed ${formatters.pct(closedSummary.pnlPct)}`
-      : "Pos none";
-    positionEl.title = position
-      ? `Open P&L ${formatters.signedNative(positionPnl.totalPnlNative, token.chain)} (${formatters.pct(positionPnl.totalPnlPct)})`
-      : closedSummary
-        ? `Closed P&L ${formatters.signedNative(closedSummary.pnlPostFeeNative, closedSummary.chain)} (${formatters.pct(closedSummary.pnlPct)})`
-      : "";
-    if (pnlButton) pnlButton.hidden = !closedSummary;
-    if (buyChainEl) buyChainEl.textContent = token.chain;
-    if (sellAssetsEl) {
-      sellAssetsEl.textContent = position
-        ? `${round(position.tokenAmount, 4)} Asset - ${formatters.usd((position.tokenAmount || 0) * (token.unitPriceUsd || 0))}`
-        : "0 Asset - $0";
-    }
+    renderPositionQuoteUi(token);
 
     root.querySelectorAll("[data-quick-setting]").forEach((input) => {
       const key = input.dataset.quickSetting;
@@ -3501,6 +4453,51 @@
     }
     syncAxiomNativeChartLines(chartSummary, token);
     syncAxiomExitTargetLines(token);
+  }
+
+  function renderPositionQuoteUi(token = activeToken) {
+    if (!root || !state || !token) return false;
+    const tokenEl = root.querySelector(`#${selectors.token}`);
+    const balanceEl = root.querySelector(`#${selectors.balance}`);
+    const positionEl = root.querySelector(`#${selectors.position}`);
+    if (!tokenEl || !balanceEl || !positionEl) return false;
+
+    const buyChainEl = root.querySelector("[data-buy-chain]");
+    const sellAssetsEl = root.querySelector("[data-sell-assets]");
+    const pnlButton = root.querySelector("[data-action='view-closed-pnl']");
+    const position = token.key ? state.positions[token.key] : null;
+    const positionPnl = position ? calculateMarkedPositionMetrics(position, token) : null;
+    const closedSummary = findLatestClosedTokenPositionSummary(token);
+    const displayedPnl = positionPnl || closedSummary ? {
+      totalPnlNative: positionPnl?.totalPnlNative ?? closedSummary.pnlPostFeeNative,
+      totalPnlPct: positionPnl?.totalPnlPct ?? closedSummary.pnlPct,
+    } : null;
+
+    tokenEl.textContent = token.address
+      ? `${token.name} (${shortenAddress(token.address)})`
+      : "Open a supported token page";
+    balanceEl.textContent = `Bal ${formatters.compactNative(state.balances[token.chain] || 0, token.chain)}`;
+    positionEl.classList.toggle("wt-pnl-up", Boolean(displayedPnl) && displayedPnl.totalPnlNative > 0);
+    positionEl.classList.toggle("wt-pnl-down", Boolean(displayedPnl) && displayedPnl.totalPnlNative < 0);
+    positionEl.classList.toggle("wt-pnl-flat", Boolean(displayedPnl) && displayedPnl.totalPnlNative === 0);
+    positionEl.textContent = position
+      ? `Pos ${formatters.native(position.costNative, token.chain)} ${formatters.pct(positionPnl.totalPnlPct)}`
+      : closedSummary
+        ? `Closed ${formatters.pct(closedSummary.pnlPct)}`
+        : "Pos none";
+    positionEl.title = position
+      ? `Open P&L ${formatters.signedNative(positionPnl.totalPnlNative, token.chain)} (${formatters.pct(positionPnl.totalPnlPct)})`
+      : closedSummary
+        ? `Closed P&L ${formatters.signedNative(closedSummary.pnlPostFeeNative, closedSummary.chain)} (${formatters.pct(closedSummary.pnlPct)})`
+        : "";
+    if (pnlButton) pnlButton.hidden = !closedSummary;
+    if (buyChainEl) buyChainEl.textContent = token.chain;
+    if (sellAssetsEl) {
+      sellAssetsEl.textContent = position
+        ? `${round(position.tokenAmount, 4)} Asset - ${formatters.usd((position.tokenAmount || 0) * (token.unitPriceUsd || 0))}`
+        : "0 Asset - $0";
+    }
+    return true;
   }
 
   function syncActiveAxiomChartArtifacts() {
@@ -3572,7 +4569,8 @@
 
   function buildFloatingTrackerMetrics() {
     const latestExecution = state.executions[state.executions.length - 1] || null;
-    const chain = activeToken?.chain || latestExecution?.chain || "SOL";
+    const markedActiveToken = getMarketCapTrackingToken(activeToken);
+    const chain = markedActiveToken?.chain || latestExecution?.chain || "SOL";
     const buys = state.executions.filter((execution) => execution.chain === chain && execution.side === "buy");
     const sells = state.executions.filter((execution) => execution.chain === chain && execution.side === "sell");
     const positions = Object.values(state.positions).filter((position) => position.chain === chain);
@@ -3581,12 +4579,12 @@
     let markedOpenPnlNative = 0;
 
     positions.forEach((position) => {
-      const isActivePosition = activeToken?.key && (position.tokenKey === activeToken.key || state.positions[activeToken.key] === position);
-      const markNative = isActivePosition && activeToken?.unitPriceNative
-        ? Number(position.tokenAmount || 0) * Number(activeToken.unitPriceNative || 0)
+      const isActivePosition = markedActiveToken?.key && (position.tokenKey === markedActiveToken.key || state.positions[markedActiveToken.key] === position);
+      const markNative = isActivePosition && markedActiveToken?.unitPriceNative
+        ? Number(position.tokenAmount || 0) * Number(markedActiveToken.unitPriceNative || 0)
         : Number(position.costNative || 0);
       portfolioNative += markNative;
-      if (isActivePosition && activeToken?.unitPriceNative) {
+      if (isActivePosition && markedActiveToken?.unitPriceNative) {
         markedOpenPnlNative += markNative - Number(position.costNative || 0);
       }
     });
@@ -3615,6 +4613,7 @@
   }
 
   function calculateMarkedPositionMetrics(position, token) {
+    token = getMarketCapTrackingToken(token);
     const positionExecutions = state.executions.filter((execution) => execution.positionId === position.positionId);
     const buys = positionExecutions.filter((execution) => execution.side === "buy");
     const sells = positionExecutions.filter((execution) => execution.side === "sell");
@@ -3758,6 +4757,8 @@
       postAxiomChartBridgeMessage({
         op: "upsert",
         positionId: target.id,
+        targetId: target.id,
+        tradePositionId: target.positionId,
         kind: target.kind,
         price: target.marketCapUsd,
         style: buildAxiomExitTargetLineStyle(target),
@@ -3840,11 +4841,13 @@
 
   function buildAxiomExecutionMarkerStyle(execution, price) {
     const isBuy = execution.side === "buy";
+    const color = isBuy ? "#22c55e" : "#f97316";
+    const background = isBuy ? "rgba(34, 197, 94, 0.9)" : "rgba(249, 115, 22, 0.92)";
     return {
-      color: isBuy ? "#22c55e" : "#ef4444",
+      color,
       shape: "flag",
       text: `${isBuy ? "BUY" : "SELL"} ${formatters.usd(price)}`,
-      background: isBuy ? "rgba(34, 197, 94, 0.9)" : "rgba(239, 68, 68, 0.9)",
+      background,
       textColor: "#ffffff",
       fontSize: 10,
     };
@@ -4411,6 +5414,13 @@
     }
   }
 
+  function bindDesktopStatusHeartbeat() {
+    window.setInterval(() => {
+      if (!extensionContextValid) return;
+      runTask(sendDesktopExtensionStatus("heartbeat"));
+    }, DESKTOP_STATUS_HEARTBEAT_MS);
+  }
+
   function sendRuntimeMessage(message) {
     return new Promise((resolve) => {
       if (!extensionContextValid) return resolve({ ok: false, error: "Extension context invalidated." });
@@ -4466,16 +5476,42 @@
   }
 
   async function syncTradeArtifacts(reason, eventExecution = null, captureScreenshot = false) {
+    emitDiagnostic("sync-artifacts-start", {
+      reason,
+      eventExecutionId: eventExecution?.id || null,
+      captureScreenshot: Boolean(captureScreenshot),
+      bridgeEnabled: Boolean(state?.settings?.bridgeEnabled),
+      fallbackDownloadsEnabled: Boolean(state?.settings?.fallbackDownloadsEnabled),
+    });
     const bridgeSynced = await syncBridge(reason, eventExecution, captureScreenshot);
     if (!bridgeSynced && eventExecution && state?.settings?.fallbackDownloadsEnabled) {
+      emitDiagnostic("sync-artifacts-fallback", {
+        reason,
+        eventExecutionId: eventExecution.id,
+        captureScreenshot: Boolean(captureScreenshot),
+      });
       await saveFallbackTradeArtifacts(reason, eventExecution, captureScreenshot);
     }
+    emitDiagnostic("sync-artifacts-complete", {
+      reason,
+      eventExecutionId: eventExecution?.id || null,
+      bridgeSynced,
+    });
   }
 
   async function syncBridge(reason, eventExecution = null, captureScreenshot = false) {
     if (!extensionContextValid) return false;
-    if (!state?.settings?.bridgeEnabled) return false;
+    if (!state?.settings?.bridgeEnabled && !eventExecution) {
+      emitDiagnostic("bridge-skip-disabled", { reason, eventExecutionId: null });
+      return false;
+    }
     try {
+      emitDiagnostic("bridge-post-start", {
+        reason,
+        eventExecutionId: eventExecution?.id || null,
+        captureScreenshot: Boolean(captureScreenshot),
+        bridgeEnabled: Boolean(state?.settings?.bridgeEnabled),
+      });
       const screenshot = await captureBridgeScreenshot(captureScreenshot);
       const response = await fetch(`${BRIDGE_BASE_URL}/ledger`, {
         method: "POST",
@@ -4488,9 +5524,22 @@
         active: true,
         lastMessage: data.sessionDir ? "WilyTrader bridge synced" : "WilyTrader bridge active",
       };
+      emitDiagnostic("bridge-post-success", {
+        reason,
+        eventExecutionId: eventExecution?.id || null,
+        sessionDir: data.sessionDir || null,
+        ledgerPath: data.ledgerPath || null,
+        screenshotPath: data.screenshotPath || null,
+      });
       return true;
-    } catch {
-      bridgeState = { active: false, lastMessage: "WilyTrader bridge not connected" };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error || "unknown error");
+      bridgeState = { active: false, lastMessage: `WilyTrader bridge not connected: ${message}` };
+      emitDiagnostic("bridge-post-failed", {
+        reason,
+        eventExecutionId: eventExecution?.id || null,
+        error: message,
+      });
       return false;
     } finally {
       render();
@@ -4590,6 +5639,89 @@
     }, 1000);
   }
 
+  function bindRollingMarketCapSampler() {
+    window.setInterval(() => {
+      if (!extensionContextValid) return;
+      updateActiveToken();
+      const token = getMarketCapTrackingToken(activeToken);
+      if (!token?.key || !state?.positions?.[token.key]) return;
+      updateActivePositionMarketCapRange({ reason: "rolling-sampler" });
+      renderPositionQuoteUi(token);
+    }, MARKET_CAP_ROLLING_SAMPLE_INTERVAL_MS);
+  }
+
+  function bindLivePositionWatcher() {
+    window.setInterval(() => {
+      if (!extensionContextValid) return;
+      updateActiveToken();
+      const token = activeToken;
+      if (!token?.key || !state?.positions?.[token.key]) return;
+      render();
+      emitLivePositionDiagnostic("live-position-watcher");
+    }, 1000);
+  }
+
+  function bindAxiomQuoteHeartbeat() {
+    window.setInterval(() => {
+      if (!extensionContextValid) return;
+      runTask(sendAxiomQuoteHeartbeat());
+    }, AXIOM_QUOTE_HEARTBEAT_MS);
+    runTask(sendAxiomQuoteHeartbeat());
+  }
+
+  async function sendAxiomQuoteHeartbeat() {
+    if (!isAxiomMemeRoute(new URL(window.location.href))) return;
+    updateActiveToken();
+    const token = getMarketCapTrackingToken(activeToken);
+    if (!token?.key || !token.address) return;
+    const marketCap = Number(token.marketCap || 0);
+    if (!Number.isFinite(marketCap) || marketCap <= 0) return;
+    await sendRuntimeMessage({
+      type: "WILYTRADER_QUOTE_HEARTBEAT",
+      quote: {
+        platform: token.platform || "axiom",
+        chain: token.chain || "SOL",
+        tokenKey: token.key,
+        tokenAddress: token.address,
+        tokenName: token.name || null,
+        marketCap,
+        source: token.marketCapSource || "content-heartbeat",
+        rawText: token.marketCapRawText || document.title || null,
+        url: window.location.href,
+        title: document.title || null,
+        readAtMs: token.marketCapReadAtMs || Date.now(),
+      },
+    });
+  }
+
+  function emitLivePositionDiagnostic(reason) {
+    const token = activeToken;
+    const position = token?.key ? state?.positions?.[token.key] : null;
+    if (!token?.key || !position) return;
+    const pnl = calculateMarkedPositionMetrics(position, token);
+    const marketCaps = buildMarketCapDiagnostics();
+    const now = Date.now();
+    const key = [
+      token.key,
+      round(token.marketCap, 2),
+      round(token.unitPriceNative, 12),
+      round(pnl.totalPnlNative, 8),
+      round(pnl.totalPnlPct, 4),
+      marketCaps.axiomTitle,
+      marketCaps.axiomVisible,
+    ].join("|");
+    if (key === lastLivePositionDiagnosticKey && now - lastLivePositionDiagnosticAt < LIVE_POSITION_DIAGNOSTIC_MS) return;
+    lastLivePositionDiagnosticKey = key;
+    lastLivePositionDiagnosticAt = now;
+    emitDiagnostic("live-position", {
+      reason,
+      token: summarizeToken(token),
+      position: summarizePosition(position),
+      marketCaps,
+      pnl,
+    });
+  }
+
   function bindExitTargetWatcher() {
     window.setInterval(() => {
       if (!extensionContextValid) return;
@@ -4602,13 +5734,16 @@
     if (!isAxiomMemeRoute(new URL(window.location.href))) return;
     updateActiveToken();
     const token = activeToken;
-    const marketCapUsd = Number(token?.marketCap || 0);
-    if (!token?.key || !Number.isFinite(marketCapUsd) || marketCapUsd <= 0) return;
+    if (!token?.key) return;
     const position = state.positions[token.key];
     if (!position) return;
-    const targets = Object.values(state.exitTargets || {})
-      .filter((target) => target?.positionId === position.positionId && !target.triggeredAt)
-      .sort((a, b) => targetTriggerPriority(a, b, marketCapUsd));
+    const activeTargets = Object.values(state.exitTargets || {})
+      .filter((target) => target?.positionId === position.positionId && !target.triggeredAt);
+    if (!activeTargets.length) return;
+    const triggerToken = await getExitTargetTriggerToken(token);
+    const marketCapUsd = Number(triggerToken?.marketCap || 0);
+    if (!Number.isFinite(marketCapUsd) || marketCapUsd <= 0) return;
+    const targets = activeTargets.sort((a, b) => targetTriggerPriority(a, b, marketCapUsd));
     const triggered = targets.find((target) => isExitTargetTriggered(target, marketCapUsd));
     if (!triggered) return;
     targetExitInFlight = triggered.id;
@@ -4617,6 +5752,15 @@
       await persistAndSync("exit-target-triggered");
       const sellPercent = normalizeTargetSellPercent(triggered.sellPercent);
       setStatus(`${formatExitTargetKind(triggered.kind)} ${formatTargetSellPercent(sellPercent)} touched ${formatters.usd(triggered.marketCapUsd)}.`);
+      logExitTargetDiagnostic("target-trigger-quote", null, {
+        id: triggered.id,
+        kind: triggered.kind,
+        sellPercent,
+        targetMarketCapUsd: triggered.marketCapUsd,
+        triggerMarketCapUsd: marketCapUsd,
+        triggerSource: triggerToken.marketCapSource || null,
+        triggerReadAtMs: triggerToken.marketCapReadAtMs || null,
+      });
       const execution = await sell(sellPercent);
       if (!execution && state.exitTargets[targetExitInFlight]) {
         state.exitTargets[targetExitInFlight].triggeredAt = null;

@@ -27,6 +27,7 @@ interface WilyTraderDesktopSettings {
   microphoneCaptureEnabled: boolean;
   saveBrowserScreenshots: boolean;
   generateTradeLogOnStop: boolean;
+  masterTradingLogPath: string;
   autoCheckExtensionUpdates: boolean;
   tradeSessionHotkey: string;
   llmMode: 'gemini-cli' | 'api';
@@ -78,6 +79,11 @@ interface WilyTraderSessionFinalization {
   estimatedRemainingMs: number;
 }
 
+interface WilyTraderDesktopAppInfo {
+  name: string;
+  version: string;
+}
+
 type WilyTraderDesktopRuntimeApi = typeof window.wilyTraderDesktop & Partial<{
   checkDependencies: (payload: { geminiCliCommand?: string }) => Promise<{
     whisper: { ok: boolean; message: string; exePath?: string; modelPath?: string };
@@ -87,6 +93,19 @@ type WilyTraderDesktopRuntimeApi = typeof window.wilyTraderDesktop & Partial<{
   geminiCliSigninStatus: () => Promise<{ signedIn: boolean; subject?: string | null }>;
   geminiCliSignin: (payload: { command?: string }) => Promise<{ ok: boolean; message: string; subject?: string }>;
   logDebug: (scope: string, message: string, details?: unknown) => Promise<{ ok: true }>;
+  openActiveSessionFolder: () => Promise<{ ok: boolean; message: string; path?: string | null }>;
+  copyActiveSessionFolderLink: () => Promise<{ ok: boolean; message: string; path?: string | null }>;
+  copyLastCompletedSessionFolderLink: () => Promise<{ ok: boolean; message: string; path?: string | null }>;
+  syncMasterTradingLog: () => Promise<{
+    ok: boolean;
+    message: string;
+    masterPath: string | null;
+    syncScriptsDir: string;
+    processedFolders: number;
+    rowsAppended: number;
+    rowsBackfilled: number;
+    backfilledArchivedFolders: number;
+  }>;
   openLatestExtensionRelease: () => Promise<{ ok: boolean; message: string; url?: string }>;
   downloadLatestExtensionRelease: () => Promise<{ ok: boolean; message: string; url?: string }>;
 }>;
@@ -94,7 +113,11 @@ type WilyTraderDesktopRuntimeApi = typeof window.wilyTraderDesktop & Partial<{
 const startButton = document.querySelector<HTMLButtonElement>('[data-action="start"]');
 const stopButton = document.querySelector<HTMLButtonElement>('[data-action="stop"]');
 const discardButton = document.querySelector<HTMLButtonElement>('[data-action="discard"]');
+const openActiveSessionFolderButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-action="open-active-session-folder"]'));
+const copyActiveSessionFolderButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-action="copy-active-session-folder-link"]'));
 const openSessionFolderButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-action="open-session-folder"]'));
+const copySessionFolderButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-action="copy-session-folder-link"]'));
+const syncMasterButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-action="sync-master-trading-log"]'));
 const settingsButton = document.querySelector<HTMLButtonElement>('[data-action="settings"]');
 const settingsSaveButton = document.querySelector<HTMLButtonElement>('[data-action="settings-save"]');
 const updateCheckButton = document.querySelector<HTMLButtonElement>('[data-action="check-extension-update"]');
@@ -119,6 +142,7 @@ const dependencyStatusEl = document.querySelector<HTMLElement>('[data-dependency
 const geminiSigninStatusEl = document.querySelector<HTMLElement>('[data-gemini-signin-status]');
 const settingsMessageEl = document.querySelector<HTMLElement>('[data-settings-message]');
 const settingsModal = document.querySelector<HTMLElement>('[data-settings-modal]');
+const appVersionEls = Array.from(document.querySelectorAll<HTMLElement>('[data-app-version]'));
 
 debugLog('renderer', 'renderer loaded', {
   hasRuntimeApi: Boolean(window.wilyTraderDesktop),
@@ -145,8 +169,20 @@ window.addEventListener('unhandledrejection', (event) => {
 startButton?.addEventListener('click', () => void startAudioFirstSession().catch(showError));
 stopButton?.addEventListener('click', () => void stopAudioFirstSession().catch(showError));
 discardButton?.addEventListener('click', () => void discardAudioFirstSession().catch(showError));
+for (const button of openActiveSessionFolderButtons) {
+  button.addEventListener('click', () => void openActiveSessionFolder().catch(showError));
+}
+for (const button of copyActiveSessionFolderButtons) {
+  button.addEventListener('click', () => void copyActiveSessionFolderLink().catch(showError));
+}
 for (const button of openSessionFolderButtons) {
   button.addEventListener('click', () => void openLastCompletedSessionFolder().catch(showError));
+}
+for (const button of copySessionFolderButtons) {
+  button.addEventListener('click', () => void copyLastCompletedSessionFolderLink().catch(showError));
+}
+for (const button of syncMasterButtons) {
+  button.addEventListener('click', () => void syncMasterTradingLog().catch(showError));
 }
 settingsButton?.addEventListener('click', () => void openSettings());
 for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>('[data-action="settings-close"]'))) {
@@ -211,7 +247,15 @@ void window.wilyTraderDesktop.getSettings().then((settings) => {
   currentSettings = settings;
   populateSettings(settings);
 }).catch(showError);
+void window.wilyTraderDesktop.getAppInfo().then(renderAppInfo).catch(showError);
 void window.wilyTraderDesktop.getStatus().then(renderStatus).catch(showError);
+
+function renderAppInfo(info: WilyTraderDesktopAppInfo): void {
+  for (const element of appVersionEls) {
+    element.textContent = `v${info.version}`;
+    element.title = `${info.name} ${info.version}`;
+  }
+}
 
 async function startAudioFirstSession(): Promise<void> {
   try {
@@ -481,12 +525,29 @@ function renderStatus(status: WilyTraderDesktopStatus): void {
         : 'Idle';
   }
   if (sessionDirEl) sessionDirEl.textContent = status.sessionDir ?? 'No active session';
+  const hasActiveSession = Boolean(status.sessionDir);
+  for (const button of openActiveSessionFolderButtons) {
+    button.hidden = !hasActiveSession;
+    button.disabled = !hasActiveSession;
+  }
+  for (const button of copyActiveSessionFolderButtons) {
+    button.hidden = !hasActiveSession;
+    button.disabled = !hasActiveSession;
+  }
   const hasLastCompletedSession = Boolean(status.lastCompletedSessionDir);
   if (lastCompletedSessionEl) lastCompletedSessionEl.toggleAttribute('hidden', !hasLastCompletedSession);
   if (lastCompletedDirEl) lastCompletedDirEl.textContent = status.lastCompletedSessionDir ?? 'No completed session yet';
   for (const button of openSessionFolderButtons) {
     button.hidden = !hasLastCompletedSession;
     button.disabled = !hasLastCompletedSession;
+  }
+  for (const button of copySessionFolderButtons) {
+    button.hidden = !hasLastCompletedSession;
+    button.disabled = !hasLastCompletedSession;
+  }
+  for (const button of syncMasterButtons) {
+    button.hidden = !hasLastCompletedSession;
+    button.disabled = !hasLastCompletedSession || status.active || finalizing || stopping || discarding;
   }
   if (bridgeEl) bridgeEl.textContent = `Bridge: http://127.0.0.1:${status.bridgePort}/v1/wilytrader/ledger`;
   if (countsEl) {
@@ -666,6 +727,7 @@ function populateSettings(settings: WilyTraderDesktopSettings): void {
   setChecked('microphoneCaptureEnabled', settings.microphoneCaptureEnabled);
   setChecked('saveBrowserScreenshots', settings.saveBrowserScreenshots);
   setChecked('generateTradeLogOnStop', settings.generateTradeLogOnStop);
+  setInputValue('masterTradingLogPath', settings.masterTradingLogPath);
   setChecked('autoCheckExtensionUpdates', settings.autoCheckExtensionUpdates);
   setSelectValue('llmMode', settings.llmMode);
   setInputValue('geminiCliCommand', settings.geminiCliCommand);
@@ -682,6 +744,7 @@ async function saveSettingsFromForm(): Promise<void> {
     microphoneCaptureEnabled: getChecked('microphoneCaptureEnabled'),
     saveBrowserScreenshots: getChecked('saveBrowserScreenshots'),
     generateTradeLogOnStop: getChecked('generateTradeLogOnStop'),
+    masterTradingLogPath: getInputValue('masterTradingLogPath'),
     autoCheckExtensionUpdates: getChecked('autoCheckExtensionUpdates'),
     llmMode: getSelectValue('llmMode') === 'api' ? 'api' : 'gemini-cli',
     geminiCliCommand: getInputValue('geminiCliCommand'),
@@ -841,10 +904,52 @@ async function openExtensionFolder(): Promise<void> {
   setSettingsMessage(result.message, !result.ok);
 }
 
+async function openActiveSessionFolder(): Promise<void> {
+  const result = await window.wilyTraderDesktop.openActiveSessionFolder();
+  setSettingsMessage(result.message, !result.ok);
+  if (statusEl) statusEl.textContent = result.message;
+}
+
+async function copyActiveSessionFolderLink(): Promise<void> {
+  const result = await window.wilyTraderDesktop.copyActiveSessionFolderLink();
+  setSettingsMessage(result.message, !result.ok);
+  if (statusEl) statusEl.textContent = result.message;
+}
+
 async function openLastCompletedSessionFolder(): Promise<void> {
   const result = await window.wilyTraderDesktop.openLastCompletedSessionFolder();
   setSettingsMessage(result.message, !result.ok);
   if (statusEl) statusEl.textContent = result.message;
+}
+
+async function copyLastCompletedSessionFolderLink(): Promise<void> {
+  const result = await window.wilyTraderDesktop.copyLastCompletedSessionFolderLink();
+  setSettingsMessage(result.message, !result.ok);
+  if (statusEl) statusEl.textContent = result.message;
+}
+
+async function syncMasterTradingLog(): Promise<void> {
+  const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi;
+  if (typeof api.syncMasterTradingLog !== 'function') {
+    throw new Error('Master sync is unavailable in this running app. Restart WilyTrader Desktop.');
+  }
+  for (const button of syncMasterButtons) {
+    button.disabled = true;
+    button.textContent = 'Syncing...';
+  }
+  setUiBusy(false, 'Syncing master trading log...');
+  try {
+    const result = await api.syncMasterTradingLog();
+    const countText = `processed ${result.processedFolders}, appended ${result.rowsAppended}, updated ${result.rowsBackfilled}`;
+    const message = `${result.message} (${countText})`;
+    setSettingsMessage(message, !result.ok);
+    if (statusEl) statusEl.textContent = message;
+  } finally {
+    for (const button of syncMasterButtons) {
+      button.textContent = 'Sync Master';
+    }
+    renderStatus(await window.wilyTraderDesktop.getStatus());
+  }
 }
 
 async function moveExtensionLocation(): Promise<void> {

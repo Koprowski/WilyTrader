@@ -308,6 +308,14 @@ h2 {
   font-size: 18px;
 }
 
+h1 [data-app-version] {
+  margin-left: 8px;
+  color: #8ea2b2;
+  font-size: 13px;
+  font-family: Consolas, monospace;
+  font-weight: 600;
+}
+
 .settings-version {
   display: flex;
   align-items: center;

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WilyTrader Axiom Chart Bridge
 // @namespace    https://github.com/Koprowski/WilyTrader
-// @version      0.3.35
+// @version      0.3.59
 // @description  Draw WilyTrader average entry/exit lines as native TradingView chart shapes on axiom.trade.
 // @match        https://axiom.trade/*
 // @run-at       document-idle
@@ -40,6 +40,9 @@
     let symbolUnsubscribe = null;
     let symbolPollId = null;
     let lineMovePollId = null;
+    let latestPricePollId = null;
+    let lastPostedLatestPrice = 0;
+    let lastPostedLatestPriceAt = 0;
     let lastSymbol = "";
     let flushScheduled = false;
 
@@ -49,12 +52,14 @@
       await ensureBound();
     }
 
-    async function upsertLine(positionId, kind, price, style) {
+    async function upsertLine(positionId, kind, price, style, metadata = {}) {
       if (!positionId || !Number.isFinite(price) || price <= 0) return;
       const key = lineKey(positionId, kind);
       desiredLines.set(key, {
         ...(desiredLines.get(key) || {}),
         positionId,
+        targetId: metadata.targetId,
+        tradePositionId: metadata.tradePositionId,
         kind,
         price,
         style: normalizeStyle(kind, style || {}),
@@ -73,12 +78,15 @@
 
     async function upsertMarker(positionId, markerId, side, time, price, style) {
       if (!positionId || !markerId || !Number.isFinite(time) || !Number.isFinite(price) || price <= 0) return;
+      const existing = desiredMarkers.get(markerId);
+      const pinnedTime = Number(existing?.time);
       desiredMarkers.set(markerId, {
-        ...(desiredMarkers.get(markerId) || {}),
+        ...(existing || {}),
         positionId,
         markerId,
         side,
-        time,
+        time: existing?.entityId && Number.isFinite(pinnedTime) && pinnedTime > 0 ? pinnedTime : time,
+        requestedTime: time,
         price,
         style: normalizeMarkerStyle(side, style || {}),
       });
@@ -162,6 +170,29 @@
       lineMovePollId = window.setInterval(pollMovableLinePrices, 350);
     }
 
+    function startLatestPricePoll() {
+      if (latestPricePollId !== null) return;
+      latestPricePollId = window.setInterval(pollLatestPrice, 250);
+    }
+
+    function pollLatestPrice() {
+      if (!bound) return;
+      const price = readLatestChartPrice(bound);
+      if (!Number.isFinite(price) || Number(price) <= 0) return;
+      const now = Date.now();
+      if (Math.abs(Number(price) - lastPostedLatestPrice) < 1 && now - lastPostedLatestPriceAt < 1000) return;
+      lastPostedLatestPrice = Number(price);
+      lastPostedLatestPriceAt = now;
+      window.postMessage({
+        source: "wiley-chart-bridge",
+        event: "latestPrice",
+        price: Number(price),
+        rawText: String(price),
+        readAtMs: now,
+        symbol: safeGetSymbol(bound.chart),
+      }, window.location.origin);
+    }
+
     function pollMovableLinePrices() {
       if (!bound) return;
       desiredLines.forEach((line) => {
@@ -173,6 +204,8 @@
         window.postMessage({
           source: "wiley-chart-bridge",
           event: "lineMoved",
+          targetId: line.targetId || line.positionId,
+          tradePositionId: line.tradePositionId || null,
           positionId: line.positionId,
           kind: line.kind,
           price: line.price,
@@ -215,6 +248,7 @@
       });
       bound = await bindPromise;
       attachSymbolWatcher(bound);
+      startLatestPricePoll();
       return bound;
     }
 
@@ -353,16 +387,18 @@
     }
 
     async function upsertStoredMarker(boundChart, marker) {
+      const markerTime = marker.entityId ? marker.time : resolveMarkerTime(boundChart, marker.requestedTime || marker.time);
+      const point = { time: markerTime, price: marker.price };
       const entity = marker.entityId ? safeCall(() => boundChart.chart.getShapeById?.(marker.entityId)) : null;
       if (entity) {
-        safeCall(() => entity.setPoints?.([{ time: marker.time, price: marker.price }]));
+        safeCall(() => entity.setPoints?.([point]));
         safeCall(() => entity.setProperties?.(buildMarkerOverrides(marker)));
-        return marker;
+        return { ...marker, time: markerTime };
       }
       if (!boundChart.chart?.createShape) {
         throw new Error("No TradingView marker creation API found.");
       }
-      const id = await boundChart.chart.createShape({ time: marker.time, price: marker.price }, {
+      const id = await boundChart.chart.createShape(point, {
         shape: marker.style.shape || (marker.side === "buy" ? "arrow_up" : "arrow_down"),
         lock: true,
         disableSelection: false,
@@ -370,7 +406,7 @@
         disableUndo: true,
         overrides: buildMarkerOverrides(marker),
       });
-      return { ...marker, entityId: id, mode: "public" };
+      return { ...marker, time: markerTime, entityId: id, mode: "public" };
     }
 
     function removeStoredMarker(boundChart, marker) {
@@ -436,6 +472,57 @@
       return Number.isFinite(sourcePrice) ? sourcePrice : null;
     }
 
+    function readLatestChartPrice(boundChart) {
+      const series =
+        safeCall(() => boundChart.chartWidget._model?.mainSeries?.())
+        || safeCall(() => boundChart.chartWidget.model?.().mainSeries?.())
+        || safeCall(() => boundChart.chart.mainSeries?.());
+      const bars =
+        safeCall(() => series?.bars?.())
+        || safeCall(() => series?.data?.())
+        || safeCall(() => series?._data);
+      const lastIndex = safeCall(() => bars?.lastIndex?.());
+      const candidates = [
+        safeCall(() => bars?.last?.()),
+        safeCall(() => bars?.lastValue?.()),
+        safeCall(() => bars?.valueAt?.(lastIndex)),
+        safeCall(() => bars?.search?.(lastIndex)),
+        safeCall(() => series?.lastValueData?.()),
+        safeCall(() => series?.lastPriceData?.()),
+        safeCall(() => series?.priceScale?.().lastValue?.()),
+      ];
+      for (const candidate of candidates) {
+        const price = extractBarPrice(candidate);
+        if (Number.isFinite(price) && Number(price) > 0) return price;
+      }
+      return null;
+    }
+
+    function extractBarPrice(value) {
+      if (typeof value === "number") return Number.isFinite(value) && value > 0 ? value : null;
+      if (!value || typeof value !== "object") return null;
+      if (Array.isArray(value)) {
+        const close = Number(value[4] ?? value[value.length - 1]);
+        return Number.isFinite(close) && close > 0 ? close : null;
+      }
+      const direct = Number(
+        value.close
+        ?? value.value
+        ?? value.price
+        ?? value.last
+        ?? value.lastPrice
+        ?? value._value
+        ?? value._close
+        ?? value._price,
+      );
+      if (Number.isFinite(direct) && direct > 0) return direct;
+      if (Array.isArray(value.value)) return extractBarPrice(value.value);
+      if (Array.isArray(value._value)) return extractBarPrice(value._value);
+      if (value.value && typeof value.value === "object") return extractBarPrice(value.value);
+      if (value._value && typeof value._value === "object") return extractBarPrice(value._value);
+      return null;
+    }
+
     function readPointList(source) {
       const points = safeCall(() => source.getPoints?.())
         || safeCall(() => source.points?.())
@@ -477,6 +564,104 @@
       return safeCall(() => boundChart.chartWidget.getTimeScale?.().rightmostIndex?.())
         || safeCall(() => boundChart.chartWidget._model?.timeScale?.().rightmostIndex?.())
         || 0;
+    }
+
+    function resolveMarkerTime(boundChart, requestedTime) {
+      const time = Math.floor(Number(requestedTime));
+      if (!Number.isFinite(time) || time <= 0) return Math.floor(Date.now() / 1000);
+      const barTime = resolveChartBarTimeAtOrBefore(boundChart, time);
+      if (barTime) return barTime;
+      const resolutionSeconds = resolveChartResolutionSeconds(boundChart);
+      if (!Number.isFinite(resolutionSeconds) || resolutionSeconds <= 1) return time;
+      return Math.floor(time / resolutionSeconds) * resolutionSeconds;
+    }
+
+    function resolveChartBarTimeAtOrBefore(boundChart, requestedTime) {
+      const times = collectChartBarTimes(boundChart)
+        .filter((time) => Number.isFinite(time) && time > 0 && time <= requestedTime)
+        .sort((a, b) => b - a);
+      return times[0] || null;
+    }
+
+    function collectChartBarTimes(boundChart) {
+      const series =
+        safeCall(() => boundChart.chartWidget._model?.mainSeries?.())
+        || safeCall(() => boundChart.chartWidget.model?.().mainSeries?.())
+        || safeCall(() => boundChart.chart.mainSeries?.());
+      const bars =
+        safeCall(() => series?.bars?.())
+        || safeCall(() => series?.data?.())
+        || safeCall(() => series?._data);
+      const values = [
+        safeCall(() => bars?.last?.()),
+        safeCall(() => bars?.lastValue?.()),
+        safeCall(() => bars?.valueAt?.(safeCall(() => bars?.lastIndex?.()))),
+        safeCall(() => bars?.search?.(safeCall(() => bars?.lastIndex?.()))),
+        ...extractCollectionValues(safeCall(() => bars?._items)),
+        ...extractCollectionValues(safeCall(() => bars?._data)),
+        ...extractCollectionValues(safeCall(() => bars?._bars)),
+        ...extractCollectionValues(safeCall(() => bars?._itemsByIndex)),
+        ...extractCollectionValues(safeCall(() => bars?._plotRows)),
+      ];
+      return Array.from(new Set(values.map(extractBarTimeSeconds).filter(Boolean)));
+    }
+
+    function extractCollectionValues(value) {
+      if (!value) return [];
+      if (Array.isArray(value)) return value;
+      if (value instanceof Map) return Array.from(value.values());
+      if (typeof value === "object") return Object.values(value);
+      return [];
+    }
+
+    function extractBarTimeSeconds(value) {
+      if (typeof value === "number") return normalizeEpochSeconds(value);
+      if (!value || typeof value !== "object") return null;
+      const direct =
+        value.time
+        || value.timestamp
+        || value._time
+        || value._internal_time
+        || value.originalTime
+        || value._internal_originalTime;
+      if (direct) return extractBarTimeSeconds(direct);
+      if (Array.isArray(value.value) && value.value.length) return extractBarTimeSeconds(value.value[0]);
+      if (Array.isArray(value._value) && value._value.length) return extractBarTimeSeconds(value._value[0]);
+      if (value.value && typeof value.value === "object") return extractBarTimeSeconds(value.value);
+      return null;
+    }
+
+    function normalizeEpochSeconds(value) {
+      if (!Number.isFinite(value) || value <= 0) return null;
+      if (value > 1000000000000) return Math.floor(value / 1000);
+      if (value > 1000000000) return Math.floor(value);
+      return null;
+    }
+
+    function resolveChartResolutionSeconds(boundChart) {
+      const resolution =
+        safeCall(() => boundChart.chart.resolution?.())
+        || safeCall(() => boundChart.chart.interval?.())
+        || safeCall(() => boundChart.api.activeChart?.().resolution?.())
+        || safeCall(() => boundChart.chartWidget.activeChart?.().resolution?.())
+        || safeCall(() => boundChart.chartWidget.symbolInterval?.().interval)
+        || safeCall(() => boundChart.chartWidget._model?.mainSeries?.().interval?.());
+      return parseChartResolutionSeconds(resolution);
+    }
+
+    function parseChartResolutionSeconds(value) {
+      const raw = String(value || "").trim().toUpperCase();
+      if (!raw) return 0;
+      const match = raw.match(/^(\d+(?:\.\d+)?)([A-Z]*)$/);
+      if (!match) return 0;
+      const amount = Number(match[1]);
+      if (!Number.isFinite(amount) || amount <= 0) return 0;
+      const unit = match[2] || "MIN";
+      if (unit === "S") return Math.round(amount);
+      if (unit === "D") return Math.round(amount * 86400);
+      if (unit === "W") return Math.round(amount * 604800);
+      if (unit === "M") return Math.round(amount * 2592000);
+      return Math.round(amount * 60);
     }
 
     function attachSymbolWatcher(boundChart) {
@@ -532,7 +717,7 @@
     }
 
     function normalizeMarkerStyle(side, style) {
-      const color = side === "buy" ? "#22c55e" : "#ef4444";
+      const color = side === "buy" ? "#22c55e" : "#f97316";
       return {
         color: style.color || color,
         textColor: "#ffffff",
@@ -578,7 +763,10 @@
     const data = event.data || {};
     if (data.source !== "wileytrader") return;
     if (data.op === "upsert") {
-      void bridge.upsertLine(data.positionId, data.kind, Number(data.price), data.style || {});
+      void bridge.upsertLine(data.positionId, data.kind, Number(data.price), data.style || {}, {
+        targetId: data.targetId,
+        tradePositionId: data.tradePositionId,
+      });
     } else if (data.op === "remove") {
       void bridge.removeLine(data.positionId, data.kind);
     } else if (data.op === "upsertMarker") {

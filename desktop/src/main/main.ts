@@ -12,6 +12,7 @@ import type {
   AudioRecordingMeta,
   BridgeExecutionEvent,
   BridgeScreenshotPayload,
+  MasterSyncResult,
   StopSessionResult,
   TranscriptSegment,
   WilyTraderDesktopSettings,
@@ -31,6 +32,7 @@ interface ActiveTradeSession {
   inputsDir: string;
   audioDir: string;
   screenshotDir: string;
+  screenshotMetadataDir: string;
   sessionStartedAtMs: number;
   transcriptSegments: TranscriptSegment[];
   audioChunks: AudioChunkMeta[];
@@ -38,6 +40,7 @@ interface ActiveTradeSession {
   executionsReceived: number;
   screenshotsReceived: number;
   lastLedgerPayload: unknown | null;
+  marketCapObservations: MarketCapObservation[];
   incrementalTranscription: IncrementalTranscriptionRun;
 }
 
@@ -61,14 +64,152 @@ interface NormalizedTrade {
   chain: string;
   entryMarketCap: number | null;
   exitMarketCap: number | null;
+  highMarketCapAfterEntry: number | null;
+  highMarketCapAtMs?: number | null;
+  lowMarketCapAfterEntry: number | null;
+  lowMarketCapAtMs?: number | null;
+  ohlcSampleCount?: number | null;
+  ohlcSampleIntervalMs?: number | null;
+  ohlcRangeSource?: string | null;
   solInvested: number | null;
   solReceived: number | null;
+  buyFeesNative: number | null;
+  sellFeesNative: number | null;
   pnlSol: number | null;
   pnlPercentage: number | null;
   timestampMs: number | null;
   entryTimestampMs: number | null;
   timeInTradeSeconds: number | null;
   tokenAddress: string | null;
+  executions?: TradeExecutionPoint[];
+  ohlcMc?: TradeOhlc | null;
+  ohlcPct?: TradeOhlc | null;
+  ohlcSol?: TradeOhlc | null;
+  ohlcSource?: string | null;
+  enrichmentSource?: 'ledger' | 'llm';
+  entryCommentaryOffsetMs?: number | null;
+  exitCommentaryOffsetMs?: number | null;
+  targetLowMc?: number | null;
+  targetHighMc?: number | null;
+  stopLossMc?: number | null;
+  rationale?: string | null;
+  preTranscriptExcerpt?: string | null;
+  postTranscriptExcerpt?: string | null;
+  adherenceSelfAssessment?: string | null;
+  needsReview?: boolean | null;
+  notes?: string | null;
+  metaClusterId?: string | null;
+  metaName?: string | null;
+  nScore?: number | null;
+  nWhy?: string | null;
+  iScore?: number | null;
+  iWhy?: string | null;
+  cScore?: number | null;
+  cWhy?: string | null;
+  sScore?: number | null;
+  sWhy?: string | null;
+  nicsScore?: number | null;
+  sizeOk?: boolean | null;
+  zoneOk?: boolean | null;
+  cooldownOk?: boolean | null;
+  tradeType?: string | null;
+  countsToward50?: boolean | null;
+  hardReset?: boolean | null;
+  runningCount?: number | null;
+  nonNicsPnlPct?: number | null;
+  clusterPnlPct?: number | null;
+  llmGradeNotes?: string | null;
+}
+
+interface TradeExecutionPoint {
+  id: string | null;
+  side: string | null;
+  timestampMs: number | null;
+  marketCapUsd: number | null;
+  unitPriceNative: number | null;
+  requestedSellPct: number | null;
+  tokenAmount: number | null;
+  grossNative: number | null;
+  netNative: number | null;
+  feeNative: number | null;
+  costBasisNative: number | null;
+  pnlNative: number | null;
+  pnlPct: number | null;
+  screenshotPath?: string | null;
+}
+
+type XlsxStyleKey = 'integer' | 'sol3' | 'percent1' | 'nativePrice' | 'date';
+
+type XlsxCell = string | number | {
+  text: string;
+  hyperlink?: string;
+  formula?: string;
+  tooltip?: string;
+  style?: XlsxStyleKey;
+};
+
+interface XlsxHyperlink {
+  ref: string;
+  target: string;
+  tooltip?: string;
+}
+
+interface TradeOhlc {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+interface MarketCapObservation {
+  tokenAddress: string | null;
+  tokenName: string | null;
+  timestampMs: number;
+  marketCapUsd: number;
+  source: string;
+}
+
+interface LlmTradeExtraction {
+  mockape_trade_id: string | null;
+  token_name: string | null;
+  pre_call_offset_ms: number | null;
+  post_call_offset_ms: number | null;
+  target_low_mc: number | null;
+  target_high_mc: number | null;
+  stop_loss_mc: number | null;
+  rationale: string | null;
+  pre_transcript_excerpt: string | null;
+  post_transcript_excerpt: string | null;
+  adherence_self_assessment: string | null;
+  needs_review: boolean | null;
+  notes: string | null;
+  meta_name: string | null;
+  N_score: number | null;
+  N_why: string | null;
+  I_score: number | null;
+  I_why: string | null;
+  C_score: number | null;
+  C_why: string | null;
+  S_score: number | null;
+  S_why: string | null;
+  NICS_score: number | null;
+  size_ok: boolean | null;
+  zone_ok: boolean | null;
+  cooldown_ok: boolean | null;
+  trade_type: string | null;
+  counts_toward_50: boolean | null;
+  hard_reset: boolean | null;
+  running_count: number | null;
+  non_nics_pnl_pct: number | null;
+  cluster_pnl_pct: number | null;
+  llm_grade_notes: string | null;
+}
+
+interface TradeEnrichmentResult {
+  trades: NormalizedTrade[];
+  promptPath: string | null;
+  responsePath: string | null;
+  warnings: string[];
 }
 
 interface FinalizingTradeSession {
@@ -166,7 +307,11 @@ function registerIpc(): void {
   ipcMain.handle('session:start', async () => startSession());
   ipcMain.handle('session:stop', async () => stopSession());
   ipcMain.handle('session:abandon', async () => abandonSession());
+  ipcMain.handle('session:open-active-folder', async () => openActiveSessionFolder());
+  ipcMain.handle('session:copy-active-folder-link', async () => copyActiveSessionFolderLink());
   ipcMain.handle('session:open-last-completed-folder', async () => openLastCompletedSessionFolder());
+  ipcMain.handle('session:copy-last-completed-folder-link', async () => copyLastCompletedSessionFolderLink());
+  ipcMain.handle('session:sync-master-trading-log', async () => syncMasterTradingLog());
   ipcMain.handle('session:status', async () => getStatus());
   ipcMain.handle('session:audio-chunk', async (_event, payload) => saveAudioChunk(payload));
   ipcMain.handle('session:audio-recording', async (_event, payload) => saveAudioRecording(payload));
@@ -368,14 +513,17 @@ function startSession(): WilyTraderDesktopStatus {
   const inputsDir = path.join(sessionDir, 'Inputs');
   const audioDir = path.join(inputsDir, 'audio');
   const screenshotDir = path.join(inputsDir, 'trade-screenshots');
+  const screenshotMetadataDir = path.join(inputsDir, 'trade-screenshot-metadata');
   fs.mkdirSync(audioDir, { recursive: true });
   fs.mkdirSync(screenshotDir, { recursive: true });
+  fs.mkdirSync(screenshotMetadataDir, { recursive: true });
 
   activeSession = {
     sessionDir,
     inputsDir,
     audioDir,
     screenshotDir,
+    screenshotMetadataDir,
     sessionStartedAtMs,
     transcriptSegments: [],
     audioChunks: [],
@@ -383,6 +531,7 @@ function startSession(): WilyTraderDesktopStatus {
     executionsReceived: 0,
     screenshotsReceived: 0,
     lastLedgerPayload: null,
+    marketCapObservations: [],
     incrementalTranscription: createIncrementalTranscriptionRun(),
   };
 
@@ -428,7 +577,7 @@ async function stopSession(): Promise<StopSessionResult> {
   });
   updateFinalizationProgress(session, 'stopping', 'Recording stopped; preparing session artifacts.', 8);
 
-  const transcriptionWarnings = await transcribeSessionAudio(session, (phase, message, percent) => {
+  const warnings = await transcribeSessionAudio(session, (phase, message, percent) => {
     updateFinalizationProgress(session, phase, message, percent);
   });
   updateFinalizationProgress(session, 'artifacts', 'Writing transcript files.', 82);
@@ -436,8 +585,15 @@ async function stopSession(): Promise<StopSessionResult> {
   const transcriptMdPath = writeTranscriptMd(session);
   updateFinalizationProgress(session, 'trade-log', 'Building trade log artifacts.', 90);
   const trades = loadTradesFromSession(session, stoppedAtMs);
-  const tradeLogMdPath = settings.generateTradeLogOnStop ? writeTradeLogMd(session, trades) : '';
-  const tradeLogXlsxPath = settings.generateTradeLogOnStop ? await writeTradeLogXlsx(session, trades, stoppedAtMs) : '';
+  const enrichment = settings.generateTradeLogOnStop
+    ? await enrichTradesForSession(session, trades, stoppedAtMs, (phase, message, percent) => {
+        updateFinalizationProgress(session, phase, message, percent);
+      })
+    : { trades, promptPath: null, responsePath: null, warnings: [] };
+  warnings.push(...enrichment.warnings);
+  const sortedTrades = sortTradesByExitDateTime(enrichment.trades);
+  const tradeLogMdPath = settings.generateTradeLogOnStop ? writeTradeLogMd(session, sortedTrades) : '';
+  const tradeLogXlsxPath = settings.generateTradeLogOnStop ? await writeTradeLogXlsx(session, sortedTrades, stoppedAtMs) : '';
   updateFinalizationProgress(session, 'complete', 'Session finalized.', 100);
   writeStatusFileForSession(session, 'complete', {
     durationMs: stoppedAtMs - session.sessionStartedAtMs,
@@ -445,11 +601,15 @@ async function stopSession(): Promise<StopSessionResult> {
     tradeLogXlsxPath,
     transcriptJsonPath,
     transcriptMdPath,
+    extractionPromptPath: enrichment.promptPath,
+    extractionResponsePath: enrichment.responsePath,
   });
   appendSessionLogForSession(session, 'session', 'completed', {
-    trades: trades.length,
+    trades: enrichment.trades.length,
     tradeLogMdPath,
     tradeLogXlsxPath,
+    extractionPromptPath: enrichment.promptPath,
+    extractionResponsePath: enrichment.responsePath,
   }, 'success');
   lastCompletedSessionDir = session.sessionDir;
   broadcastStatus();
@@ -462,7 +622,7 @@ async function stopSession(): Promise<StopSessionResult> {
     transcriptMdPath,
     tradeLogXlsxPath,
     tradeLogMdPath,
-    warnings: transcriptionWarnings,
+    warnings,
   };
 }
 
@@ -782,6 +942,21 @@ async function handleBridgeRequest(req: http.IncomingMessage, res: http.ServerRe
     return;
   }
 
+  if (req.method === 'POST' && url.pathname === '/v1/wilytrader/diagnostics') {
+    try {
+      const payload = await readJsonBody(req);
+      receiveExtensionDiagnostic(payload);
+      writeBridgeJson(res, 200, {
+        ok: true,
+        receiver: 'WilyTrader Desktop',
+        activeSession: Boolean(activeSession),
+      });
+    } catch (err) {
+      writeBridgeJson(res, 400, { ok: false, error: (err as Error).message });
+    }
+    return;
+  }
+
   if (req.method === 'POST' && url.pathname === '/v1/wilytrader/ledger') {
     try {
       const payload = await readJsonBody(req);
@@ -847,6 +1022,7 @@ async function receiveLedger(payload: unknown, res: http.ServerResponse): Promis
   };
   session.lastLedgerPayload = payload;
   if (event) session.executionsReceived += 1;
+  recordMarketCapObservation(session, payload, enrichedEvent, receivedAtMs);
 
   writeJson(path.join(session.inputsDir, 'wilytrader.json'), enriched);
   writeWilyTraderSnapshots(session.inputsDir, payload);
@@ -895,10 +1071,11 @@ function saveBridgeScreenshot(
   const fileName = `${formatSessionStamp(new Date(capturedAtMs))}-${side}-${token}-${execution}.png`;
   const filePath = path.join(session.screenshotDir, fileName);
   fs.writeFileSync(filePath, Buffer.from(match[1], 'base64'));
-  writeJson(`${filePath}.json`, {
+  writeJson(path.join(session.screenshotMetadataDir, `${fileName}.json`), {
     capturedAt: new Date(capturedAtMs).toISOString(),
     capturedAtMs,
     capturedOffsetMs: capturedAtMs - session.sessionStartedAtMs,
+    screenshotPath: filePath,
     event,
     captureRect: screenshot.captureRect ?? null,
     source: screenshot.source ?? 'chrome-tab-capture',
@@ -928,10 +1105,11 @@ async function saveDesktopTradeScreenshot(
     const fileName = `${formatSessionStamp(new Date(capturedAtMs))}-${side}-${token}-${execution}-desktop.png`;
     const filePath = path.join(session.screenshotDir, fileName);
     fs.writeFileSync(filePath, source.thumbnail.toPNG());
-    writeJson(`${filePath}.json`, {
+    writeJson(path.join(session.screenshotMetadataDir, `${fileName}.json`), {
       capturedAt: new Date(capturedAtMs).toISOString(),
       capturedAtMs,
       capturedOffsetMs: capturedAtMs - session.sessionStartedAtMs,
+      screenshotPath: filePath,
       event,
       source: 'electron-desktop-capturer',
       desktopSource: {
@@ -988,6 +1166,58 @@ function writeWilyTraderSnapshots(inputsDir: string, payload: unknown): void {
   if (Array.isArray(root.executions)) {
     writeJson(path.join(wilyDir, 'executions.json'), root.executions);
   }
+}
+
+function recordMarketCapObservation(
+  session: ActiveTradeSession,
+  payload: unknown,
+  event: BridgeExecutionEvent | null,
+  receivedAtMs: number
+): void {
+  const record = unwrapWilyTraderPayload(payload);
+  if (!record || typeof record !== 'object') return;
+  const root = record as Record<string, unknown>;
+  const sessionRecord = root.session && typeof root.session === 'object' ? root.session as Record<string, unknown> : null;
+  const activeToken = sessionRecord?.activeToken && typeof sessionRecord.activeToken === 'object'
+    ? sessionRecord.activeToken as Record<string, unknown>
+    : null;
+  const latestExecution = root.currentSessionSummary && typeof root.currentSessionSummary === 'object'
+    ? (root.currentSessionSummary as Record<string, unknown>).latestExecution
+    : null;
+  const latestExecutionRecord = latestExecution && typeof latestExecution === 'object'
+    ? latestExecution as Record<string, unknown>
+    : null;
+  const latestExecutionMarketCap =
+    numberOrNull(latestExecutionRecord?.executionMarketCapUsd) ??
+    numberOrNull(latestExecutionRecord?.marketCapUsd) ??
+    numberOrNull(latestExecutionRecord?.sourceMarketCapUsd);
+  const activeMarketCap = numberOrNull(activeToken?.marketCap);
+  const marketCap = event ? latestExecutionMarketCap ?? activeMarketCap : activeMarketCap ?? latestExecutionMarketCap;
+  if (marketCap === null || marketCap <= 0) return;
+  const timestampMs =
+    (event ? parseTimestampMs(event.timestampMs ?? event.timestamp) : null) ??
+    parseTimestampMs(activeToken?.capturedAtMs ?? activeToken?.updatedAtMs ?? activeToken?.timestampMs ?? activeToken?.capturedAt) ??
+    parseTimestampMs(event?.timestampMs ?? event?.timestamp) ??
+    receivedAtMs;
+  const observation: MarketCapObservation = {
+    tokenAddress: strOrNull(event?.tokenAddress) ?? strOrNull(activeToken?.address) ?? strOrNull(activeToken?.tokenAddress),
+    tokenName: strOrNull(event?.tokenName) ?? strOrNull(activeToken?.name) ?? strOrNull(activeToken?.tokenName),
+    timestampMs,
+    marketCapUsd: marketCap,
+    source: event ? 'execution-payload' : 'ledger-payload',
+  };
+  const last = session.marketCapObservations[session.marketCapObservations.length - 1];
+  if (
+    last &&
+    last.tokenAddress === observation.tokenAddress &&
+    last.tokenName === observation.tokenName &&
+    last.marketCapUsd === observation.marketCapUsd &&
+    Math.abs(last.timestampMs - observation.timestampMs) < 1_000
+  ) {
+    return;
+  }
+  session.marketCapObservations.push(observation);
+  appendJsonLine(path.join(session.inputsDir, 'wilytrader-market-cap-observations.jsonl'), observation);
 }
 
 function writeTranscriptJson(session: ActiveTradeSession): string {
@@ -1430,6 +1660,12 @@ function normalizeWilyTraderTrades(parsed: unknown): NormalizedTrade[] {
       positionExecutions.map((execution) => strOrNull(execution.tokenName)).find(Boolean) ??
       tokenAddress ??
       'Unknown token';
+    const solInvested = numberOrNull(position.investedNative);
+    const solReceived = coalesceNumber(
+      numberOrNull(position.netReceivedNative),
+      sumNullable(solInvested, numberOrNull(position.pnlPostFeeNative))
+    );
+    const pnlSol = computeNetPnl(solReceived, solInvested) ?? numberOrNull(position.pnlPostFeeNative);
     trades.push({
       id: strOrNull(position.id) ?? `wilytrader-${timestampMs ?? Date.now()}-${tokenName}`,
       tokenName,
@@ -1437,14 +1673,24 @@ function normalizeWilyTraderTrades(parsed: unknown): NormalizedTrade[] {
       chain: strOrNull(position.chain) ?? 'SOL',
       entryMarketCap: numberOrNull(position.entryMarketCapVwapUsd),
       exitMarketCap: numberOrNull(position.exitMarketCapVwapUsd),
-      solInvested: numberOrNull(position.investedNative),
-      solReceived: numberOrNull(position.netReceivedNative),
-      pnlSol: numberOrNull(position.pnlPostFeeNative),
-      pnlPercentage: numberOrNull(position.pnlPct),
+      highMarketCapAfterEntry: numberOrNull(position.highMarketCapAfterEntry),
+      highMarketCapAtMs: parseTimestampMs(position.highMarketCapAt),
+      lowMarketCapAfterEntry: numberOrNull(position.lowMarketCapAfterEntry),
+      lowMarketCapAtMs: parseTimestampMs(position.lowMarketCapAt),
+      ohlcSampleCount: numberOrNull(position.ohlcSampleCount),
+      ohlcSampleIntervalMs: numberOrNull(position.ohlcSampleIntervalMs),
+      ohlcRangeSource: strOrNull(position.ohlcSource),
+      solInvested,
+      solReceived,
+      buyFeesNative: numberOrNull(position.buyFeesNative),
+      sellFeesNative: numberOrNull(position.sellFeesNative),
+      pnlSol,
+      pnlPercentage: computeNetPnlPct(pnlSol, solInvested) ?? numberOrNull(position.pnlPct),
       timestampMs,
       entryTimestampMs,
       timeInTradeSeconds: numberOrNull(position.timeInTradeSeconds),
       tokenAddress,
+      executions: positionExecutions.map(normalizeTradeExecutionPoint),
     });
   }
   if (trades.length > 0) return trades;
@@ -1455,26 +1701,751 @@ function normalizeMockApeCompatibleTrades(value: unknown): NormalizedTrade[] {
   if (!Array.isArray(value)) return [];
   return value
     .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+    .map((row) => {
+      const solInvested = coalesceNumber(numberOrNull(row.investedNative), numberOrNull(row.solInvested));
+      const solReceived = coalesceNumber(
+        numberOrNull(row.netReceivedNative),
+        numberOrNull(row.solReceived),
+        sumNullable(solInvested, numberOrNull(row.pnlSol))
+      );
+      const pnlSol = computeNetPnl(solReceived, solInvested) ?? numberOrNull(row.pnlSol);
+      return {
+        id: strOrNull(row.id) ?? '',
+        tokenName: strOrNull(row.tokenName) ?? 'Unknown token',
+        platform: strOrNull(row.platform) ?? '',
+        chain: strOrNull(row.chain) ?? 'SOL',
+        entryMarketCap: numberOrNull(row.entryMarketCap),
+        exitMarketCap: numberOrNull(row.exitMarketCap),
+        highMarketCapAfterEntry: numberOrNull(row.highMarketCapAfterEntry),
+        highMarketCapAtMs: parseTimestampMs(row.highMarketCapAt),
+        lowMarketCapAfterEntry: numberOrNull(row.lowMarketCapAfterEntry),
+        lowMarketCapAtMs: parseTimestampMs(row.lowMarketCapAt),
+        ohlcSampleCount: numberOrNull(row.ohlcSampleCount),
+        ohlcSampleIntervalMs: numberOrNull(row.ohlcSampleIntervalMs),
+        ohlcRangeSource: strOrNull(row.ohlcSource),
+        solInvested,
+        solReceived,
+        buyFeesNative: numberOrNull(row.buyFeesNative),
+        sellFeesNative: numberOrNull(row.sellFeesNative),
+        pnlSol,
+        pnlPercentage: computeNetPnlPct(pnlSol, solInvested) ?? numberOrNull(row.pnlPercentage),
+        timestampMs: numberOrNull(row.timestamp),
+        entryTimestampMs:
+          numberOrNull(row.entryTimestamp) ??
+          numberOrNull(row.entryTimestampMs) ??
+          parseTimestampMs(row.firstEntryAt) ??
+          parseTimestampMs(row.entryAt),
+        timeInTradeSeconds: numberOrNull(row.timeInTradeSeconds),
+        tokenAddress: strOrNull(row.tokenAddress),
+        executions: [],
+      };
+    });
+}
+
+async function enrichTradesForSession(
+  session: ActiveTradeSession,
+  trades: NormalizedTrade[],
+  stoppedAtMs: number,
+  onProgress?: (phase: string, message: string, percent: number) => void
+): Promise<TradeEnrichmentResult> {
+  const warnings: string[] = [];
+  if (trades.length === 0) {
+    return { trades, promptPath: null, responsePath: null, warnings };
+  }
+  if (session.transcriptSegments.length === 0) {
+    warnings.push('No transcript segments were available; trade log uses ledger-only rows.');
+    return { trades: reconcileTradeReviewFields(session, trades), promptPath: null, responsePath: null, warnings };
+  }
+
+  const prompt = renderTradeExtractionPrompt(session, trades, stoppedAtMs);
+  const promptPath = path.join(session.inputsDir, 'trade-extraction-prompt.md');
+  const responsePath = path.join(session.inputsDir, 'trade-extraction-response.json');
+  fs.writeFileSync(promptPath, prompt, 'utf-8');
+  appendSessionLogForSession(session, 'trade-enrichment', 'prompt written', {
+    promptPath,
+    trades: trades.length,
+    transcriptSegments: session.transcriptSegments.length,
+  }, 'success');
+
+  onProgress?.('trade-log', 'Extracting trade commentary with LLM.', 92);
+  const llm = await runTradeLlmPrompt(prompt, session, 'trade extraction');
+  fs.writeFileSync(`${responsePath}.raw.txt`, llm.rawText, 'utf-8');
+  if (!llm.ok) {
+    warnings.push(llm.message);
+    appendSessionLogForSession(session, 'trade-enrichment', 'llm extraction failed; using ledger-only rows', {
+      message: llm.message,
+      rawPath: `${responsePath}.raw.txt`,
+    }, 'warning');
+    return { trades, promptPath, responsePath: null, warnings };
+  }
+
+  let extracted: LlmTradeExtraction[] = [];
+  try {
+    extracted = parseTradeExtractionResponse(llm.rawText);
+    fs.writeFileSync(responsePath, JSON.stringify(extracted, null, 2), 'utf-8');
+  } catch (err) {
+    const message = `LLM trade extraction response could not be parsed: ${(err as Error).message}`;
+    warnings.push(message);
+    appendSessionLogForSession(session, 'trade-enrichment', 'response parse failed; using ledger-only rows', {
+      responsePath: `${responsePath}.raw.txt`,
+      error: (err as Error).message,
+    }, 'error');
+    return { trades, promptPath, responsePath: `${responsePath}.raw.txt`, warnings };
+  }
+
+  let enriched = mergeTradeExtraction(trades, extracted);
+  appendSessionLogForSession(session, 'trade-enrichment', 'response merged', {
+    responsePath,
+    extracted: extracted.length,
+    enriched: enriched.filter((trade) => trade.enrichmentSource === 'llm').length,
+  }, 'success');
+
+  if (enriched.some((trade) => !hasCompleteNics(trade))) {
+    onProgress?.('trade-log', 'Backfilling NICS classifications.', 94);
+    enriched = await backfillNicsForTrades(session, enriched, warnings);
+  }
+
+  const clustered = assignSessionMetaClusterIds(enriched, session);
+  return { trades: reconcileTradeReviewFields(session, clustered), promptPath, responsePath, warnings };
+}
+
+function renderTradeExtractionPrompt(
+  session: ActiveTradeSession,
+  trades: NormalizedTrade[],
+  stoppedAtMs: number
+): string {
+  const sessionStart = session.sessionStartedAtMs;
+  const transcript = session.transcriptSegments
+    .map((segment) => `[${formatOffset(segment.offsetMs)}-${formatOffset(segment.offsetEndMs)}] ${segment.text}`)
+    .join('\n');
+  const tradeList = trades.map((trade, index) => {
+    const entryOffset = trade.entryTimestampMs === null ? null : trade.entryTimestampMs - sessionStart;
+    const exitOffset = trade.timestampMs === null ? null : trade.timestampMs - sessionStart;
+    return {
+      index: index + 1,
+      trade_id: trade.id,
+      token_name: trade.tokenName,
+      token_address: trade.tokenAddress,
+      entry_offset: entryOffset === null ? null : formatOffset(entryOffset),
+      entry_timestamp_ms: trade.entryTimestampMs,
+      exit_offset: exitOffset === null ? null : formatOffset(exitOffset),
+      exit_timestamp_ms: trade.timestampMs,
+      entry_mc_actual: trade.entryMarketCap,
+      exit_mc_actual: trade.exitMarketCap,
+      sol_invested: trade.solInvested,
+      sol_received: normalizedSolReceived(trade),
+      pnl_sol: normalizedPnlSol(trade),
+      pnl_percentage: normalizedPnlPercentage(trade),
+      time_in_trade_seconds: trade.timeInTradeSeconds,
+    };
+  });
+
+  return `You are extracting a WilyTrader Desktop trade log from a trader's spoken transcript.
+
+Use the actual trades as the source of truth. Return one JSON object for each actual trade only.
+Do not invent targets, rationale, excerpts, or scores. Use null when the transcript does not support a field.
+
+Recording window:
+- started_at: ${new Date(session.sessionStartedAtMs).toISOString()}
+- stopped_at: ${new Date(stoppedAtMs).toISOString()}
+
+Actual trades entered during this recording:
+\`\`\`json
+${JSON.stringify(tradeList, null, 2)}
+\`\`\`
+
+Transcript:
+\`\`\`
+${transcript}
+\`\`\`
+
+Return ONLY a JSON array. No markdown fences. Every object must include:
+- mockape_trade_id: exact trade_id from the actual trades list
+- token_name
+- pre_call_offset_ms: recording-relative ms where entry/setup commentary occurs, or null
+- post_call_offset_ms: recording-relative ms where exit/outcome commentary occurs, or null
+- target_low_mc, target_high_mc, stop_loss_mc: integer dollars from spoken targets/stops only
+- rationale: trader's own stated reason, or null
+- pre_transcript_excerpt: near-verbatim transcript evidence around entry/setup, or null
+- post_transcript_excerpt: near-verbatim transcript evidence around exit/outcome, or null
+- adherence_self_assessment: trader's spoken self-assessment, or null
+- needs_review: true when evidence is ambiguous
+- notes: compact extraction caveats, or null
+- meta_name: repeatable narrative/meta/setup label, or null
+- N_score, I_score, C_score, S_score: each 0 or 1
+- N_why, I_why, C_why, S_why: compact evidence for each score
+- NICS_score: N_score + I_score + C_score + S_score, 0 through 4
+- size_ok, zone_ok, cooldown_ok: use null; Desktop computes these from ledger/session state
+- trade_type: "Core NICS++", "Scout", or "Non-NICS"
+- counts_toward_50, hard_reset: use null; Desktop computes these from the explicit count rule and ledger size
+- running_count, non_nics_pnl_pct, cluster_pnl_pct: use null; Desktop computes these after grading
+- llm_grade_notes: one short evidence-based note
+
+NICS scoring:
+- N = trader clearly names the narrative/meta/setup, not just ticker.
+- I = trader states why this token is the selected ticket or what immediate evidence supports entry.
+- C = trader states the cut/close reason.
+- S = trader states sell/stay plan, profit target, scale-out, cost recovery, or upside management.
+- Core NICS++ requires N=1, I=1, and either C=1 or S=1.
+- Scout is only for partial named/intentional setup evidence worth reviewing; do not use generic direction labels such as long or short.
+- Count-to-50 eligibility is separate from NICS_score and requires N=1, I=1, and either C=1 or S=1 plus Desktop-computed size/zone checks.
+- Desktop will assign session-local meta_cluster_id values from meta_name after extraction.
+
+Anti-fabrication:
+- Targets and stops must come from spoken words. "2x" may be converted from actual entry market cap.
+- Transcript excerpts must be near-verbatim evidence.
+- If the transcript has no evidence, use null and set needs_review when useful.
+`;
+}
+
+function parseTradeExtractionResponse(raw: string): LlmTradeExtraction[] {
+  const arr = parseJsonArrayFromLlmOutput(raw);
+  return arr
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
     .map((row) => ({
-      id: strOrNull(row.id) ?? '',
-      tokenName: strOrNull(row.tokenName) ?? 'Unknown token',
-      platform: strOrNull(row.platform) ?? '',
-      chain: strOrNull(row.chain) ?? 'SOL',
-      entryMarketCap: numberOrNull(row.entryMarketCap),
-      exitMarketCap: numberOrNull(row.exitMarketCap),
-      solInvested: numberOrNull(row.solInvested),
-      solReceived: numberOrNull(row.solReceived),
-      pnlSol: numberOrNull(row.pnlSol),
-      pnlPercentage: numberOrNull(row.pnlPercentage),
-      timestampMs: numberOrNull(row.timestamp),
-      entryTimestampMs:
-        numberOrNull(row.entryTimestamp) ??
-        numberOrNull(row.entryTimestampMs) ??
-        parseTimestampMs(row.firstEntryAt) ??
-        parseTimestampMs(row.entryAt),
-      timeInTradeSeconds: numberOrNull(row.timeInTradeSeconds),
-      tokenAddress: strOrNull(row.tokenAddress),
+      mockape_trade_id: strOrNull(row.mockape_trade_id),
+      token_name: strOrNull(row.token_name),
+      pre_call_offset_ms: numberOrNull(row.pre_call_offset_ms),
+      post_call_offset_ms: numberOrNull(row.post_call_offset_ms),
+      target_low_mc: numberOrNull(row.target_low_mc),
+      target_high_mc: numberOrNull(row.target_high_mc),
+      stop_loss_mc: numberOrNull(row.stop_loss_mc),
+      rationale: strOrNull(row.rationale),
+      pre_transcript_excerpt: strOrNull(row.pre_transcript_excerpt),
+      post_transcript_excerpt: strOrNull(row.post_transcript_excerpt),
+      adherence_self_assessment: strOrNull(row.adherence_self_assessment),
+      needs_review: boolOrNull(row.needs_review),
+      notes: strOrNull(row.notes),
+      meta_name: strOrNull(row.meta_name),
+      N_score: binaryOrNull(row.N_score),
+      N_why: strOrNull(row.N_why),
+      I_score: binaryOrNull(row.I_score),
+      I_why: strOrNull(row.I_why),
+      C_score: binaryOrNull(row.C_score),
+      C_why: strOrNull(row.C_why),
+      S_score: binaryOrNull(row.S_score),
+      S_why: strOrNull(row.S_why),
+      NICS_score: numberOrNull(row.NICS_score),
+      size_ok: boolOrNull(row.size_ok),
+      zone_ok: boolOrNull(row.zone_ok),
+      cooldown_ok: boolOrNull(row.cooldown_ok),
+      trade_type: strOrNull(row.trade_type),
+      counts_toward_50: boolOrNull(row.counts_toward_50),
+      hard_reset: boolOrNull(row.hard_reset),
+      running_count: numberOrNull(row.running_count),
+      non_nics_pnl_pct: numberOrNull(row.non_nics_pnl_pct),
+      cluster_pnl_pct: numberOrNull(row.cluster_pnl_pct),
+      llm_grade_notes: strOrNull(row.llm_grade_notes),
     }));
+}
+
+function mergeTradeExtraction(trades: NormalizedTrade[], extracted: LlmTradeExtraction[]): NormalizedTrade[] {
+  const byId = new Map(extracted.filter((row) => row.mockape_trade_id).map((row) => [row.mockape_trade_id as string, row]));
+  return trades.map((trade) => {
+    const row = byId.get(trade.id);
+    if (!row) return { ...trade, enrichmentSource: 'ledger' };
+    return applyTradeExtraction(trade, row);
+  });
+}
+
+function applyTradeExtraction(trade: NormalizedTrade, row: LlmTradeExtraction): NormalizedTrade {
+  const nicsScore = row.NICS_score ?? computeNicsScore(row.N_score, row.I_score, row.C_score, row.S_score);
+  return {
+    ...trade,
+    tokenName: row.token_name ?? trade.tokenName,
+    enrichmentSource: 'llm',
+    entryCommentaryOffsetMs: row.pre_call_offset_ms,
+    exitCommentaryOffsetMs: row.post_call_offset_ms,
+    targetLowMc: row.target_low_mc,
+    targetHighMc: row.target_high_mc,
+    stopLossMc: row.stop_loss_mc,
+    rationale: row.rationale,
+    preTranscriptExcerpt: row.pre_transcript_excerpt,
+    postTranscriptExcerpt: row.post_transcript_excerpt,
+    adherenceSelfAssessment: row.adherence_self_assessment,
+    needsReview: row.needs_review,
+    notes: row.notes,
+    metaName: row.meta_name,
+    nScore: row.N_score,
+    nWhy: row.N_why,
+    iScore: row.I_score,
+    iWhy: row.I_why,
+    cScore: row.C_score,
+    cWhy: row.C_why,
+    sScore: row.S_score,
+    sWhy: row.S_why,
+    nicsScore,
+    sizeOk: row.size_ok,
+    zoneOk: row.zone_ok,
+    cooldownOk: row.cooldown_ok,
+    tradeType: row.trade_type,
+    countsToward50: row.counts_toward_50,
+    hardReset: row.hard_reset,
+    runningCount: row.running_count,
+    nonNicsPnlPct: row.non_nics_pnl_pct,
+    clusterPnlPct: row.cluster_pnl_pct,
+    llmGradeNotes: row.llm_grade_notes,
+  };
+}
+
+function assignSessionMetaClusterIds(trades: NormalizedTrade[], session: ActiveTradeSession): NormalizedTrade[] {
+  const clusterIds = new Map<string, string>();
+  const stamp = formatClusterDateStamp(new Date(session.sessionStartedAtMs));
+  let next = 1;
+  return trades.map((trade) => {
+    const metaName = normalizeTradeMetaName(trade.metaName);
+    const key = metaName === 'unknown' ? '' : metaName.toLowerCase();
+    let clusterId = key ? clusterIds.get(key) : undefined;
+    if (!clusterId) {
+      clusterId = `WT.${stamp}.${next}`;
+      if (key) clusterIds.set(key, clusterId);
+      next += 1;
+    }
+    return { ...trade, metaName, metaClusterId: clusterId };
+  });
+}
+
+function normalizeTradeMetaName(value: string | null | undefined): string {
+  const text = value?.trim() ?? '';
+  return text && !/^(none|null|n\/?a|unknown|unclear|missing)$/i.test(text) ? text : 'unknown';
+}
+
+function reconcileTradeReviewFields(session: ActiveTradeSession, trades: NormalizedTrade[]): NormalizedTrade[] {
+  const rows = trades.map((trade) => {
+    const nicsScore = computeNicsScore(
+      trade.nScore ?? null,
+      trade.iScore ?? null,
+      trade.cScore ?? null,
+      trade.sScore ?? null
+    );
+    return {
+      ...trade,
+      nicsScore: nicsScore ?? trade.nicsScore ?? null,
+      sizeOk: trade.sizeOk ?? isHalfSol(trade.solInvested),
+      zoneOk: trade.zoneOk ?? isNicsMarketCapZone(trade.entryMarketCap),
+      hardReset: trade.hardReset ?? isAboveHalfSol(trade.solInvested),
+    };
+  });
+
+  const sortedIndexes = rows
+    .map((trade, index) => ({ trade, index }))
+    .sort((a, b) => (rowDateTimeMs(a.trade) ?? Number.MAX_SAFE_INTEGER) - (rowDateTimeMs(b.trade) ?? Number.MAX_SAFE_INTEGER));
+
+  let runningCount = 0;
+  let cumulativeSol = 0;
+  for (const item of sortedIndexes) {
+    const trade = rows[item.index];
+    const evidenceOk = hasCountedNicsEvidence(trade) === true;
+    const hardReset = trade.hardReset === true;
+    const counts = evidenceOk && trade.sizeOk === true && trade.zoneOk === true && !hardReset;
+    if (hardReset) runningCount = 0;
+    else if (counts) runningCount += 1;
+    const marketCapSeries = buildTradeMarketCapSeries(trade, session.marketCapObservations);
+    const ohlcMc = computeNumberOhlc(marketCapSeries.map((point) => point.marketCapUsd));
+    const ohlcSol = computeTradeSolOhlc(trade, ohlcMc, cumulativeSol);
+    rows[item.index] = {
+      ...trade,
+      countsToward50: counts,
+      runningCount,
+      nonNicsPnlPct: counts ? null : normalizedPnlPercentage(trade),
+      tradeType: normalizeTradeType(trade),
+      ohlcMc,
+      ohlcPct: computeTradePctOhlc(trade, ohlcMc),
+      ohlcSol,
+      ohlcSource: marketCapSeries.some((point) => point.source === 'rolling-sampler')
+        ? `rolling-sampler:${trade.ohlcRangeSource ?? 'detected-market-cap'}`
+        : marketCapSeries.some((point) => point.source === 'position-summary-range')
+        ? 'position-summary-range'
+        : marketCapSeries.some((point) => point.source === 'ledger-payload')
+        ? 'market-cap-observations'
+        : 'execution-ledger',
+    };
+    cumulativeSol = ohlcSol?.close ?? cumulativeSol;
+  }
+
+  const clusterPnl = new Map<string, number>();
+  for (const trade of rows) {
+    const clusterId = trade.metaClusterId?.trim();
+    if (!clusterId || trade.pnlPercentage === null) continue;
+    clusterPnl.set(clusterId, (clusterPnl.get(clusterId) ?? 0) + trade.pnlPercentage);
+  }
+
+  const losingClusters = completedLosingClusters(rows);
+  return rows.map((trade) => {
+    const clusterId = trade.metaClusterId?.trim();
+    const cooldownOk = computeCooldownOk(trade, losingClusters);
+    return {
+      ...trade,
+      cooldownOk: trade.cooldownOk ?? cooldownOk,
+      clusterPnlPct: trade.clusterPnlPct ?? (clusterId ? clusterPnl.get(clusterId) ?? null : null),
+    };
+  });
+}
+
+function hasCountedNicsEvidence(trade: NormalizedTrade): boolean | null {
+  const n = binaryOrNull(trade.nScore);
+  const i = binaryOrNull(trade.iScore);
+  const c = binaryOrNull(trade.cScore);
+  const s = binaryOrNull(trade.sScore);
+  if (n === null || i === null || (c === null && s === null)) return null;
+  return n === 1 && i === 1 && (c === 1 || s === 1);
+}
+
+function normalizeTradeType(trade: NormalizedTrade): string {
+  const raw = trade.tradeType?.trim();
+  if (raw && /^(Core NICS\+\+|Scout|Non-NICS)$/i.test(raw)) {
+    if (/^core/i.test(raw)) return 'Core NICS++';
+    if (/^scout/i.test(raw)) return 'Scout';
+    return 'Non-NICS';
+  }
+  if (hasCountedNicsEvidence(trade) === true) return 'Core NICS++';
+  if ((trade.nScore ?? 0) === 1 || (trade.iScore ?? 0) === 1 || Boolean(trade.metaName)) return 'Scout';
+  return 'Non-NICS';
+}
+
+function isHalfSol(value: number | null | undefined): boolean | null {
+  if (value === null || value === undefined || !Number.isFinite(value)) return null;
+  return Math.abs(value - 0.5) < 0.0001;
+}
+
+function isAboveHalfSol(value: number | null | undefined): boolean | null {
+  if (value === null || value === undefined || !Number.isFinite(value)) return null;
+  return value > 0.5 + 0.0001;
+}
+
+function isNicsMarketCapZone(value: number | null | undefined): boolean | null {
+  if (value === null || value === undefined || !Number.isFinite(value)) return null;
+  return value >= 2000 && value <= 20000;
+}
+
+function rowDateTimeMs(trade: NormalizedTrade): number | null {
+  return trade.entryTimestampMs ?? trade.timestampMs ?? null;
+}
+
+function completedLosingClusters(trades: NormalizedTrade[]): Array<{ clusterId: string; completedAtMs: number }> {
+  const groups = new Map<string, { completedAtMs: number | null; pnlSol: number; pnlPct: number; rows: number }>();
+  for (const trade of trades) {
+    const clusterId = trade.metaClusterId?.trim();
+    if (!clusterId) continue;
+    const group = groups.get(clusterId) ?? { completedAtMs: null, pnlSol: 0, pnlPct: 0, rows: 0 };
+    group.rows += 1;
+    if (trade.timestampMs !== null) group.completedAtMs = Math.max(group.completedAtMs ?? trade.timestampMs, trade.timestampMs);
+    if (trade.pnlSol !== null) group.pnlSol += trade.pnlSol;
+    if (trade.pnlPercentage !== null) group.pnlPct += trade.pnlPercentage;
+    groups.set(clusterId, group);
+  }
+  return [...groups.entries()]
+    .filter(([, group]) => group.completedAtMs !== null && (group.pnlSol < 0 || (group.pnlSol === 0 && group.pnlPct < 0)))
+    .map(([clusterId, group]) => ({ clusterId, completedAtMs: group.completedAtMs as number }));
+}
+
+function computeCooldownOk(
+  trade: NormalizedTrade,
+  losingClusters: Array<{ clusterId: string; completedAtMs: number }>
+): boolean | null {
+  const currentTime = rowDateTimeMs(trade);
+  if (currentTime === null) return null;
+  const currentClusterId = trade.metaClusterId?.trim() ?? '';
+  const violates = losingClusters.some((cluster) => {
+    if (cluster.clusterId === currentClusterId) return false;
+    if (currentTime < cluster.completedAtMs) return false;
+    return currentTime - cluster.completedAtMs < 5 * 60 * 1000;
+  });
+  return !violates;
+}
+
+function buildTradeMarketCapSeries(
+  trade: NormalizedTrade,
+  observations: MarketCapObservation[]
+): Array<{ timestampMs: number; marketCapUsd: number; source: string }> {
+  const entryMs = trade.entryTimestampMs;
+  const exitMs = trade.timestampMs;
+  const tokenAddress = trade.tokenAddress?.toLowerCase() ?? null;
+  const tokenName = trade.tokenName.toLowerCase();
+  const points: Array<{ timestampMs: number; marketCapUsd: number; source: string }> = [];
+  for (const execution of trade.executions ?? []) {
+    if (execution.timestampMs === null || execution.marketCapUsd === null) continue;
+    points.push({
+      timestampMs: execution.timestampMs,
+      marketCapUsd: execution.marketCapUsd,
+      source: 'execution-ledger',
+    });
+  }
+  for (const observation of observations) {
+    if (entryMs !== null && observation.timestampMs < entryMs) continue;
+    if (exitMs !== null && observation.timestampMs > exitMs) continue;
+    const observationAddress = observation.tokenAddress?.toLowerCase() ?? null;
+    const observationName = observation.tokenName?.toLowerCase() ?? '';
+    const tokenMatches = tokenAddress
+      ? observationAddress === tokenAddress
+      : observationName === tokenName;
+    if (!tokenMatches) continue;
+    points.push({
+      timestampMs: observation.timestampMs,
+      marketCapUsd: observation.marketCapUsd,
+      source: observation.source,
+    });
+  }
+  if (entryMs !== null && trade.entryMarketCap !== null) {
+    points.push({ timestampMs: entryMs, marketCapUsd: trade.entryMarketCap, source: 'position-summary' });
+  }
+  const rangeSource = (trade.ohlcSampleCount ?? 0) > 0 ? 'rolling-sampler' : 'position-summary-range';
+  const highMarketCapAtMs = trade.highMarketCapAtMs ?? entryMs;
+  if (entryMs !== null && trade.highMarketCapAfterEntry !== null && isWithinTradeWindow(highMarketCapAtMs, entryMs, exitMs)) {
+    points.push({ timestampMs: highMarketCapAtMs, marketCapUsd: trade.highMarketCapAfterEntry, source: rangeSource });
+  }
+  const lowMarketCapAtMs = trade.lowMarketCapAtMs ?? entryMs;
+  if (entryMs !== null && trade.lowMarketCapAfterEntry !== null && isWithinTradeWindow(lowMarketCapAtMs, entryMs, exitMs)) {
+    points.push({ timestampMs: lowMarketCapAtMs, marketCapUsd: trade.lowMarketCapAfterEntry, source: rangeSource });
+  }
+  if (exitMs !== null && trade.exitMarketCap !== null) {
+    points.push({ timestampMs: exitMs, marketCapUsd: trade.exitMarketCap, source: 'position-summary' });
+  }
+  const seen = new Set<string>();
+  return points
+    .sort((a, b) => a.timestampMs - b.timestampMs)
+    .filter((point) => {
+      const key = `${point.timestampMs}:${point.marketCapUsd}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function isWithinTradeWindow(timestampMs: number | null, entryMs: number, exitMs: number | null): timestampMs is number {
+  if (timestampMs === null || !Number.isFinite(timestampMs)) return false;
+  if (timestampMs < entryMs) return false;
+  return exitMs === null || timestampMs <= exitMs;
+}
+
+function computeNumberOhlc(points: number[]): TradeOhlc | null {
+  if (points.length === 0) return null;
+  return {
+    open: points[0],
+    high: Math.max(...points),
+    low: Math.min(...points),
+    close: points[points.length - 1],
+  };
+}
+
+function computeTradePctOhlc(trade: NormalizedTrade, marketCapOhlc: TradeOhlc | null): TradeOhlc | null {
+  const entry = trade.entryMarketCap;
+  if (entry !== null && entry > 0 && marketCapOhlc) {
+    return {
+      open: ((marketCapOhlc.open - entry) / entry) * 100,
+      high: ((marketCapOhlc.high - entry) / entry) * 100,
+      low: ((marketCapOhlc.low - entry) / entry) * 100,
+      close: ((marketCapOhlc.close - entry) / entry) * 100,
+    };
+  }
+  const points = [0];
+  if (trade.pnlPercentage !== null) points.push(trade.pnlPercentage);
+  const close = points[points.length - 1] ?? 0;
+  return {
+    open: 0,
+    high: Math.max(...points, close),
+    low: Math.min(...points, close),
+    close,
+  };
+}
+
+function computeTradeSolOhlc(
+  trade: NormalizedTrade,
+  marketCapOhlc: TradeOhlc | null,
+  cumulativeOpen: number
+): TradeOhlc | null {
+  const openingFeeHole = Math.max(0, trade.buyFeesNative ?? 0) * 2;
+  const open = cumulativeOpen - openingFeeHole;
+  const points = [open];
+  const entryMarketCap = trade.entryMarketCap;
+  const solInvested = trade.solInvested;
+  if (
+    marketCapOhlc &&
+    entryMarketCap !== null &&
+    entryMarketCap > 0 &&
+    solInvested !== null &&
+    Number.isFinite(solInvested)
+  ) {
+    points.push(
+      solAtMarketCap(open, solInvested, entryMarketCap, marketCapOhlc.high),
+      solAtMarketCap(open, solInvested, entryMarketCap, marketCapOhlc.low),
+      solAtMarketCap(open, solInvested, entryMarketCap, marketCapOhlc.close)
+    );
+  } else {
+    let realized = 0;
+    for (const execution of trade.executions ?? []) {
+      if (execution.side !== 'sell' || execution.pnlNative === null) continue;
+      realized += execution.pnlNative;
+      points.push(open + realized);
+    }
+  }
+  const close = cumulativeOpen + (normalizedPnlSol(trade) ?? 0);
+  points.push(close);
+  return {
+    open,
+    high: Math.max(...points),
+    low: Math.min(...points),
+    close,
+  };
+}
+
+function solAtMarketCap(open: number, solInvested: number, entryMarketCap: number, marketCap: number): number {
+  return open + solInvested * ((marketCap - entryMarketCap) / entryMarketCap);
+}
+
+function normalizedSolReceived(trade: NormalizedTrade): number | null {
+  return coalesceNumber(trade.solReceived, sumNullable(trade.solInvested, trade.pnlSol));
+}
+
+function normalizedPnlSol(trade: NormalizedTrade): number | null {
+  const received = normalizedSolReceived(trade);
+  if (received !== null && trade.solInvested !== null) return received - trade.solInvested;
+  return trade.pnlSol;
+}
+
+function normalizedPnlPercentage(trade: NormalizedTrade): number | null {
+  const pnlSol = normalizedPnlSol(trade);
+  if (pnlSol !== null && trade.solInvested !== null && trade.solInvested > 0) {
+    return (pnlSol / trade.solInvested) * 100;
+  }
+  return trade.pnlPercentage;
+}
+
+function computeNetPnl(solReceived: number | null, solInvested: number | null): number | null {
+  if (solReceived === null || solInvested === null) return null;
+  return solReceived - solInvested;
+}
+
+function computeNetPnlPct(pnlSol: number | null, solInvested: number | null): number | null {
+  if (pnlSol === null || solInvested === null || solInvested <= 0) return null;
+  return (pnlSol / solInvested) * 100;
+}
+
+function coalesceNumber(...values: Array<number | null>): number | null {
+  return values.find((value): value is number => value !== null && Number.isFinite(value)) ?? null;
+}
+
+function sumNullable(...values: Array<number | null>): number | null {
+  let total = 0;
+  let hasValue = false;
+  for (const value of values) {
+    if (value === null || !Number.isFinite(value)) continue;
+    total += value;
+    hasValue = true;
+  }
+  return hasValue ? total : null;
+}
+
+async function backfillNicsForTrades(
+  session: ActiveTradeSession,
+  trades: NormalizedTrade[],
+  warnings: string[]
+): Promise<NormalizedTrade[]> {
+  const prompt = renderNicsBackfillPrompt(session, trades);
+  const responsePath = path.join(session.inputsDir, 'nics-response.json');
+  fs.writeFileSync(path.join(session.inputsDir, 'nics-prompt.md'), prompt, 'utf-8');
+  const llm = await runTradeLlmPrompt(prompt, session, 'NICS backfill');
+  fs.writeFileSync(`${responsePath}.raw.txt`, llm.rawText, 'utf-8');
+  if (!llm.ok) {
+    warnings.push(llm.message);
+    appendSessionLogForSession(session, 'trade-enrichment', 'nics backfill failed', { message: llm.message }, 'warning');
+    return trades;
+  }
+  try {
+    const rows = parseTradeExtractionResponse(llm.rawText);
+    fs.writeFileSync(responsePath, JSON.stringify(rows, null, 2), 'utf-8');
+    const merged = mergeNicsBackfill(trades, rows);
+    appendSessionLogForSession(session, 'trade-enrichment', 'nics backfill merged', {
+      responsePath,
+      rows: rows.length,
+    }, 'success');
+    return merged;
+  } catch (err) {
+    const message = `NICS backfill response could not be parsed: ${(err as Error).message}`;
+    warnings.push(message);
+    appendSessionLogForSession(session, 'trade-enrichment', 'nics backfill parse failed', {
+      responsePath: `${responsePath}.raw.txt`,
+      error: (err as Error).message,
+    }, 'error');
+    return trades;
+  }
+}
+
+function renderNicsBackfillPrompt(session: ActiveTradeSession, trades: NormalizedTrade[]): string {
+  const rows = trades.map((trade, index) => ({
+    trade_id: index + 1,
+    mockape_trade_id: trade.id,
+    token_name: trade.tokenName,
+    rationale: trade.rationale,
+    pre_transcript_excerpt: trade.preTranscriptExcerpt,
+    post_transcript_excerpt: trade.postTranscriptExcerpt,
+    adherence_self_assessment: trade.adherenceSelfAssessment,
+    notes: trade.notes,
+  }));
+  const transcript = session.transcriptSegments.map((segment) => `[${formatOffset(segment.offsetMs)}] ${segment.text}`).join('\n');
+  return `Grade these WilyTrader trade rows for NICS/meta classification.
+
+Return ONLY a JSON array. Each object must include mockape_trade_id, token_name, meta_name, N_score, N_why, I_score, I_why, C_score, C_why, S_score, S_why, NICS_score, trade_type, llm_grade_notes.
+
+Scoring:
+- N = narrative/meta/setup named, not just ticker.
+- I = why this token or immediate evidence supports entry.
+- C = cut/close reason.
+- S = sell/stay plan, target, scale-out, cost recovery, or upside management.
+- NICS_score = N + I + C + S. Count-to-50 is a separate rule: N=1, I=1, and either C=1 or S=1, plus Desktop-computed size/zone checks.
+- trade_type must be "Core NICS++", "Scout", or "Non-NICS"; do not use generic direction labels like long or short.
+- Do not populate size_ok, zone_ok, cooldown_ok, counts_toward_50, hard_reset, running_count, non_nics_pnl_pct, or cluster_pnl_pct. Desktop computes those from ledger/session state.
+- Use 0 and explain missing evidence when absent.
+
+Rows:
+\`\`\`json
+${JSON.stringify(rows, null, 2)}
+\`\`\`
+
+Transcript:
+\`\`\`
+${transcript}
+\`\`\`
+`;
+}
+
+function mergeNicsBackfill(trades: NormalizedTrade[], rows: LlmTradeExtraction[]): NormalizedTrade[] {
+  const byId = new Map(rows.filter((row) => row.mockape_trade_id).map((row) => [row.mockape_trade_id as string, row]));
+  return trades.map((trade) => {
+    if (hasCompleteNics(trade)) return trade;
+    const row = byId.get(trade.id);
+    if (!row) return trade;
+    return {
+      ...trade,
+      metaName: row.meta_name ?? trade.metaName,
+      nScore: row.N_score ?? trade.nScore,
+      nWhy: row.N_why ?? trade.nWhy,
+      iScore: row.I_score ?? trade.iScore,
+      iWhy: row.I_why ?? trade.iWhy,
+      cScore: row.C_score ?? trade.cScore,
+      cWhy: row.C_why ?? trade.cWhy,
+      sScore: row.S_score ?? trade.sScore,
+      sWhy: row.S_why ?? trade.sWhy,
+      nicsScore: row.NICS_score ?? computeNicsScore(row.N_score, row.I_score, row.C_score, row.S_score) ?? trade.nicsScore,
+      tradeType: row.trade_type ?? trade.tradeType,
+      llmGradeNotes: row.llm_grade_notes ?? trade.llmGradeNotes,
+      enrichmentSource: 'llm',
+    };
+  });
+}
+
+function hasCompleteNics(trade: NormalizedTrade): boolean {
+  return Boolean(
+    trade.metaName &&
+    trade.nScore !== null && trade.nScore !== undefined &&
+    trade.iScore !== null && trade.iScore !== undefined &&
+    trade.cScore !== null && trade.cScore !== undefined &&
+    trade.sScore !== null && trade.sScore !== undefined &&
+    trade.nWhy &&
+    trade.iWhy &&
+    trade.cWhy &&
+    trade.sWhy
+  );
 }
 
 function writeTradeLogMd(session: ActiveTradeSession, trades: NormalizedTrade[]): string {
@@ -1496,8 +2467,15 @@ function writeTradeLogMd(session: ActiveTradeSession, trades: NormalizedTrade[])
     lines.push(`- **Exit time actual:** ${formatTradeTime(trade.timestampMs) || 'unknown'}`);
     lines.push(`- **Time in trade seconds:** ${trade.timeInTradeSeconds ?? 'unknown'}`);
     lines.push(`- **Market cap:** entry ${formatDollars(trade.entryMarketCap)} -> exit ${formatDollars(trade.exitMarketCap)}`);
-    lines.push(`- **P&L:** ${formatSol(trade.pnlSol)} (${formatPercent(trade.pnlPercentage)})`);
-    lines.push(`- **SOL:** in ${formatSol(trade.solInvested)} / out ${formatSol(trade.solReceived)}`);
+    lines.push(`- **P&L:** ${formatSol(normalizedPnlSol(trade))} (${formatPercent(normalizedPnlPercentage(trade))})`);
+    lines.push(`- **SOL:** in ${formatSol(trade.solInvested)} / out ${formatSol(normalizedSolReceived(trade))}`);
+    if (trade.rationale) lines.push(`- **Rationale:** ${trade.rationale}`);
+    if (trade.targetLowMc || trade.targetHighMc || trade.stopLossMc) {
+      lines.push(`- **Plan:** target ${formatDollars(trade.targetLowMc ?? null)} -> ${formatDollars(trade.targetHighMc ?? null)}, stop ${formatDollars(trade.stopLossMc ?? null)}`);
+    }
+    if (trade.nicsScore !== undefined && trade.nicsScore !== null) lines.push(`- **NICS:** ${trade.nicsScore}/4${trade.tradeType ? ` (${trade.tradeType})` : ''}`);
+    if (trade.preTranscriptExcerpt) lines.push(`- **Pre excerpt:** ${trade.preTranscriptExcerpt}`);
+    if (trade.postTranscriptExcerpt) lines.push(`- **Post excerpt:** ${trade.postTranscriptExcerpt}`);
     const screenshots = findTradeScreenshots(session, trade);
     if (screenshots.length > 0) {
       lines.push('', '**Trade screenshots:**', '');
@@ -1518,10 +2496,10 @@ const XLSX_COLUMNS = [
   'processed_at',
   'trade_id',
   'token_name',
-  'trade_date',
+  'entry_date',
+  'exit_date',
   'video_start_time',
   'entry_commentary_time',
-  'entry_time_inferred',
   'exit_commentary_time',
   'exit_time_actual',
   'time_in_trade_seconds',
@@ -1567,18 +2545,141 @@ const XLSX_COLUMNS = [
   'non_nics_pnl_pct',
   'cluster_pnl_pct',
   'llm_grade_notes',
+  'ohlc_mc_open',
+  'ohlc_mc_high',
+  'ohlc_mc_low',
+  'ohlc_mc_close',
+  'ohlc_sol_open',
+  'ohlc_sol_high',
+  'ohlc_sol_low',
+  'ohlc_sol_close',
+  'ohlc_pct_high',
+  'ohlc_pct_low',
+  'ohlc_pct_close',
+  'ohlc_screenshot',
+  'is_new_cluster_start',
+  'prior_cluster_id',
+  'prior_cluster_last_exit_dt',
+  'this_trade_entry_dt',
+  'cooldown_minutes',
+  'prior_cluster_outcome',
+  'cooldown_bucket',
+  'cluster_group_id',
+  'cluster_total_pnl_sol',
+  'cluster_avg_pnl_pct',
+  'cluster_win',
+  'trade_num_in_session',
 ] as const;
+
+const EXIT_LEG_COLUMNS = [
+  'source_session',
+  'trade_id',
+  'mockape_trade_id',
+  'token_name',
+  'exit_leg_number',
+  'execution_id',
+  'exit_time',
+  'requested_sell_pct_of_remaining',
+  'sell_pct_of_original_position',
+  'tokens_sold',
+  'exit_mc',
+  'exit_price_native',
+  'gross_received',
+  'exit_fee',
+  'net_received',
+  'allocated_entry_cost',
+  'allocated_entry_fee',
+  'leg_total_cost_basis',
+  'leg_pnl_before_allocated_entry_fee',
+  'leg_pnl_after_allocated_entry_fee',
+  'leg_pnl_pct_after_allocated_entry_fee',
+] as const;
+
+const XLSX_STYLE_IDS: Record<XlsxStyleKey, number> = {
+  integer: 1,
+  sol3: 2,
+  percent1: 3,
+  nativePrice: 4,
+  date: 5,
+};
+
+const TRADE_LOG_COLUMN_STYLES: Partial<Record<typeof XLSX_COLUMNS[number], XlsxStyleKey>> = {
+  trade_id: 'integer',
+  entry_date: 'date',
+  exit_date: 'date',
+  time_in_trade_seconds: 'integer',
+  entry_mc_actual: 'integer',
+  target_exit_low_mc: 'integer',
+  target_exit_high_mc: 'integer',
+  stop_loss_mc: 'integer',
+  exit_mc_actual: 'integer',
+  sol_invested: 'sol3',
+  sol_received: 'sol3',
+  pnl_sol: 'sol3',
+  pnl_percentage: 'percent1',
+  Hour: 'integer',
+  WeekdayNum: 'integer',
+  N_score: 'integer',
+  I_score: 'integer',
+  C_score: 'integer',
+  S_score: 'integer',
+  NICS_score: 'integer',
+  counts_toward_50: 'integer',
+  hard_reset: 'integer',
+  running_count: 'integer',
+  non_nics_pnl_pct: 'percent1',
+  cluster_pnl_pct: 'percent1',
+  ohlc_mc_open: 'integer',
+  ohlc_mc_high: 'integer',
+  ohlc_mc_low: 'integer',
+  ohlc_mc_close: 'integer',
+  ohlc_sol_open: 'sol3',
+  ohlc_sol_high: 'sol3',
+  ohlc_sol_low: 'sol3',
+  ohlc_sol_close: 'sol3',
+  ohlc_pct_high: 'percent1',
+  ohlc_pct_low: 'percent1',
+  ohlc_pct_close: 'percent1',
+  cluster_avg_pnl_pct: 'percent1',
+};
+
+const EXIT_LEG_COLUMN_STYLES: Partial<Record<typeof EXIT_LEG_COLUMNS[number], XlsxStyleKey>> = {
+  trade_id: 'integer',
+  exit_leg_number: 'integer',
+  requested_sell_pct_of_remaining: 'percent1',
+  sell_pct_of_original_position: 'percent1',
+  tokens_sold: 'nativePrice',
+  exit_mc: 'integer',
+  exit_price_native: 'nativePrice',
+  gross_received: 'sol3',
+  exit_fee: 'sol3',
+  net_received: 'sol3',
+  allocated_entry_cost: 'sol3',
+  allocated_entry_fee: 'sol3',
+  leg_total_cost_basis: 'sol3',
+  leg_pnl_before_allocated_entry_fee: 'sol3',
+  leg_pnl_after_allocated_entry_fee: 'sol3',
+  leg_pnl_pct_after_allocated_entry_fee: 'percent1',
+};
 
 async function writeTradeLogXlsx(session: ActiveTradeSession, trades: NormalizedTrade[], stoppedAtMs: number): Promise<string> {
   const xlsxPath = path.join(session.sessionDir, 'trade_log.xlsx');
   const rows = trades.map((trade, index) => buildTradeRow(session, trade, index + 1, stoppedAtMs));
+  const exitLegRows = trades.flatMap((trade, index) => buildExitLegRows(session, trade, index + 1));
   const zip = new JSZip();
   zip.file('[Content_Types].xml', xmlContentTypes());
   zip.folder('_rels')?.file('.rels', xmlRootRels());
   const xl = zip.folder('xl');
   xl?.file('workbook.xml', xmlWorkbook());
   xl?.folder('_rels')?.file('workbook.xml.rels', xmlWorkbookRels());
-  xl?.folder('worksheets')?.file('sheet1.xml', xmlWorksheet(rows));
+  const tradeSheet = xmlWorksheet(XLSX_COLUMNS, rows, TRADE_LOG_COLUMN_STYLES);
+  const exitLegSheet = xmlWorksheet(EXIT_LEG_COLUMNS, exitLegRows, EXIT_LEG_COLUMN_STYLES);
+  const worksheets = xl?.folder('worksheets');
+  worksheets?.file('sheet1.xml', tradeSheet.xml);
+  worksheets?.file('sheet2.xml', exitLegSheet.xml);
+  const worksheetRels = worksheets?.folder('_rels');
+  if (tradeSheet.rels) worksheetRels?.file('sheet1.xml.rels', tradeSheet.rels);
+  if (exitLegSheet.rels) worksheetRels?.file('sheet2.xml.rels', exitLegSheet.rels);
   xl?.file('styles.xml', xmlStyles());
   zip.folder('docProps')?.file('app.xml', xmlAppProps());
   zip.folder('docProps')?.file('core.xml', xmlCoreProps());
@@ -1587,102 +2688,262 @@ async function writeTradeLogXlsx(session: ActiveTradeSession, trades: Normalized
   return xlsxPath;
 }
 
+function sortTradesByExitDateTime(trades: NormalizedTrade[]): NormalizedTrade[] {
+  return [...trades].sort((a, b) =>
+    sortableTimestampMs(a.timestampMs) - sortableTimestampMs(b.timestampMs) ||
+    sortableTimestampMs(a.entryTimestampMs) - sortableTimestampMs(b.entryTimestampMs) ||
+    String(a.id ?? '').localeCompare(String(b.id ?? ''), undefined, { numeric: true }) ||
+    String(a.tokenName ?? '').localeCompare(String(b.tokenName ?? ''), undefined, { numeric: true })
+  );
+}
+
+function sortableTimestampMs(value: number | null | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : Number.MAX_SAFE_INTEGER;
+}
+
 function buildTradeRow(
   session: ActiveTradeSession,
   trade: NormalizedTrade,
   index: number,
   stoppedAtMs: number
-): Record<string, string> {
+): Record<string, XlsxCell> {
   const entry = trade.entryTimestampMs ? new Date(trade.entryTimestampMs) : null;
   const exit = trade.timestampMs ? new Date(trade.timestampMs) : null;
-  const hour = entry?.getHours();
-  const tradeDate = exit ?? entry;
+  const rowNumber = index + 1;
   const timeInTradeSeconds =
     trade.timeInTradeSeconds ??
     (entry && exit ? Math.max(0, Math.round((exit.getTime() - entry.getTime()) / 1000)) : null);
+  const ohlcScreenshot = selectTradeOhlcScreenshot(session, trade);
+  const ohlcScreenshotLink = ohlcScreenshot ? filePathToHyperlinkTarget(ohlcScreenshot) : null;
+  const ohlcScreenshotName = ohlcScreenshot ? path.basename(ohlcScreenshot) : null;
   return {
     source_session: path.basename(session.sessionDir),
-    source_log_type: 'wilytrader-desktop-audio',
+    source_log_type: trade.enrichmentSource === 'llm' ? 'wilytrader-desktop-enriched' : 'wilytrader-desktop-audio',
     source_folder_archived_path: session.sessionDir,
     processed_at: new Date().toISOString(),
-    trade_id: String(index),
+    trade_id: xlsxInteger(index),
     token_name: trade.tokenName,
-    trade_date: formatTradeDate(tradeDate),
+    entry_date: xlsxDate(entry),
+    exit_date: xlsxDate(exit),
     video_start_time: formatTradeTime(session.sessionStartedAtMs),
-    entry_commentary_time: '',
-    entry_time_inferred: formatTradeTime(trade.entryTimestampMs),
-    exit_commentary_time: '',
+    entry_commentary_time: formatSessionOffsetTime(session, trade.entryCommentaryOffsetMs ?? null),
+    exit_commentary_time: formatSessionOffsetTime(session, trade.exitCommentaryOffsetMs ?? null),
     exit_time_actual: formatTradeTime(trade.timestampMs),
-    time_in_trade_seconds: timeInTradeSeconds === null ? '' : String(timeInTradeSeconds),
+    time_in_trade_seconds: xlsxInteger(timeInTradeSeconds),
     video_end_time: formatTradeTime(stoppedAtMs),
-    entry_mc_actual: formatNumber(trade.entryMarketCap),
-    target_exit_low_mc: '',
-    target_exit_high_mc: '',
-    stop_loss_mc: '',
-    exit_mc_actual: formatNumber(trade.exitMarketCap),
-    sol_invested: formatNumber(trade.solInvested),
-    sol_received: formatNumber(trade.solReceived),
-    pnl_sol: formatNumber(trade.pnlSol),
-    pnl_percentage: formatNumber(trade.pnlPercentage),
-    rationale: '',
-    pre_transcript_excerpt: '',
-    post_transcript_excerpt: '',
-    adherence_self_assessment: '',
+    entry_mc_actual: xlsxInteger(trade.entryMarketCap),
+    target_exit_low_mc: xlsxInteger(trade.targetLowMc ?? null),
+    target_exit_high_mc: xlsxInteger(trade.targetHighMc ?? null),
+    stop_loss_mc: xlsxInteger(trade.stopLossMc ?? null),
+    exit_mc_actual: xlsxInteger(trade.exitMarketCap),
+    sol_invested: xlsxDecimal(trade.solInvested, 3),
+    sol_received: xlsxDecimal(normalizedSolReceived(trade), 3),
+    pnl_sol: xlsxDecimal(normalizedPnlSol(trade), 3),
+    pnl_percentage: xlsxFormula(`IFERROR(V${rowNumber}/T${rowNumber},"")`),
+    rationale: trade.rationale ?? '',
+    pre_transcript_excerpt: trade.preTranscriptExcerpt ?? '',
+    post_transcript_excerpt: trade.postTranscriptExcerpt ?? '',
+    adherence_self_assessment: trade.adherenceSelfAssessment ?? '',
     notes: buildTradeNotes(trade, entry, exit),
-    needs_review: '',
+    needs_review: formatBoolean(trade.needsReview),
     mockape_trade_id: trade.id,
-    Hour: hour === undefined ? '' : String(hour),
-    Weekday: entry ? entry.toLocaleDateString('en-US', { weekday: 'long' }) : '',
-    WeekdayNum: entry ? String(entry.getDay()) : '',
-    TimeBucket: hour === undefined ? '' : hour < 6 ? 'Overnight' : hour < 12 ? 'Morning' : hour < 18 ? 'Afternoon' : 'Evening',
-    meta_cluster_id: '',
-    meta_name: '',
-    N_score: '',
-    N_why: '',
-    I_score: '',
-    I_why: '',
-    C_score: '',
-    C_why: '',
-    S_score: '',
-    S_why: '',
-    NICS_score: '',
-    size_ok: '',
-    zone_ok: '',
-    cooldown_ok: '',
-    trade_type: '',
-    counts_toward_50: '',
-    hard_reset: '',
-    running_count: '',
-    non_nics_pnl_pct: '',
-    cluster_pnl_pct: '',
-    llm_grade_notes: '',
+    Hour: xlsxFormula(`IFERROR(HOUR(IFERROR(IFERROR(IFERROR(TIMEVALUE(J${rowNumber}),TIMEVALUE(I${rowNumber})),TIMEVALUE(L${rowNumber})),TIMEVALUE(H${rowNumber}))),"")`),
+    Weekday: xlsxFormula(`IFERROR(TEXT(IF(ISNUMBER(G${rowNumber}),G${rowNumber},DATEVALUE(G${rowNumber})),"ddd"),"")`),
+    WeekdayNum: xlsxFormula(`IFERROR(WEEKDAY(IF(ISNUMBER(G${rowNumber}),G${rowNumber},DATEVALUE(G${rowNumber})),2),"")`),
+    TimeBucket: xlsxFormula(timeBucketFormula(rowNumber)),
+    meta_cluster_id: trade.metaClusterId ?? 'unknown',
+    meta_name: normalizeTradeMetaName(trade.metaName),
+    N_score: xlsxInteger(trade.nScore ?? null),
+    N_why: trade.nWhy ?? '',
+    I_score: xlsxInteger(trade.iScore ?? null),
+    I_why: trade.iWhy ?? '',
+    C_score: xlsxInteger(trade.cScore ?? null),
+    C_why: trade.cWhy ?? '',
+    S_score: xlsxInteger(trade.sScore ?? null),
+    S_why: trade.sWhy ?? '',
+    NICS_score: xlsxInteger(trade.nicsScore ?? null),
+    size_ok: formatBoolean(trade.sizeOk),
+    zone_ok: formatBoolean(trade.zoneOk),
+    cooldown_ok: formatBoolean(trade.cooldownOk),
+    trade_type: trade.tradeType ?? '',
+    counts_toward_50: xlsxBooleanCount(trade.countsToward50),
+    hard_reset: xlsxBooleanCount(trade.hardReset),
+    running_count: xlsxFormula(`IF(AY${rowNumber}=TRUE,0,N(AZ${rowNumber - 1})+AX${rowNumber})`),
+    non_nics_pnl_pct: xlsxFormula(`IF(AW${rowNumber}="Non-NICS",W${rowNumber},"")`),
+    cluster_pnl_pct: xlsxFormula(`IFERROR(SUMIF(AI:AI,AI${rowNumber},V:V)/SUMIF(AI:AI,AI${rowNumber},T:T),0)`),
+    llm_grade_notes: trade.llmGradeNotes ?? '',
+    ohlc_mc_open: xlsxInteger(trade.ohlcMc?.open ?? null),
+    ohlc_mc_high: xlsxInteger(trade.ohlcMc?.high ?? null),
+    ohlc_mc_low: xlsxInteger(trade.ohlcMc?.low ?? null),
+    ohlc_mc_close: xlsxInteger(trade.ohlcMc?.close ?? null),
+    ohlc_sol_open: xlsxDecimal(trade.ohlcSol?.open ?? null, 3),
+    ohlc_sol_high: xlsxDecimal(trade.ohlcSol?.high ?? null, 3),
+    ohlc_sol_low: xlsxDecimal(trade.ohlcSol?.low ?? null, 3),
+    ohlc_sol_close: xlsxDecimal(trade.ohlcSol?.close ?? null, 3),
+    ohlc_pct_high: xlsxFormula(`IFERROR(BE${rowNumber}/BD${rowNumber}-1,"")`),
+    ohlc_pct_low: xlsxFormula(`IFERROR(BF${rowNumber}/BD${rowNumber}-1,"")`),
+    ohlc_pct_close: xlsxFormula(`IFERROR(BG${rowNumber}/BD${rowNumber}-1,"")`),
+    ohlc_screenshot: ohlcScreenshot && ohlcScreenshotName
+      ? {
+          text: ohlcScreenshotName,
+          formula: xlsxHyperlinkFormula(ohlcScreenshotLink ?? ohlcScreenshot, ohlcScreenshotName),
+          tooltip: `Open chart screenshot: ${ohlcScreenshot}`,
+        }
+      : '',
+    is_new_cluster_start: xlsxFormula(`IF(AI${rowNumber}<>AI${rowNumber - 1},1,0)`),
+    prior_cluster_id: xlsxFormula(`IF(BP${rowNumber}=1,IF(ROW()=2,"",AI${rowNumber - 1}),"")`),
+    prior_cluster_last_exit_dt: xlsxFormula(`IF(AND(BP${rowNumber}=1,ROW()>2),G${rowNumber - 1}+IFERROR(TIMEVALUE(L${rowNumber - 1}),0),"")`),
+    this_trade_entry_dt: xlsxFormula(`IF(BP${rowNumber}=1,G${rowNumber}+IFERROR(TIMEVALUE(J${rowNumber}),IFERROR(TIMEVALUE(L${rowNumber})-M${rowNumber}/86400,0)),"")`),
+    cooldown_minutes: xlsxFormula(`IF(AND(BP${rowNumber}=1,ISNUMBER(BR${rowNumber}),ISNUMBER(BS${rowNumber})),(BS${rowNumber}-BR${rowNumber})*1440,"")`),
+    prior_cluster_outcome: xlsxFormula(`IF(BQ${rowNumber}="","",IF(SUMIF(AI:AI,BQ${rowNumber},V:V)>0,"Win","Loss"))`),
+    cooldown_bucket: xlsxFormula(`IF(NOT(ISNUMBER(BT${rowNumber})),"",IF(BT${rowNumber}<5,"0"&UNICHAR(8211)&"5 min",IF(BT${rowNumber}<10,"5"&UNICHAR(8211)&"10 min",IF(BT${rowNumber}<15,"10"&UNICHAR(8211)&"15 min",IF(BT${rowNumber}<30,"15"&UNICHAR(8211)&"30 min","30 min+")))))`),
+    cluster_group_id: xlsxFormula(`SUM($BP$2:BP${rowNumber})`),
+    cluster_total_pnl_sol: xlsxFormula(`IF(AND($BP${rowNumber}=1,NOT(ISBLANK($BV${rowNumber}))),SUMIFS(V:V,BW:BW,$BW${rowNumber}),"")`),
+    cluster_avg_pnl_pct: xlsxFormula(`IF(AND($BP${rowNumber}=1,NOT(ISBLANK($BV${rowNumber}))),IFERROR(AVERAGEIFS(W:W,BW:BW,$BW${rowNumber}),""),"")`),
+    cluster_win: xlsxFormula(`IF(AND($BP${rowNumber}=1,NOT(ISBLANK($BV${rowNumber}))),IF($BX${rowNumber}>0,1,0),"")`),
+    trade_num_in_session: xlsxFormula(`COUNTIFS($A$2:$A${rowNumber},$A${rowNumber})`),
   };
 }
 
-function xmlWorksheet(rows: Array<Record<string, string>>): string {
-  const header = XLSX_COLUMNS.map((column) => xlsxHeaderLabel(column));
-  const allRows = [header, ...rows.map((row) => XLSX_COLUMNS.map((column) => row[column] ?? ''))];
+function buildExitLegRows(
+  session: ActiveTradeSession,
+  trade: NormalizedTrade,
+  tradeIndex: number
+): Array<Record<string, XlsxCell>> {
+  const sellExecutions = (trade.executions ?? []).filter((execution) => execution.side === 'sell');
+  if (sellExecutions.length === 0) return [];
+  const buyExecutions = (trade.executions ?? []).filter((execution) => execution.side === 'buy');
+  const totalTokensBought = sumExecutionNumbers(buyExecutions, 'tokenAmount');
+  const totalBuyFees = trade.buyFeesNative ?? sumExecutionNumbers(buyExecutions, 'feeNative');
+  const totalEntryCost = trade.solInvested === null
+    ? sumExecutionNumbers(buyExecutions, 'grossNative')
+    : trade.solInvested;
+
+  return sellExecutions.map((execution, legIndex) => {
+    const tokenAmount = execution.tokenAmount ?? 0;
+    const originalPositionRatio = totalTokensBought > 0 ? tokenAmount / totalTokensBought : 0;
+    const allocatedEntryCost = execution.costBasisNative ?? (totalEntryCost * originalPositionRatio);
+    const allocatedEntryFee = totalBuyFees * originalPositionRatio;
+    const netReceived = execution.netNative ?? null;
+    const grossReceived = execution.grossNative ?? null;
+    const legPnlBeforeAllocatedEntryFee =
+      netReceived === null ? execution.pnlNative : netReceived - allocatedEntryCost;
+    const legPnlAfterAllocatedEntryFee =
+      legPnlBeforeAllocatedEntryFee === null ? null : legPnlBeforeAllocatedEntryFee - allocatedEntryFee;
+    const legTotalCostBasis = allocatedEntryCost + allocatedEntryFee;
+    const legPnlPctAfterAllocatedEntryFee = legTotalCostBasis > 0 && legPnlAfterAllocatedEntryFee !== null
+      ? (legPnlAfterAllocatedEntryFee / legTotalCostBasis) * 100
+      : null;
+    return {
+      source_session: path.basename(session.sessionDir),
+      trade_id: xlsxInteger(tradeIndex),
+      mockape_trade_id: trade.id,
+      token_name: trade.tokenName,
+      exit_leg_number: xlsxInteger(legIndex + 1),
+      execution_id: execution.id ?? '',
+      exit_time: formatTradeTime(execution.timestampMs),
+      requested_sell_pct_of_remaining: xlsxPercent(execution.requestedSellPct),
+      sell_pct_of_original_position: xlsxPercent(originalPositionRatio * 100),
+      tokens_sold: xlsxDecimal(execution.tokenAmount, 6),
+      exit_mc: xlsxInteger(execution.marketCapUsd),
+      exit_price_native: xlsxDecimal(execution.unitPriceNative, 12),
+      gross_received: xlsxDecimal(grossReceived, 3),
+      exit_fee: xlsxDecimal(execution.feeNative, 3),
+      net_received: xlsxDecimal(netReceived, 3),
+      allocated_entry_cost: xlsxDecimal(allocatedEntryCost, 3),
+      allocated_entry_fee: xlsxDecimal(allocatedEntryFee, 3),
+      leg_total_cost_basis: xlsxDecimal(legTotalCostBasis, 3),
+      leg_pnl_before_allocated_entry_fee: xlsxDecimal(legPnlBeforeAllocatedEntryFee, 3),
+      leg_pnl_after_allocated_entry_fee: xlsxDecimal(legPnlAfterAllocatedEntryFee, 3),
+      leg_pnl_pct_after_allocated_entry_fee: xlsxPercent(legPnlPctAfterAllocatedEntryFee),
+    };
+  });
+}
+
+function sumExecutionNumbers(executions: TradeExecutionPoint[], key: keyof TradeExecutionPoint): number {
+  return executions.reduce((total, execution) => {
+    const value = execution[key];
+    return typeof value === 'number' && Number.isFinite(value) ? total + value : total;
+  }, 0);
+}
+
+function xmlWorksheet(
+  columns: readonly string[],
+  rows: Array<Record<string, XlsxCell>>,
+  columnStyles: Partial<Record<string, XlsxStyleKey>> = {}
+): { xml: string; rels: string | null } {
+  const header = columns.map((column) => xlsxHeaderLabel(column));
+  const allRows = [header, ...rows.map((row) => columns.map((column) => row[column] ?? ''))];
+  const hyperlinks: XlsxHyperlink[] = [];
   const sheetRows = allRows
     .map((row, rowIndex) => {
       const rowNumber = rowIndex + 1;
       const cells = row
         .map((value, columnIndex) => {
           const ref = `${columnLetters(columnIndex + 1)}${rowNumber}`;
-          return `<c r="${ref}" t="inlineStr"><is><t>${escapeXml(value)}</t></is></c>`;
+          const column = columns[columnIndex];
+          const style = rowIndex === 0 ? undefined : columnStyles[column];
+          const cell = normalizeXlsxCell(value, style);
+          if (cell.hyperlink) {
+            hyperlinks.push({
+              ref,
+              target: cell.hyperlink,
+              tooltip: cell.tooltip,
+            });
+          }
+          const styleAttr = cell.styleId ? ` s="${cell.styleId}"` : '';
+          if (cell.formula) {
+            const cachedValue = cell.text ? `<v>${escapeXml(cell.text)}</v>` : '';
+            const typeAttr = cell.text ? ' t="str"' : '';
+            return `<c r="${ref}"${styleAttr}${typeAttr}><f>${escapeXml(cell.formula)}</f>${cachedValue}</c>`;
+          }
+          if (cell.number !== undefined) return `<c r="${ref}"${styleAttr}><v>${xlsxNumberValue(cell.number)}</v></c>`;
+          return `<c r="${ref}"${styleAttr} t="inlineStr"><is><t>${escapeXml(cell.text)}</t></is></c>`;
         })
         .join('');
       return `<row r="${rowNumber}">${cells}</row>`;
     })
     .join('');
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${sheetRows}</sheetData></worksheet>`;
+  const hyperlinkXml = hyperlinks.length > 0
+    ? `<hyperlinks>${hyperlinks.map((link, index) => `<hyperlink ref="${link.ref}" r:id="rId${index + 1}"${link.tooltip ? ` tooltip="${escapeXmlAttribute(link.tooltip)}"` : ''}/>`).join('')}</hyperlinks>`
+    : '';
+  return {
+    xml: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData>${sheetRows}</sheetData>${hyperlinkXml}</worksheet>`,
+    rels: hyperlinks.length > 0 ? xmlWorksheetRels(hyperlinks) : null,
+  };
+}
+
+function normalizeXlsxCell(
+  value: XlsxCell,
+  columnStyle?: XlsxStyleKey
+): { text: string; number?: number; formula?: string; hyperlink?: string; tooltip?: string; styleId?: number } {
+  const styleId = valueStyleId(typeof value === 'object' && value !== null ? value.style ?? columnStyle : columnStyle);
+  if (typeof value === 'number') return { text: '', number: value, styleId };
+  if (typeof value === 'string') return { text: value, styleId };
+  return {
+    text: value.text,
+    formula: value.formula,
+    hyperlink: value.hyperlink,
+    tooltip: value.tooltip,
+    styleId,
+  };
+}
+
+function valueStyleId(style?: XlsxStyleKey): number | undefined {
+  return style ? XLSX_STYLE_IDS[style] : undefined;
+}
+
+function xlsxNumberValue(value: number): string {
+  return Number.isFinite(value) ? String(value) : '0';
 }
 
 function xlsxHeaderLabel(column: string): string {
-  return column === 'entry_time_inferred' ? 'entry_time_actual' : column;
+  if (column === 'mockape_trade_id') return 'source_trade_id';
+  return column;
 }
 
 function xmlContentTypes(): string {
-  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>';
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>';
 }
 
 function xmlRootRels(): string {
@@ -1690,15 +2951,41 @@ function xmlRootRels(): string {
 }
 
 function xmlWorkbook(): string {
-  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Trade Log" sheetId="1" r:id="rId1"/></sheets></workbook>';
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Trade Log" sheetId="1" r:id="rId1"/><sheet name="Exit Legs" sheetId="2" r:id="rId2"/></sheets></workbook>';
 }
 
 function xmlWorkbookRels(): string {
-  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>';
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>';
+}
+
+function xmlWorksheetRels(hyperlinks: XlsxHyperlink[]): string {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${hyperlinks.map((link, index) => `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="${escapeXmlAttribute(link.target)}" TargetMode="External"/>`).join('')}</Relationships>`;
 }
 
 function xmlStyles(): string {
-  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="1"><xf xfId="0"/></cellXfs></styleSheet>';
+  return [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">',
+    '<numFmts count="3">',
+    '<numFmt numFmtId="164" formatCode="0.000"/>',
+    '<numFmt numFmtId="165" formatCode="0.0%"/>',
+    '<numFmt numFmtId="166" formatCode="0.000000000000"/>',
+    '</numFmts>',
+    '<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>',
+    '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>',
+    '<borders count="1"><border/></borders>',
+    '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>',
+    '<cellXfs count="6">',
+    '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>',
+    '<xf numFmtId="1" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>',
+    '<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>',
+    '<xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>',
+    '<xf numFmtId="166" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>',
+    '<xf numFmtId="14" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>',
+    '</cellXfs>',
+    '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>',
+    '</styleSheet>',
+  ].join('');
 }
 
 function xmlAppProps(): string {
@@ -1765,7 +3052,21 @@ function receiveExtensionStatus(payload: unknown): void {
       ? `Extension ${extensionStatus.latestVersion} is available; installed ${installedVersion}.`
       : `Extension is up to date (${installedVersion}).`;
   }
+  appendSessionLog('extension-status', String(record.reason || 'heartbeat'), {
+    installedVersion,
+    extensionId: extensionStatus.runtimeExtensionId,
+    pageUrl: extensionStatus.runtimePageUrl,
+    tokenName: extensionStatus.runtimeTokenName,
+    tokenAddress: extensionStatus.runtimeTokenAddress,
+    tokenChain: extensionStatus.runtimeTokenChain,
+    runtimeLastSeenAt: extensionStatus.runtimeLastSeenAt,
+  });
   broadcastStatus();
+}
+
+function receiveExtensionDiagnostic(payload: unknown): void {
+  const record = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+  appendSessionLog('extension-diagnostic', String(record.stage || 'diagnostic'), record, 'info');
 }
 
 function unwrapWilyTraderPayload(parsed: unknown): unknown {
@@ -1787,7 +3088,7 @@ function filterPositionExecutions(
     .filter((execution) => {
       if (executionIds.size > 0 && executionIds.has(strOrNull(execution.id) ?? '')) return true;
       if (positionId && strOrNull(execution.positionId) === positionId) return true;
-      if (tokenAddress && strOrNull(execution.tokenAddress) === tokenAddress) return true;
+      if (!positionId && executionIds.size === 0 && tokenAddress && strOrNull(execution.tokenAddress) === tokenAddress) return true;
       return false;
     })
     .sort((a, b) => (parseTimestampMs(a.timestampMs ?? a.timestamp) ?? 0) - (parseTimestampMs(b.timestampMs ?? b.timestamp) ?? 0));
@@ -1798,13 +3099,66 @@ function findFirstBuyTimestampMs(executions: Array<Record<string, unknown>>): nu
   return buy ? parseTimestampMs(buy.timestampMs ?? buy.timestamp) : null;
 }
 
-function findTradeScreenshots(session: ActiveTradeSession, trade: NormalizedTrade): string[] {
+function normalizeTradeExecutionPoint(execution: Record<string, unknown>): TradeExecutionPoint {
+  return {
+    id: strOrNull(execution.id),
+    side: strOrNull(execution.side)?.toLowerCase() ?? null,
+    timestampMs: parseTimestampMs(execution.timestampMs ?? execution.timestamp),
+    marketCapUsd:
+      numberOrNull(execution.executionMarketCapUsd) ??
+      numberOrNull(execution.marketCapUsd) ??
+      numberOrNull(execution.sourceMarketCapUsd),
+    unitPriceNative: numberOrNull(execution.unitPriceNative),
+    requestedSellPct: numberOrNull(execution.requestedSellPct),
+    tokenAmount: numberOrNull(execution.tokenAmount),
+    grossNative: numberOrNull(execution.grossNative),
+    netNative: numberOrNull(execution.netNative),
+    feeNative: numberOrNull(execution.feeNative),
+    costBasisNative: numberOrNull(execution.costBasisNative),
+    pnlNative: numberOrNull(execution.pnlNative),
+    pnlPct: numberOrNull(execution.pnlPct),
+    screenshotPath: strOrNull(execution.screenshotPath),
+  };
+}
+
+function selectTradeOhlcScreenshot(session: ActiveTradeSession, trade: NormalizedTrade): string | null {
+  const fromExecutions = (trade.executions ?? [])
+    .map((execution) => execution.screenshotPath)
+    .filter((screenshotPath): screenshotPath is string => Boolean(screenshotPath && fs.existsSync(screenshotPath)));
+  const fromExecutionIds = fromExecutions.length > 0 ? [] : findTradeScreenshotsByExecutionId(session, trade);
+  const candidates = fromExecutions.length > 0
+    ? fromExecutions
+    : fromExecutionIds.length > 0
+      ? fromExecutionIds
+      : findTradeScreenshots(session, trade);
+  if (candidates.length === 0) return null;
+  const sorted = [...new Set(candidates)].sort((a, b) => a.localeCompare(b));
+  const sellScreenshot = [...sorted].reverse().find((screenshot) => /(?:^|-|\\|\/)sell(?:-|\.|\\|\/)/i.test(screenshot));
+  return sellScreenshot ?? sorted[sorted.length - 1] ?? null;
+}
+
+function findTradeScreenshotsByExecutionId(session: ActiveTradeSession, trade: NormalizedTrade): string[] {
   if (!fs.existsSync(session.screenshotDir)) return [];
-  const token = (trade.tokenAddress || trade.tokenName || '').toLowerCase();
+  const executionIds = (trade.executions ?? [])
+    .map((execution) => execution.id?.toLowerCase())
+    .filter((id): id is string => Boolean(id));
+  if (executionIds.length === 0) return [];
   return fs
     .readdirSync(session.screenshotDir)
     .filter((name) => name.toLowerCase().endsWith('.png'))
-    .filter((name) => !token || name.toLowerCase().includes(sanitizeFilePart(token).toLowerCase().slice(0, 24)))
+    .filter((name) => executionIds.some((id) => name.toLowerCase().includes(id)))
+    .map((name) => path.join(session.screenshotDir, name));
+}
+
+function findTradeScreenshots(session: ActiveTradeSession, trade: NormalizedTrade): string[] {
+  if (!fs.existsSync(session.screenshotDir)) return [];
+  const tokenCandidates = [trade.tokenName, trade.tokenAddress]
+    .map((value) => sanitizeFilePart(value).toLowerCase())
+    .filter((value) => value.length >= 2);
+  return fs
+    .readdirSync(session.screenshotDir)
+    .filter((name) => name.toLowerCase().endsWith('.png'))
+    .filter((name) => tokenCandidates.length === 0 || tokenCandidates.some((token) => name.toLowerCase().includes(token.slice(0, 24))))
     .map((name) => path.join(session.screenshotDir, name));
 }
 
@@ -1848,6 +3202,7 @@ function fallbackSettings(): WilyTraderDesktopSettings {
     microphoneCaptureEnabled: true,
     saveBrowserScreenshots: true,
     generateTradeLogOnStop: true,
+    masterTradingLogPath: defaultMasterTradingLogPath(defaultCapturesRoot()),
     autoCheckExtensionUpdates: true,
     tradeSessionHotkey: 'Ctrl+Alt+T',
     llmMode: 'gemini-cli',
@@ -1874,7 +3229,13 @@ function loadSettings(): WilyTraderDesktopSettings {
     const parsed = JSON.parse(fs.readFileSync(settingsPath(), 'utf-8')) as Partial<WilyTraderDesktopSettings>;
     const loaded = sanitizeSettings({ ...defaults, ...parsed });
     if (isOldDefaultOutputDir(loaded.outputDir)) {
-      return { ...loaded, outputDir: defaults.outputDir };
+      return {
+        ...loaded,
+        outputDir: defaults.outputDir,
+        masterTradingLogPath: loaded.masterTradingLogPath === defaultMasterTradingLogPath(loaded.outputDir)
+          ? defaultMasterTradingLogPath(defaults.outputDir)
+          : loaded.masterTradingLogPath,
+      };
     }
     return loaded;
   } catch {
@@ -1885,7 +3246,17 @@ function loadSettings(): WilyTraderDesktopSettings {
 function saveSettings(payload: Partial<WilyTraderDesktopSettings>): WilyTraderDesktopSettings {
   const previousHotkey = settings.tradeSessionHotkey;
   const previousOutputDir = settings.outputDir;
-  settings = sanitizeSettings({ ...settings, ...payload });
+  const previousMasterTradingLogPath = settings.masterTradingLogPath;
+  const mergedSettings = { ...settings, ...payload };
+  const nextOutputDir = strOrNull(mergedSettings.outputDir) ?? previousOutputDir;
+  if (
+    nextOutputDir !== previousOutputDir &&
+    previousMasterTradingLogPath === defaultMasterTradingLogPath(previousOutputDir) &&
+    (!strOrNull(payload.masterTradingLogPath) || payload.masterTradingLogPath === previousMasterTradingLogPath)
+  ) {
+    mergedSettings.masterTradingLogPath = defaultMasterTradingLogPath(nextOutputDir);
+  }
+  settings = sanitizeSettings(mergedSettings);
   fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
   fs.writeFileSync(settingsPath(), JSON.stringify(settings, null, 2), 'utf-8');
   if (settings.tradeSessionHotkey !== previousHotkey) registerTradeSessionHotkey();
@@ -1901,6 +3272,7 @@ function sanitizeSettings(value: WilyTraderDesktopSettings): WilyTraderDesktopSe
     microphoneCaptureEnabled: Boolean(value.microphoneCaptureEnabled),
     saveBrowserScreenshots: Boolean(value.saveBrowserScreenshots),
     generateTradeLogOnStop: Boolean(value.generateTradeLogOnStop),
+    masterTradingLogPath: strOrNull(value.masterTradingLogPath) ?? defaultMasterTradingLogPath(strOrNull(value.outputDir) ?? defaults.outputDir),
     autoCheckExtensionUpdates: Boolean(value.autoCheckExtensionUpdates),
     tradeSessionHotkey: isUsableHotkey(value.tradeSessionHotkey) ? value.tradeSessionHotkey.trim() : defaults.tradeSessionHotkey,
     llmMode: value.llmMode === 'api' ? 'api' : 'gemini-cli',
@@ -1930,6 +3302,14 @@ function defaultCapturesRoot(): string {
     ? path.resolve(appRoot, '..', '..')
     : path.resolve(appRoot, '..');
   return path.join(baseDir, 'WilyTrader Captures');
+}
+
+function defaultMasterTradingLogPath(outputDir: string): string {
+  return path.join(outputDir, 'master trading log.xlsx');
+}
+
+function bundledMasterSyncScriptsDir(): string {
+  return path.resolve(__dirname, '..', 'trade-sync');
 }
 
 function isOldDefaultOutputDir(outputDir: string): boolean {
@@ -2363,6 +3743,169 @@ async function testOpenRouterApi(apiKey: string, baseUrl: string, model: string)
   }
 }
 
+async function runTradeLlmPrompt(
+  prompt: string,
+  session: ActiveTradeSession,
+  label: string
+): Promise<{ ok: boolean; rawText: string; message: string; provider: string }> {
+  if (settings.llmMode === 'gemini-cli') {
+    const gemini = await runGeminiCliPrompt(prompt, label);
+    if (gemini.ok) {
+      appendSessionLogForSession(session, 'trade-enrichment', `${label} completed with Gemini CLI`, {
+        model: settings.geminiCliModel,
+      }, 'success');
+      return { ...gemini, provider: 'gemini-cli' };
+    }
+    appendSessionLogForSession(session, 'trade-enrichment', `${label} Gemini CLI failed`, {
+      message: gemini.message,
+      stderrTail: tail(gemini.rawText, 500),
+    }, 'warning');
+    if (settings.openRouterApiKey) {
+      const fallback = await runOpenRouterPrompt(prompt, label);
+      return { ...fallback, provider: 'api' };
+    }
+    return { ...gemini, provider: 'gemini-cli' };
+  }
+  const api = await runOpenRouterPrompt(prompt, label);
+  return { ...api, provider: 'api' };
+}
+
+async function runGeminiCliPrompt(
+  prompt: string,
+  label: string
+): Promise<{ ok: boolean; rawText: string; message: string }> {
+  const resolvedCli = resolveGeminiCliExecutable(settings.geminiCliCommand || 'gemini');
+  const model = settings.geminiCliModel || 'gemini-3.1-pro-preview';
+  const baseArgs = [...resolvedCli.prefixArgs, '--model', model, '--output-format', 'json'];
+  const env = geminiCliEnv();
+  const timeoutMs = 10 * 60 * 1000;
+
+  if (prompt.length < 18_000) {
+    const promptFlag = await runDependencyProbe(
+      resolvedCli.command,
+      [...baseArgs, '--prompt', prompt],
+      timeoutMs,
+      env
+    );
+    if (promptFlag.ok && promptFlag.stdout.trim()) {
+      return { ok: true, rawText: promptFlag.stdout, message: `${label} completed with Gemini CLI.` };
+    }
+    const positionalConflict = /Cannot use both a positional prompt and the --prompt flag together/i.test(promptFlag.stderr);
+    if (!positionalConflict) {
+      const stderr = cleanCliStderr(promptFlag.stderr || promptFlag.error || '', 1000);
+      if (!promptFlag.timedOut && !/unknown option|unrecognized/i.test(stderr)) {
+        return {
+          ok: false,
+          rawText: `${promptFlag.stdout}\n${promptFlag.stderr}`,
+          message: `${label} Gemini CLI failed${promptFlag.timedOut ? ' (timed out)' : ''}: ${stderr || promptFlag.error || `exit ${promptFlag.code}`}`,
+        };
+      }
+    }
+  }
+
+  const stdinResult = await runProcessWithInput(resolvedCli.command, baseArgs, prompt, timeoutMs, env);
+  if (stdinResult.ok && stdinResult.stdout.trim()) {
+    return { ok: true, rawText: stdinResult.stdout, message: `${label} completed with Gemini CLI.` };
+  }
+  return {
+    ok: false,
+    rawText: `${stdinResult.stdout}\n${stdinResult.stderr}`,
+    message: `${label} Gemini CLI failed${stdinResult.timedOut ? ' (timed out)' : ''}: ${cleanCliStderr(stdinResult.stderr || stdinResult.error || '', 1000) || `exit ${stdinResult.code}`}`,
+  };
+}
+
+async function runOpenRouterPrompt(
+  prompt: string,
+  label: string
+): Promise<{ ok: boolean; rawText: string; message: string }> {
+  const apiKey = settings.openRouterApiKey.trim();
+  if (!apiKey) {
+    return { ok: false, rawText: '', message: `${label} API mode requires an OpenRouter/OpenAI API key.` };
+  }
+  const normalizedBase = (settings.openRouterBaseUrl || 'https://openrouter.ai/api/v1').replace(/\/$/, '');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10 * 60 * 1000);
+  try {
+    const res = await fetch(`${normalizedBase}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: settings.openRouterModel || 'google/gemini-2.5-flash',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0,
+      }),
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      return { ok: false, rawText: text, message: `${label} API request failed (HTTP ${res.status}).` };
+    }
+    const parsed = JSON.parse(text) as { choices?: Array<{ message?: { content?: unknown } }> };
+    const content = parsed.choices?.map((choice) => choice.message?.content).find((value): value is string => typeof value === 'string' && Boolean(value.trim()));
+    return content
+      ? { ok: true, rawText: content, message: `${label} completed with API.` }
+      : { ok: false, rawText: text, message: `${label} API response did not contain message content.` };
+  } catch (err) {
+    return { ok: false, rawText: '', message: `${label} API request failed: ${(err as Error).message}` };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function runProcessWithInput(
+  command: string,
+  args: string[],
+  input: string,
+  timeoutMs: number,
+  env?: NodeJS.ProcessEnv
+): Promise<DependencyProbeResult> {
+  return new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    let settled = false;
+    let child: ReturnType<typeof spawn>;
+    const finish = (result: DependencyProbeResult) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    try {
+      child = spawn(command, args, {
+        windowsHide: true,
+        shell: false,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env,
+      });
+    } catch (err) {
+      finish({ ok: false, code: -1, stdout, stderr, error: (err as Error).message, timedOut });
+      return;
+    }
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        child.kill();
+      } catch {
+        // ignore
+      }
+    }, timeoutMs);
+    child.stdout?.on('data', (data) => { stdout += String(data); });
+    child.stderr?.on('data', (data) => { stderr += String(data); });
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      finish({ ok: false, code: -1, stdout, stderr, error: err.message, timedOut });
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      finish({ ok: code === 0 && !timedOut, code, stdout, stderr, timedOut });
+    });
+    child.stdin?.end(input);
+  });
+}
+
 async function testGeminiCliConnection(
   command: string,
   model: string
@@ -2777,6 +4320,168 @@ async function openWilyTraderExtensionFolder(): Promise<{ ok: boolean; message: 
 }
 
 async function openLastCompletedSessionFolder(): Promise<{ ok: boolean; message: string; path?: string | null }> {
+  const resolved = resolveLastCompletedSessionFolder();
+  if (!resolved.ok) return resolved;
+  const sessionDir = resolved.path;
+  lastCompletedSessionDir = sessionDir;
+  const openError = await shell.openPath(sessionDir);
+  if (openError) return { ok: false, message: `Could not open session folder: ${openError}`, path: sessionDir };
+  return { ok: true, message: `Opened session folder: ${sessionDir}`, path: sessionDir };
+}
+
+async function openActiveSessionFolder(): Promise<{ ok: boolean; message: string; path?: string | null }> {
+  const resolved = resolveActiveSessionFolder();
+  if (!resolved.ok) return resolved;
+  const openError = await shell.openPath(resolved.path);
+  if (openError) return { ok: false, message: `Could not open active session folder: ${openError}`, path: resolved.path };
+  return { ok: true, message: `Opened active session folder: ${resolved.path}`, path: resolved.path };
+}
+
+function copyActiveSessionFolderLink(): { ok: boolean; message: string; path?: string | null } {
+  const resolved = resolveActiveSessionFolder();
+  if (!resolved.ok) return resolved;
+  clipboard.writeText(resolved.path);
+  return { ok: true, message: `Copied active session folder link: ${resolved.path}`, path: resolved.path };
+}
+
+function resolveActiveSessionFolder(): { ok: true; message: string; path: string } | { ok: false; message: string; path?: string | null } {
+  const sessionDir = activeSession?.sessionDir ?? finalizingSession?.sessionDir ?? null;
+  if (!sessionDir) return { ok: false, message: 'No active WilyTrader session folder is available.', path: null };
+  if (!fs.existsSync(sessionDir)) {
+    return { ok: false, message: `Active session folder no longer exists: ${sessionDir}`, path: sessionDir };
+  }
+  return { ok: true, message: `Found active session folder: ${sessionDir}`, path: sessionDir };
+}
+
+function copyLastCompletedSessionFolderLink(): { ok: boolean; message: string; path?: string | null } {
+  const resolved = resolveLastCompletedSessionFolder();
+  if (!resolved.ok) return resolved;
+  lastCompletedSessionDir = resolved.path;
+  clipboard.writeText(resolved.path);
+  return { ok: true, message: `Copied session folder link: ${resolved.path}`, path: resolved.path };
+}
+
+async function syncMasterTradingLog(): Promise<MasterSyncResult> {
+  if (activeSession || finalizingSession) {
+    return emptyMasterSyncResult(false, 'Wait for the active WilyTrader session to finish before syncing the master trading log.');
+  }
+
+  const syncScriptsDir = bundledMasterSyncScriptsDir();
+  const scriptPath = path.join(syncScriptsDir, 'run-trade-sync.ps1');
+  const masterPath = settings.masterTradingLogPath || defaultMasterTradingLogPath(settings.outputDir);
+  if (!fs.existsSync(scriptPath)) {
+    return emptyMasterSyncResult(false, `Sync script was not found: ${scriptPath}`, masterPath, syncScriptsDir);
+  }
+
+  const args = [
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    scriptPath,
+    '-CapturesRoot',
+    settings.outputDir,
+    '-MasterPath',
+    masterPath,
+  ];
+  debugLog('master-sync', 'starting master sync', { scriptPath, masterPath, outputDir: settings.outputDir });
+  const result = await runProcessProbe('powershell.exe', args, 300_000);
+  const summary = parseMasterSyncSummary(result.stdout);
+  if (!result.ok) {
+    const message = `Master sync failed${result.timedOut ? ' after timing out' : ''}. ${tail(result.stderr || result.stdout || result.error || '', 700)}`;
+    debugLog('master-sync', 'master sync failed', { ...result, stdoutTail: tail(result.stdout), stderrTail: tail(result.stderr) });
+    return {
+      ok: false,
+      message,
+      masterPath,
+      syncScriptsDir,
+      processedFolders: summary.processedFolders,
+      rowsAppended: summary.rowsAppended,
+      rowsBackfilled: summary.rowsBackfilled,
+      backfilledArchivedFolders: summary.backfilledArchivedFolders,
+      stdoutTail: tail(result.stdout, 1000),
+      stderrTail: tail(result.stderr, 1000),
+    };
+  }
+
+  if (fs.existsSync(masterPath)) {
+    const openError = await shell.openPath(masterPath);
+    if (openError) {
+      return {
+        ok: false,
+        message: `Master sync completed, but Excel did not open the workbook: ${openError}`,
+        masterPath,
+        syncScriptsDir,
+        processedFolders: summary.processedFolders,
+        rowsAppended: summary.rowsAppended,
+        rowsBackfilled: summary.rowsBackfilled,
+        backfilledArchivedFolders: summary.backfilledArchivedFolders,
+        stdoutTail: tail(result.stdout, 1000),
+        stderrTail: tail(result.stderr, 1000),
+      };
+    }
+  }
+  debugLog('master-sync', 'master sync completed', { masterPath, summary });
+  return {
+    ok: true,
+    message: fs.existsSync(masterPath)
+      ? `Master trading log synced and opened: ${masterPath}`
+      : `Master sync completed, but the workbook was not found at ${masterPath}`,
+    masterPath: fs.existsSync(masterPath) ? masterPath : null,
+    syncScriptsDir,
+    processedFolders: summary.processedFolders,
+    rowsAppended: summary.rowsAppended,
+    rowsBackfilled: summary.rowsBackfilled,
+    backfilledArchivedFolders: summary.backfilledArchivedFolders,
+    stdoutTail: tail(result.stdout, 1000),
+    stderrTail: tail(result.stderr, 1000),
+  };
+}
+
+function emptyMasterSyncResult(ok: boolean, message: string, masterPath: string | null = null, syncScriptsDir = bundledMasterSyncScriptsDir()): MasterSyncResult {
+  return {
+    ok,
+    message,
+    masterPath,
+    syncScriptsDir,
+    processedFolders: 0,
+    rowsAppended: 0,
+    rowsBackfilled: 0,
+    backfilledArchivedFolders: 0,
+  };
+}
+
+function parseMasterSyncSummary(stdout: string): Pick<MasterSyncResult, 'processedFolders' | 'rowsAppended' | 'rowsBackfilled' | 'backfilledArchivedFolders'> {
+  const fallback = {
+    processedFolders: 0,
+    rowsAppended: 0,
+    rowsBackfilled: 0,
+    backfilledArchivedFolders: 0,
+  };
+  const match = stdout.match(/\{\s*"master"[\s\S]*?\n\}/);
+  if (!match) return fallback;
+  try {
+    const parsed = JSON.parse(match[0]) as Partial<Record<keyof typeof fallback, unknown>>;
+    return {
+      processedFolders: numberOrZero(parsed.processedFolders),
+      rowsAppended: numberOrZero(parsed.rowsAppended),
+      rowsBackfilled: numberOrZero(parsed.rowsBackfilled),
+      backfilledArchivedFolders: numberOrZero(parsed.backfilledArchivedFolders),
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function numberOrZero(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function runProcessProbe(command: string, args: string[], timeoutMs: number): Promise<DependencyProbeResult> {
+  return runDependencyProbe(command, args, timeoutMs, dependencyProbeEnv());
+}
+
+function resolveLastCompletedSessionFolder(): { ok: true; message: string; path: string } | { ok: false; message: string; path?: string | null } {
   const sessionDir = lastCompletedSessionDir ?? findLastCompletedSessionDir(settings.outputDir);
   if (!sessionDir) {
     return { ok: false, message: 'No completed WilyTrader session folder was found.', path: null };
@@ -2789,10 +4494,7 @@ async function openLastCompletedSessionFolder(): Promise<{ ok: boolean; message:
       path: sessionDir,
     };
   }
-  lastCompletedSessionDir = sessionDir;
-  const openError = await shell.openPath(sessionDir);
-  if (openError) return { ok: false, message: `Could not open session folder: ${openError}`, path: sessionDir };
-  return { ok: true, message: `Opened session folder: ${sessionDir}`, path: sessionDir };
+  return { ok: true, message: `Found session folder: ${sessionDir}`, path: sessionDir };
 }
 
 async function openChromeExtensionsPage(): Promise<{ ok: boolean; message: string }> {
@@ -3133,9 +4835,94 @@ function parseTimestampMs(value: unknown): number | null {
   return null;
 }
 
+function parseJsonArrayFromLlmOutput(raw: string): unknown[] {
+  const candidates = candidateJsonTexts(raw);
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (Array.isArray(parsed)) return parsed;
+      const nested = extractNestedLlmText(parsed);
+      if (nested && nested !== candidate) {
+        const nestedArray = parseJsonArrayFromLlmOutput(nested);
+        if (nestedArray) return nestedArray;
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  throw new Error('No JSON array found in LLM output.');
+}
+
+function candidateJsonTexts(raw: string): string[] {
+  const trimmed = raw.trim();
+  const candidates = [trimmed];
+  const fence = trimmed.match(/^```(?:json)?\s*\n([\s\S]*?)\n```\s*$/i);
+  if (fence) candidates.push(fence[1].trim());
+  const firstArray = trimmed.indexOf('[');
+  const lastArray = trimmed.lastIndexOf(']');
+  if (firstArray >= 0 && lastArray > firstArray) candidates.push(trimmed.slice(firstArray, lastArray + 1));
+  const firstObject = trimmed.indexOf('{');
+  const lastObject = trimmed.lastIndexOf('}');
+  if (firstObject >= 0 && lastObject > firstObject) candidates.push(trimmed.slice(firstObject, lastObject + 1));
+  return [...new Set(candidates.filter(Boolean))];
+}
+
+function extractNestedLlmText(value: unknown): string | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  for (const key of ['response', 'text', 'content', 'output']) {
+    if (typeof record[key] === 'string') return record[key] as string;
+  }
+  const candidates = record.candidates;
+  if (Array.isArray(candidates)) {
+    for (const candidate of candidates) {
+      if (!candidate || typeof candidate !== 'object') continue;
+      const content = (candidate as Record<string, unknown>).content;
+      if (content && typeof content === 'object') {
+        const parts = (content as Record<string, unknown>).parts;
+        if (Array.isArray(parts)) {
+          const text = parts
+            .map((part) => part && typeof part === 'object' ? (part as Record<string, unknown>).text : null)
+            .filter((part): part is string => typeof part === 'string')
+            .join('\n')
+            .trim();
+          if (text) return text;
+        }
+      }
+    }
+  }
+  return null;
+}
+
 function numberOrNull(value: unknown): number | null {
   const number = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
   return Number.isFinite(number) ? number : null;
+}
+
+function boolOrNull(value: unknown): boolean | null {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    if (/^(true|yes|1)$/i.test(value.trim())) return true;
+    if (/^(false|no|0)$/i.test(value.trim())) return false;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) return value !== 0;
+  return null;
+}
+
+function binaryOrNull(value: unknown): number | null {
+  const number = numberOrNull(value);
+  if (number === null) return null;
+  return number === 1 ? 1 : 0;
+}
+
+function computeNicsScore(
+  n: number | null,
+  i: number | null,
+  c: number | null,
+  s: number | null
+): number | null {
+  if (n === null || i === null || c === null || s === null) return null;
+  return n + i + c + s;
 }
 
 function strOrNull(value: unknown): string | null {
@@ -3202,6 +4989,11 @@ function formatSessionFolderName(date: Date): string {
   return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}.${pad(date.getHours())}${pad(date.getMinutes())} Trade`;
 }
 
+function formatClusterDateStamp(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${String(date.getFullYear()).slice(-2)}${pad(date.getMonth() + 1)}${pad(date.getDate())}`;
+}
+
 function formatOffset(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
@@ -3228,6 +5020,12 @@ function formatTradeTime(ms: number | null): string {
     : '';
 }
 
+function formatSessionOffsetTime(session: ActiveTradeSession, offsetMs: number | null): string {
+  return offsetMs === null || !Number.isFinite(offsetMs)
+    ? ''
+    : formatTradeTime(session.sessionStartedAtMs + offsetMs);
+}
+
 function formatDollars(value: number | null): string {
   return value === null ? 'unknown' : `$${Math.round(value).toLocaleString('en-US')}`;
 }
@@ -3240,21 +5038,83 @@ function formatPercent(value: number | null): string {
   return value === null ? 'unknown' : `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
 }
 
-function formatNumber(value: number | null): string {
-  return value === null ? '' : String(value);
+function xlsxInteger(value: number | null | undefined): number | '' {
+  return Number.isFinite(Number(value)) ? Math.round(Number(value)) : '';
+}
+
+function xlsxDecimal(value: number | null | undefined, decimals: number): number | '' {
+  if (!Number.isFinite(Number(value))) return '';
+  const factor = 10 ** decimals;
+  return Math.round(Number(value) * factor) / factor;
+}
+
+function xlsxPercent(value: number | null | undefined): number | '' {
+  if (!Number.isFinite(Number(value))) return '';
+  return xlsxDecimal(Number(value) / 100, 3);
+}
+
+function xlsxFormula(formula: string, text = ''): XlsxCell {
+  return { text, formula };
+}
+
+function xlsxDate(value: Date | null | undefined): number | '' {
+  if (!value || Number.isNaN(value.getTime())) return '';
+  const localDateUtc = Date.UTC(value.getFullYear(), value.getMonth(), value.getDate());
+  const excelEpochUtc = Date.UTC(1899, 11, 30);
+  return Math.round((localDateUtc - excelEpochUtc) / 86_400_000);
+}
+
+function xlsxBooleanCount(value: boolean | null | undefined): number | '' {
+  if (value === null || value === undefined) return '';
+  return value ? 1 : 0;
+}
+
+function formatBoolean(value: boolean | null | undefined): string {
+  if (value === null || value === undefined) return '';
+  return value ? 'true' : 'false';
 }
 
 function buildTradeNotes(trade: NormalizedTrade, entry: Date | null, exit: Date | null): string {
   const notes: string[] = [];
   if (trade.tokenAddress) notes.push(`tokenAddress=${trade.tokenAddress}`);
-  if (entry && exit && formatTradeDate(entry) !== formatTradeDate(exit)) {
-    notes.push(`overnight_entry_date=${formatTradeDate(entry)}`);
-  }
+  if (trade.notes) notes.push(trade.notes);
   return notes.join('; ');
 }
 
 function markdownPath(value: string): string {
   return value.replace(/\\/g, '/').split('/').map(encodeURIComponent).join('/');
+}
+
+function filePathToHyperlinkTarget(filePath: string): string {
+  return path.resolve(filePath);
+}
+
+function xlsxHyperlinkFormula(target: string, label: string): string {
+  return `HYPERLINK(${xlsxFormulaString(target)},${xlsxFormulaString(label)})`;
+}
+
+function xlsxFormulaString(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function timeBucketFormula(rowNumber: number): string {
+  const hour = `AE${rowNumber}`;
+  const weekday = `AG${rowNumber}`;
+  return [
+    `IF(${hour}="","",`,
+    `IF(AND(${weekday}<=4,${hour}<18),"WD 6am-6pm",`,
+    `IF(AND(${weekday}=5,${hour}<18),"WD 6am-6pm",`,
+    `IF(AND(${weekday}<=4,OR(${hour}=18,${hour}=19)),"WD 6pm-8pm",`,
+    `IF(AND(${weekday}<=4,${hour}>=20,${hour}<=23),"WD 8pm-12am",`,
+    `IF(AND(${weekday}<=4,OR(${hour}=0,${hour}=1)),"WD 6am-6pm",`,
+    `IF(AND(OR(${weekday}=6,${weekday}=7),${hour}>=2,${hour}<=11),"WE 6am-12pm",`,
+    `IF(AND(OR(${weekday}=6,${weekday}=7),${hour}>=12,${hour}<=17),"WE 12pm-6pm",`,
+    `IF(AND(OR(${weekday}=5,${weekday}=6,${weekday}=7),OR(${hour}=18,${hour}=19)),"WE 6pm-8pm",`,
+    `IF(AND(${weekday}=5,${hour}>=20,${hour}<=23),"WE 8pm-2am",`,
+    `IF(AND(${weekday}=6,OR(${hour}>=20,${hour}<=1)),"WE 8pm-2am",`,
+    `IF(AND(${weekday}=7,${hour}>=20,${hour}<=23),"WE 8pm-2am",`,
+    `IF(AND(${weekday}=7,OR(${hour}=0,${hour}=1)),"WE 8pm-2am","")))))))))))))`,
+  ].join('');
 }
 
 function sanitizeFilePart(value: unknown): string {
@@ -3280,6 +5140,10 @@ function escapeXml(value: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
+}
+
+function escapeXmlAttribute(value: string): string {
+  return escapeXml(value);
 }
 
 function writeJson(filePath: string, value: unknown): void {

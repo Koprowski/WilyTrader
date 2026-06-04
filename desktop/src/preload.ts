@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
   AbandonSessionResult,
+  MasterSyncResult,
   StartSessionResult,
   StopSessionResult,
   WilyTraderDesktopAppInfo,
@@ -13,8 +14,16 @@ const api = {
   startSession: () => ipcRenderer.invoke('session:start') as Promise<StartSessionResult>,
   stopSession: () => ipcRenderer.invoke('session:stop') as Promise<StopSessionResult>,
   abandonSession: () => ipcRenderer.invoke('session:abandon') as Promise<AbandonSessionResult>,
+  openActiveSessionFolder: () =>
+    ipcRenderer.invoke('session:open-active-folder') as Promise<{ ok: boolean; message: string; path?: string | null }>,
+  copyActiveSessionFolderLink: () =>
+    ipcRenderer.invoke('session:copy-active-folder-link') as Promise<{ ok: boolean; message: string; path?: string | null }>,
   openLastCompletedSessionFolder: () =>
     ipcRenderer.invoke('session:open-last-completed-folder') as Promise<{ ok: boolean; message: string; path?: string | null }>,
+  copyLastCompletedSessionFolderLink: () =>
+    ipcRenderer.invoke('session:copy-last-completed-folder-link') as Promise<{ ok: boolean; message: string; path?: string | null }>,
+  syncMasterTradingLog: () =>
+    ipcRenderer.invoke('session:sync-master-trading-log') as Promise<MasterSyncResult>,
   getStatus: () => ipcRenderer.invoke('session:status') as Promise<WilyTraderDesktopStatus>,
   getSettings: () => ipcRenderer.invoke('settings:get') as Promise<WilyTraderDesktopSettings>,
   saveSettings: (payload: Partial<WilyTraderDesktopSettings>) =>

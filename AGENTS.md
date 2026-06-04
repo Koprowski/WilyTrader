@@ -46,6 +46,33 @@ Canonical policy: `E:\Apps\mission-control\resources\repo-change-traceability.md
 
 ## Recent handoff notes
 
+- **Master sync UI (local branch):** WilyTrader Desktop now bundles the master
+  sync scripts from `desktop/resources/trade-sync`, exposes a Settings field
+  for the master workbook path, and has a **Sync Master** button in the
+  last-completed-session panel. The button runs the bundled
+  `run-trade-sync.ps1` with `-CapturesRoot` and `-MasterPath` only, so it does
+  not request archive backfill, then opens the configured master workbook when
+  the sync succeeds.
+- **Master sync meta clusters (local branch):** Desktop export and bundled
+  master sync normalize missing meta names to `unknown` and assign
+  `WT.yymmdd.n` cluster IDs. Known repeat metas reuse their first assigned
+  cluster ID, while `unknown` rows always allocate the next daily cluster ID.
+- **Axiom execution quote guard (local branch):** Extension version `0.3.58`
+  allows Axiom buy/sell execution when the title market cap is missing but the
+  selected header/visible market cap is confirmed by a fresh chart quote. It
+  still blocks when competing title/header sources disagree beyond tolerance.
+- **Master workbook/export alignment (local branch):** Desktop trade logs now
+  sort trades by exit time, emit `entry_date` and `exit_date` instead of the
+  old `trade_date`/`entry_time_inferred` shape, and carry workbook formulas for
+  P&L %, time buckets, running counts, OHLC %, cooldown, cluster, and
+  `trade_num_in_session` columns so the session workbook lines up with the
+  current master workbook schema. The live WilyTrader-owned sync script at
+  `E:\Apps\WilyTrader Captures\Trade Sync Scripts\finalize-master-workbook.ps1`
+  was also updated to use `entry_date`, trim chart ranges to real non-error
+  data rows, and adjust X-axis label intervals for chart 1 and chart 2. A live
+  finalizer run against `E:\Apps\WilyTrader Captures\master trading log.xlsx`
+  completed with no warnings after backing up the workbook under
+  `Archive\master trading log backups`.
 - **Axiom token names for Snipalot trade logs (local branch):** WilyTrader now
   tries to read Axiom chart/header text such as `Save Snuggles/USD on Pump V1`
   before falling back to a shortened mint address, and
