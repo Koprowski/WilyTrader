@@ -1281,10 +1281,6 @@
       resetAxiomExecutionQuoteStability();
       return { ready: false, message: "Waiting for Axiom token title before execution." };
     }
-    if (token.marketCapSource !== AXIOM_TITLE_MARKET_CAP_SOURCE) {
-      resetAxiomExecutionQuoteStability();
-      return { ready: false, message: "Waiting for Axiom title market cap before execution." };
-    }
     const mismatchPct = Number(token.marketCapMismatchPct || 0);
     const rejectedMarketCap = Number(token.marketCapRejectedMarketCap || 0);
     if (rejectedMarketCap > 0 && mismatchPct > AXIOM_MARKET_CAP_SOURCE_AGREEMENT_MAX_PCT) {
@@ -1303,19 +1299,28 @@
       if (chartMismatchPct <= AXIOM_EXECUTION_CHART_CONFIRM_MAX_MISMATCH_PCT) {
         return {
           ready: true,
-          reason: "chart-confirmed",
+          reason: token.marketCapSource === AXIOM_TITLE_MARKET_CAP_SOURCE ? "chart-confirmed" : "chart-confirmed-non-title-source",
           stableMs: stability.stableMs,
           chartMarketCap: round(chartQuote.marketCap, 2),
           chartMismatchPct: round(chartMismatchPct, 4),
+          marketCapSource: token.marketCapSource || null,
         };
       }
       return {
         ready: false,
-        message: "Waiting for Axiom title market cap to match the live chart before execution.",
+        message: token.marketCapSource === AXIOM_TITLE_MARKET_CAP_SOURCE
+          ? "Waiting for Axiom title market cap to match the live chart before execution."
+          : "Waiting for Axiom market cap to match the live chart before execution.",
         stableMs: stability.stableMs,
         chartMarketCap: round(chartQuote.marketCap, 2),
         chartMismatchPct: round(chartMismatchPct, 4),
+        marketCapSource: token.marketCapSource || null,
       };
+    }
+
+    if (token.marketCapSource !== AXIOM_TITLE_MARKET_CAP_SOURCE) {
+      resetAxiomExecutionQuoteStability();
+      return { ready: false, message: "Waiting for current Axiom market cap before execution.", marketCapSource: token.marketCapSource || null };
     }
 
     if (stability.stableMs >= AXIOM_EXECUTION_QUOTE_STABLE_MS) {

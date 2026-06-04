@@ -57,6 +57,10 @@ Canonical policy: `E:\Apps\mission-control\resources\repo-change-traceability.md
   master sync normalize missing meta names to `unknown` and assign
   `WT.yymmdd.n` cluster IDs. Known repeat metas reuse their first assigned
   cluster ID, while `unknown` rows always allocate the next daily cluster ID.
+- **Axiom execution quote guard (local branch):** Extension version `0.3.58`
+  allows Axiom buy/sell execution when the title market cap is missing but the
+  selected header/visible market cap is confirmed by a fresh chart quote. It
+  still blocks when competing title/header sources disagree beyond tolerance.
 - **Master workbook/export alignment (local branch):** Desktop trade logs now
   sort trades by exit time, emit `entry_date` and `exit_date` instead of the
   old `trade_date`/`entry_time_inferred` shape, and carry workbook formulas for
