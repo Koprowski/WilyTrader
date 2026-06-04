@@ -2525,9 +2525,7 @@ const XLSX_COLUMNS = [
   'ohlc_sol_high',
   'ohlc_sol_low',
   'ohlc_sol_close',
-  'ohlc_sample_count',
-  'ohlc_source',
-  'ohlc_screenshot_path',
+  'ohlc_screenshot',
 ] as const;
 
 const EXIT_LEG_COLUMNS = [
@@ -2598,7 +2596,6 @@ const TRADE_LOG_COLUMN_STYLES: Partial<Record<typeof XLSX_COLUMNS[number], XlsxS
   ohlc_sol_high: 'sol3',
   ohlc_sol_low: 'sol3',
   ohlc_sol_close: 'sol3',
-  ohlc_sample_count: 'integer',
 };
 
 const EXIT_LEG_COLUMN_STYLES: Partial<Record<typeof EXIT_LEG_COLUMNS[number], XlsxStyleKey>> = {
@@ -2659,9 +2656,9 @@ function buildTradeRow(
   const timeInTradeSeconds =
     trade.timeInTradeSeconds ??
     (entry && exit ? Math.max(0, Math.round((exit.getTime() - entry.getTime()) / 1000)) : null);
-  const ohlcSource = trade.ohlcSource ?? 'execution-ledger';
   const ohlcScreenshot = selectTradeOhlcScreenshot(session, trade);
   const ohlcScreenshotLink = ohlcScreenshot ? filePathToHyperlinkTarget(ohlcScreenshot) : null;
+  const ohlcScreenshotName = ohlcScreenshot ? path.basename(ohlcScreenshot) : null;
   return {
     source_session: path.basename(session.sessionDir),
     source_log_type: trade.enrichmentSource === 'llm' ? 'wilytrader-desktop-enriched' : 'wilytrader-desktop-audio',
@@ -2729,18 +2726,10 @@ function buildTradeRow(
     ohlc_sol_high: xlsxDecimal(trade.ohlcSol?.high ?? null, 3),
     ohlc_sol_low: xlsxDecimal(trade.ohlcSol?.low ?? null, 3),
     ohlc_sol_close: xlsxDecimal(trade.ohlcSol?.close ?? null, 3),
-    ohlc_sample_count: xlsxInteger(trade.ohlcSampleCount ?? null),
-    ohlc_source: ohlcScreenshot
+    ohlc_screenshot: ohlcScreenshot && ohlcScreenshotName
       ? {
-          text: ohlcSource,
-          hyperlink: ohlcScreenshotLink ?? undefined,
-          tooltip: `Open chart screenshot: ${ohlcScreenshot}`,
-        }
-      : ohlcSource,
-    ohlc_screenshot_path: ohlcScreenshot
-      ? {
-          text: ohlcScreenshot,
-          formula: xlsxHyperlinkFormula(ohlcScreenshotLink ?? ohlcScreenshot, ohlcScreenshot),
+          text: ohlcScreenshotName,
+          formula: xlsxHyperlinkFormula(ohlcScreenshotLink ?? ohlcScreenshot, ohlcScreenshotName),
           tooltip: `Open chart screenshot: ${ohlcScreenshot}`,
         }
       : '',

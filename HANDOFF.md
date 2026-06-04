@@ -90,3 +90,23 @@ Validation:
 - `node --check extension\src\userscript-wrapper.user.js`
 - `.\desktop\node_modules\.bin\tsc --target es2020 --lib 'dom,es2020' --noEmit --strict false extension/src/axiomChartBridge.ts`
 - `git diff --check`
+
+## 2026-06-04 Trade Log OHLC Screenshot Column Cleanup
+
+Session reviewed: `E:\Apps\WilyTrader Captures\20260603.2249 Trade`.
+
+Finding: the generated Trade Log included `ohlc_sample_count`, `ohlc_source`,
+and `ohlc_screenshot_path`. The screenshot hyperlink formula worked, but the
+visible cell text repeated the full local path, making the final columns noisier
+than needed for the master log.
+
+Resolution in Desktop `0.1.10`: the Trade Log no longer emits
+`ohlc_sample_count` or `ohlc_source`. The screenshot column is now
+`ohlc_screenshot`; it still writes an Excel `HYPERLINK(...)` formula with the
+full local file URL target, but the displayed text is only the PNG filename.
+
+Validation:
+
+- `npm --prefix E:\Apps\wilytrader\desktop run typecheck`
+- `npm --prefix E:\Apps\wilytrader\desktop run build`
+- `git diff --check`
