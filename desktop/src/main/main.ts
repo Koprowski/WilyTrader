@@ -12,6 +12,7 @@ import type {
   AudioRecordingMeta,
   BridgeExecutionEvent,
   BridgeScreenshotPayload,
+  MasterSyncResult,
   StopSessionResult,
   TranscriptSegment,
   WilyTraderDesktopSettings,
@@ -310,6 +311,7 @@ function registerIpc(): void {
   ipcMain.handle('session:copy-active-folder-link', async () => copyActiveSessionFolderLink());
   ipcMain.handle('session:open-last-completed-folder', async () => openLastCompletedSessionFolder());
   ipcMain.handle('session:copy-last-completed-folder-link', async () => copyLastCompletedSessionFolderLink());
+  ipcMain.handle('session:sync-master-trading-log', async () => syncMasterTradingLog());
   ipcMain.handle('session:status', async () => getStatus());
   ipcMain.handle('session:audio-chunk', async (_event, payload) => saveAudioChunk(payload));
   ipcMain.handle('session:audio-recording', async (_event, payload) => saveAudioRecording(payload));
@@ -3196,6 +3198,7 @@ function fallbackSettings(): WilyTraderDesktopSettings {
     microphoneCaptureEnabled: true,
     saveBrowserScreenshots: true,
     generateTradeLogOnStop: true,
+    masterSyncScriptsDir: defaultMasterSyncScriptsDir(defaultCapturesRoot()),
     autoCheckExtensionUpdates: true,
     tradeSessionHotkey: 'Ctrl+Alt+T',
     llmMode: 'gemini-cli',
@@ -3249,6 +3252,7 @@ function sanitizeSettings(value: WilyTraderDesktopSettings): WilyTraderDesktopSe
     microphoneCaptureEnabled: Boolean(value.microphoneCaptureEnabled),
     saveBrowserScreenshots: Boolean(value.saveBrowserScreenshots),
     generateTradeLogOnStop: Boolean(value.generateTradeLogOnStop),
+    masterSyncScriptsDir: strOrNull(value.masterSyncScriptsDir) ?? defaultMasterSyncScriptsDir(strOrNull(value.outputDir) ?? defaults.outputDir),
     autoCheckExtensionUpdates: Boolean(value.autoCheckExtensionUpdates),
     tradeSessionHotkey: isUsableHotkey(value.tradeSessionHotkey) ? value.tradeSessionHotkey.trim() : defaults.tradeSessionHotkey,
     llmMode: value.llmMode === 'api' ? 'api' : 'gemini-cli',
@@ -3278,6 +3282,10 @@ function defaultCapturesRoot(): string {
     ? path.resolve(appRoot, '..', '..')
     : path.resolve(appRoot, '..');
   return path.join(baseDir, 'WilyTrader Captures');
+}
+
+function defaultMasterSyncScriptsDir(outputDir: string): string {
+  return path.join(outputDir, 'Trade Sync Scripts');
 }
 
 function isOldDefaultOutputDir(outputDir: string): boolean {
@@ -4327,6 +4335,126 @@ function copyLastCompletedSessionFolderLink(): { ok: boolean; message: string; p
   lastCompletedSessionDir = resolved.path;
   clipboard.writeText(resolved.path);
   return { ok: true, message: `Copied session folder link: ${resolved.path}`, path: resolved.path };
+}
+
+async function syncMasterTradingLog(): Promise<MasterSyncResult> {
+  if (activeSession || finalizingSession) {
+    return emptyMasterSyncResult(false, 'Wait for the active WilyTrader session to finish before syncing the master trading log.');
+  }
+
+  const syncScriptsDir = settings.masterSyncScriptsDir || defaultMasterSyncScriptsDir(settings.outputDir);
+  const scriptPath = path.join(syncScriptsDir, 'run-trade-sync.ps1');
+  const masterPath = path.join(settings.outputDir, 'master trading log.xlsx');
+  if (!fs.existsSync(scriptPath)) {
+    return emptyMasterSyncResult(false, `Sync script was not found: ${scriptPath}`, masterPath, syncScriptsDir);
+  }
+
+  const args = [
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    scriptPath,
+    '-CapturesRoot',
+    settings.outputDir,
+    '-MasterPath',
+    masterPath,
+  ];
+  debugLog('master-sync', 'starting master sync', { scriptPath, masterPath, outputDir: settings.outputDir });
+  const result = await runProcessProbe('powershell.exe', args, 300_000);
+  const summary = parseMasterSyncSummary(result.stdout);
+  if (!result.ok) {
+    const message = `Master sync failed${result.timedOut ? ' after timing out' : ''}. ${tail(result.stderr || result.stdout || result.error || '', 700)}`;
+    debugLog('master-sync', 'master sync failed', { ...result, stdoutTail: tail(result.stdout), stderrTail: tail(result.stderr) });
+    return {
+      ok: false,
+      message,
+      masterPath,
+      syncScriptsDir,
+      processedFolders: summary.processedFolders,
+      rowsAppended: summary.rowsAppended,
+      rowsBackfilled: summary.rowsBackfilled,
+      backfilledArchivedFolders: summary.backfilledArchivedFolders,
+      stdoutTail: tail(result.stdout, 1000),
+      stderrTail: tail(result.stderr, 1000),
+    };
+  }
+
+  if (fs.existsSync(masterPath)) {
+    const openError = await shell.openPath(masterPath);
+    if (openError) {
+      return {
+        ok: false,
+        message: `Master sync completed, but Excel did not open the workbook: ${openError}`,
+        masterPath,
+        syncScriptsDir,
+        processedFolders: summary.processedFolders,
+        rowsAppended: summary.rowsAppended,
+        rowsBackfilled: summary.rowsBackfilled,
+        backfilledArchivedFolders: summary.backfilledArchivedFolders,
+        stdoutTail: tail(result.stdout, 1000),
+        stderrTail: tail(result.stderr, 1000),
+      };
+    }
+  }
+  debugLog('master-sync', 'master sync completed', { masterPath, summary });
+  return {
+    ok: true,
+    message: fs.existsSync(masterPath)
+      ? `Master trading log synced and opened: ${masterPath}`
+      : `Master sync completed, but the workbook was not found at ${masterPath}`,
+    masterPath: fs.existsSync(masterPath) ? masterPath : null,
+    syncScriptsDir,
+    processedFolders: summary.processedFolders,
+    rowsAppended: summary.rowsAppended,
+    rowsBackfilled: summary.rowsBackfilled,
+    backfilledArchivedFolders: summary.backfilledArchivedFolders,
+    stdoutTail: tail(result.stdout, 1000),
+    stderrTail: tail(result.stderr, 1000),
+  };
+}
+
+function emptyMasterSyncResult(ok: boolean, message: string, masterPath: string | null = null, syncScriptsDir = settings.masterSyncScriptsDir): MasterSyncResult {
+  return {
+    ok,
+    message,
+    masterPath,
+    syncScriptsDir,
+    processedFolders: 0,
+    rowsAppended: 0,
+    rowsBackfilled: 0,
+    backfilledArchivedFolders: 0,
+  };
+}
+
+function parseMasterSyncSummary(stdout: string): Pick<MasterSyncResult, 'processedFolders' | 'rowsAppended' | 'rowsBackfilled' | 'backfilledArchivedFolders'> {
+  const fallback = {
+    processedFolders: 0,
+    rowsAppended: 0,
+    rowsBackfilled: 0,
+    backfilledArchivedFolders: 0,
+  };
+  const match = stdout.match(/\{\s*"master"[\s\S]*?\n\}/);
+  if (!match) return fallback;
+  try {
+    const parsed = JSON.parse(match[0]) as Partial<Record<keyof typeof fallback, unknown>>;
+    return {
+      processedFolders: numberOrZero(parsed.processedFolders),
+      rowsAppended: numberOrZero(parsed.rowsAppended),
+      rowsBackfilled: numberOrZero(parsed.rowsBackfilled),
+      backfilledArchivedFolders: numberOrZero(parsed.backfilledArchivedFolders),
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function numberOrZero(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function runProcessProbe(command: string, args: string[], timeoutMs: number): Promise<DependencyProbeResult> {
+  return runDependencyProbe(command, args, timeoutMs, dependencyProbeEnv());
 }
 
 function resolveLastCompletedSessionFolder(): { ok: true; message: string; path: string } | { ok: false; message: string; path?: string | null } {

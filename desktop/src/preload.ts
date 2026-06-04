@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
   AbandonSessionResult,
+  MasterSyncResult,
   StartSessionResult,
   StopSessionResult,
   WilyTraderDesktopAppInfo,
@@ -21,6 +22,8 @@ const api = {
     ipcRenderer.invoke('session:open-last-completed-folder') as Promise<{ ok: boolean; message: string; path?: string | null }>,
   copyLastCompletedSessionFolderLink: () =>
     ipcRenderer.invoke('session:copy-last-completed-folder-link') as Promise<{ ok: boolean; message: string; path?: string | null }>,
+  syncMasterTradingLog: () =>
+    ipcRenderer.invoke('session:sync-master-trading-log') as Promise<MasterSyncResult>,
   getStatus: () => ipcRenderer.invoke('session:status') as Promise<WilyTraderDesktopStatus>,
   getSettings: () => ipcRenderer.invoke('settings:get') as Promise<WilyTraderDesktopSettings>,
   saveSettings: (payload: Partial<WilyTraderDesktopSettings>) =>

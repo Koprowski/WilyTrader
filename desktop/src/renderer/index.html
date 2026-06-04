@@ -50,6 +50,7 @@
           <div class="inline-actions">
             <button class="small-button" data-action="copy-session-folder-link" type="button">Copy Folder Link</button>
             <button class="small-button" data-action="open-session-folder" type="button">Open Folder</button>
+            <button class="small-button" data-action="sync-master-trading-log" type="button">Sync Master</button>
           </div>
         </div>
         <div class="path" data-last-completed-dir>No completed session yet</div>
@@ -121,6 +122,14 @@
               <label class="check-row">
                 <input data-setting="generateTradeLogOnStop" type="checkbox" />
                 <span>Generate trade log on stop</span>
+              </label>
+            </section>
+
+            <section class="settings-section">
+              <div class="section-title">Master Trading Log</div>
+              <label class="field">
+                <span>Sync scripts folder</span>
+                <input data-setting="masterSyncScriptsDir" type="text" spellcheck="false" autocomplete="off" />
               </label>
             </section>
 

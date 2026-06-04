@@ -77,6 +77,19 @@ export interface StopSessionResult {
   warnings: string[];
 }
 
+export interface MasterSyncResult {
+  ok: boolean;
+  message: string;
+  masterPath: string | null;
+  syncScriptsDir: string;
+  processedFolders: number;
+  rowsAppended: number;
+  rowsBackfilled: number;
+  backfilledArchivedFolders: number;
+  stdoutTail?: string;
+  stderrTail?: string;
+}
+
 export interface AbandonSessionResult {
   ok: true;
   sessionDir: string;
@@ -126,6 +139,7 @@ export interface WilyTraderDesktopSettings {
   microphoneCaptureEnabled: boolean;
   saveBrowserScreenshots: boolean;
   generateTradeLogOnStop: boolean;
+  masterSyncScriptsDir: string;
   autoCheckExtensionUpdates: boolean;
   tradeSessionHotkey: string;
   llmMode: 'gemini-cli' | 'api';
