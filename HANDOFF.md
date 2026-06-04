@@ -69,3 +69,24 @@ Validation:
 - `npm --prefix E:\Apps\wilytrader\desktop run build`
 - `node --check extension\src\content.js`
 - `git diff --check`
+
+## 2026-06-04 Axiom Stop/Target Line Move Hardening
+
+Finding: draggable Axiom stop/target lines already attempted to update the
+backing `state.exitTargets` row, but the chart bridge payload used the generic
+field name `positionId` even though WilyTrader was passing a target id for exit
+target lines. That made the path harder to reason about and fragile if future
+bridge messages carried both position and target identifiers.
+
+Resolution in extension `0.3.55`: movable stop/target line messages now carry
+an explicit `targetId` plus `tradePositionId`. The content-script listener
+resolves by `targetId` first, falls back only for legacy payloads, persists the
+new `marketCapUsd`, clears `triggeredAt`, resets chart sync, and logs
+`chart-line-moved-applied` with the old/new market cap after persistence.
+
+Validation:
+
+- `node --check extension\src\content.js`
+- `node --check extension\src\userscript-wrapper.user.js`
+- `.\desktop\node_modules\.bin\tsc --target es2020 --lib 'dom,es2020' --noEmit --strict false extension/src/axiomChartBridge.ts`
+- `git diff --check`

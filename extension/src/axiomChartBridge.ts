@@ -21,6 +21,11 @@ export interface ExecutionMarkerStyle {
   fontSize?: number;
 }
 
+export interface PriceLineMetadata {
+  targetId?: string;
+  tradePositionId?: string;
+}
+
 export interface AxiomChartBridgeHealth {
   ok: boolean;
   iframeFound: boolean;
@@ -35,7 +40,7 @@ export interface AxiomChartBridgeHealth {
 
 export interface AxiomChartBridge {
   ready(): Promise<void>;
-  upsertLine(positionId: string, kind: PriceLineKind, price: number, style: PriceLineStyle): Promise<void>;
+  upsertLine(positionId: string, kind: PriceLineKind, price: number, style: PriceLineStyle, metadata?: PriceLineMetadata): Promise<void>;
   removeLine(positionId: string, kind: PriceLineKind): Promise<void>;
   upsertMarker(positionId: string, markerId: string, side: ExecutionMarkerSide, time: number, price: number, style: ExecutionMarkerStyle): Promise<void>;
   removeMarker(markerId: string): Promise<void>;
@@ -55,6 +60,8 @@ type TradingViewWindow = Window & {
 
 type StoredLine = {
   positionId: string;
+  targetId?: string;
+  tradePositionId?: string;
   kind: PriceLineKind;
   price: number;
   style: PriceLineStyle;
@@ -122,12 +129,20 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
     await ensureBound();
   }
 
-  async function upsertLine(positionId: string, kind: PriceLineKind, price: number, style: PriceLineStyle): Promise<void> {
+  async function upsertLine(
+    positionId: string,
+    kind: PriceLineKind,
+    price: number,
+    style: PriceLineStyle,
+    metadata: PriceLineMetadata = {}
+  ): Promise<void> {
     if (!positionId || !Number.isFinite(price) || price <= 0) return;
     const key = lineKey(positionId, kind);
     desiredLines.set(key, {
       ...(desiredLines.get(key) || {}),
       positionId,
+      targetId: metadata.targetId,
+      tradePositionId: metadata.tradePositionId,
       kind,
       price,
       style: normalizeStyle(kind, style),
@@ -280,6 +295,8 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
       window.postMessage({
         source: "wiley-chart-bridge",
         event: "lineMoved",
+        targetId: line.targetId || line.positionId,
+        tradePositionId: line.tradePositionId || null,
         positionId: line.positionId,
         kind: line.kind,
         price: line.price,

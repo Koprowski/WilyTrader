@@ -3328,26 +3328,63 @@
     logExitTargetDiagnostic("chart-line-moved-message", null, data);
     const kind = data.kind === EXIT_TARGET_KINDS.takeProfit ? EXIT_TARGET_KINDS.takeProfit : data.kind === EXIT_TARGET_KINDS.stopLoss ? EXIT_TARGET_KINDS.stopLoss : null;
     const marketCapUsd = Number(data.price);
-    if (!kind || !Number.isFinite(marketCapUsd) || marketCapUsd <= 0 || !data.positionId) {
-      logExitTargetDiagnostic("chart-line-moved-ignored-invalid", null, data, "warn");
+    const targetId = normalizeBridgeString(data.targetId) || normalizeBridgeString(data.positionId);
+    if (!kind || !Number.isFinite(marketCapUsd) || marketCapUsd <= 0 || !targetId) {
+      logExitTargetDiagnostic("chart-line-moved-ignored-invalid", null, {
+        ...data,
+        resolvedTargetId: targetId,
+      }, "warn");
       return;
     }
-    const target = state.exitTargets[data.positionId] || Object.values(state.exitTargets || {}).find((item) => item?.positionId === data.positionId && item.kind === kind);
+    const target = findExitTargetForChartMove(targetId, kind, data);
     if (!target) {
-      logExitTargetDiagnostic("chart-line-moved-ignored-no-target", null, data, "warn");
+      logExitTargetDiagnostic("chart-line-moved-ignored-no-target", null, {
+        ...data,
+        resolvedTargetId: targetId,
+        activeTargetIds: Object.keys(state.exitTargets || {}),
+      }, "warn");
       return;
     }
     if (Math.abs(Number(target.marketCapUsd || 0) - marketCapUsd) < 1) {
-      logExitTargetDiagnostic("chart-line-moved-ignored-same-price", null, data);
+      logExitTargetDiagnostic("chart-line-moved-ignored-same-price", null, {
+        ...data,
+        resolvedTargetId: targetId,
+        matchedTargetId: target.id,
+      });
       return;
     }
+    const previousMarketCapUsd = Number(target.marketCapUsd || 0);
     target.marketCapUsd = marketCapUsd;
     target.updatedAt = new Date().toISOString();
     target.triggeredAt = null;
     lastAxiomExitTargetSyncKey = null;
     await persistAndSync("exit-target-moved");
     render();
+    logExitTargetDiagnostic("chart-line-moved-applied", null, {
+      ...data,
+      resolvedTargetId: targetId,
+      matchedTargetId: target.id,
+      previousMarketCapUsd,
+      marketCapUsd,
+    });
     setStatus(`${formatExitTargetKind(kind)} moved to ${formatters.usd(marketCapUsd)}.`);
+  }
+
+  function normalizeBridgeString(value) {
+    if (typeof value !== "string" && typeof value !== "number") return null;
+    const text = String(value || "").trim();
+    return text || null;
+  }
+
+  function findExitTargetForChartMove(targetId, kind, data = {}) {
+    const byId = targetId ? state.exitTargets?.[targetId] : null;
+    if (byId?.kind === kind) return byId;
+    const actualPositionId = normalizeBridgeString(data.tradePositionId) || normalizeBridgeString(data.actualPositionId);
+    return Object.values(state.exitTargets || {}).find((item) => {
+      if (!item || item.kind !== kind) return false;
+      if (targetId && item.id === targetId) return true;
+      return Boolean(actualPositionId && item.positionId === actualPositionId);
+    }) || null;
   }
 
   function parseMarketCapInput(value) {
@@ -4529,6 +4566,8 @@
       postAxiomChartBridgeMessage({
         op: "upsert",
         positionId: target.id,
+        targetId: target.id,
+        tradePositionId: target.positionId,
         kind: target.kind,
         price: target.marketCapUsd,
         style: buildAxiomExitTargetLineStyle(target),

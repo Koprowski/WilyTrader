@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WilyTrader Axiom Chart Bridge
 // @namespace    https://github.com/Koprowski/WilyTrader
-// @version      0.3.53
+// @version      0.3.55
 // @description  Draw WilyTrader average entry/exit lines as native TradingView chart shapes on axiom.trade.
 // @match        https://axiom.trade/*
 // @run-at       document-idle
@@ -52,12 +52,14 @@
       await ensureBound();
     }
 
-    async function upsertLine(positionId, kind, price, style) {
+    async function upsertLine(positionId, kind, price, style, metadata = {}) {
       if (!positionId || !Number.isFinite(price) || price <= 0) return;
       const key = lineKey(positionId, kind);
       desiredLines.set(key, {
         ...(desiredLines.get(key) || {}),
         positionId,
+        targetId: metadata.targetId,
+        tradePositionId: metadata.tradePositionId,
         kind,
         price,
         style: normalizeStyle(kind, style || {}),
@@ -202,6 +204,8 @@
         window.postMessage({
           source: "wiley-chart-bridge",
           event: "lineMoved",
+          targetId: line.targetId || line.positionId,
+          tradePositionId: line.tradePositionId || null,
           positionId: line.positionId,
           kind: line.kind,
           price: line.price,
@@ -759,7 +763,10 @@
     const data = event.data || {};
     if (data.source !== "wileytrader") return;
     if (data.op === "upsert") {
-      void bridge.upsertLine(data.positionId, data.kind, Number(data.price), data.style || {});
+      void bridge.upsertLine(data.positionId, data.kind, Number(data.price), data.style || {}, {
+        targetId: data.targetId,
+        tradePositionId: data.tradePositionId,
+      });
     } else if (data.op === "remove") {
       void bridge.removeLine(data.positionId, data.kind);
     } else if (data.op === "upsertMarker") {
