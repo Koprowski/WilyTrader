@@ -27,7 +27,7 @@ interface WilyTraderDesktopSettings {
   microphoneCaptureEnabled: boolean;
   saveBrowserScreenshots: boolean;
   generateTradeLogOnStop: boolean;
-  masterSyncScriptsDir: string;
+  masterTradingLogPath: string;
   autoCheckExtensionUpdates: boolean;
   tradeSessionHotkey: string;
   llmMode: 'gemini-cli' | 'api';
@@ -727,7 +727,7 @@ function populateSettings(settings: WilyTraderDesktopSettings): void {
   setChecked('microphoneCaptureEnabled', settings.microphoneCaptureEnabled);
   setChecked('saveBrowserScreenshots', settings.saveBrowserScreenshots);
   setChecked('generateTradeLogOnStop', settings.generateTradeLogOnStop);
-  setInputValue('masterSyncScriptsDir', settings.masterSyncScriptsDir);
+  setInputValue('masterTradingLogPath', settings.masterTradingLogPath);
   setChecked('autoCheckExtensionUpdates', settings.autoCheckExtensionUpdates);
   setSelectValue('llmMode', settings.llmMode);
   setInputValue('geminiCliCommand', settings.geminiCliCommand);
@@ -744,7 +744,7 @@ async function saveSettingsFromForm(): Promise<void> {
     microphoneCaptureEnabled: getChecked('microphoneCaptureEnabled'),
     saveBrowserScreenshots: getChecked('saveBrowserScreenshots'),
     generateTradeLogOnStop: getChecked('generateTradeLogOnStop'),
-    masterSyncScriptsDir: getInputValue('masterSyncScriptsDir'),
+    masterTradingLogPath: getInputValue('masterTradingLogPath'),
     autoCheckExtensionUpdates: getChecked('autoCheckExtensionUpdates'),
     llmMode: getSelectValue('llmMode') === 'api' ? 'api' : 'gemini-cli',
     geminiCliCommand: getInputValue('geminiCliCommand'),

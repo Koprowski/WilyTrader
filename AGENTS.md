@@ -46,12 +46,13 @@ Canonical policy: `E:\Apps\mission-control\resources\repo-change-traceability.md
 
 ## Recent handoff notes
 
-- **Master sync UI (local branch):** WilyTrader Desktop now has a Settings
-  field for the WilyTrader-owned sync scripts folder and a **Sync Master**
-  button in the last-completed-session panel. The button runs
-  `run-trade-sync.ps1` from the configured folder with `-CapturesRoot` and
-  `-MasterPath` only, so it does not request archive backfill, then opens
-  `master trading log.xlsx` when the sync succeeds.
+- **Master sync UI (local branch):** WilyTrader Desktop now bundles the master
+  sync scripts from `desktop/resources/trade-sync`, exposes a Settings field
+  for the master workbook path, and has a **Sync Master** button in the
+  last-completed-session panel. The button runs the bundled
+  `run-trade-sync.ps1` with `-CapturesRoot` and `-MasterPath` only, so it does
+  not request archive backfill, then opens the configured master workbook when
+  the sync succeeds.
 - **Master workbook/export alignment (local branch):** Desktop trade logs now
   sort trades by exit time, emit `entry_date` and `exit_date` instead of the
   old `trade_date`/`entry_time_inferred` shape, and carry workbook formulas for

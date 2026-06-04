@@ -3198,7 +3198,7 @@ function fallbackSettings(): WilyTraderDesktopSettings {
     microphoneCaptureEnabled: true,
     saveBrowserScreenshots: true,
     generateTradeLogOnStop: true,
-    masterSyncScriptsDir: defaultMasterSyncScriptsDir(defaultCapturesRoot()),
+    masterTradingLogPath: defaultMasterTradingLogPath(defaultCapturesRoot()),
     autoCheckExtensionUpdates: true,
     tradeSessionHotkey: 'Ctrl+Alt+T',
     llmMode: 'gemini-cli',
@@ -3225,7 +3225,13 @@ function loadSettings(): WilyTraderDesktopSettings {
     const parsed = JSON.parse(fs.readFileSync(settingsPath(), 'utf-8')) as Partial<WilyTraderDesktopSettings>;
     const loaded = sanitizeSettings({ ...defaults, ...parsed });
     if (isOldDefaultOutputDir(loaded.outputDir)) {
-      return { ...loaded, outputDir: defaults.outputDir };
+      return {
+        ...loaded,
+        outputDir: defaults.outputDir,
+        masterTradingLogPath: loaded.masterTradingLogPath === defaultMasterTradingLogPath(loaded.outputDir)
+          ? defaultMasterTradingLogPath(defaults.outputDir)
+          : loaded.masterTradingLogPath,
+      };
     }
     return loaded;
   } catch {
@@ -3236,7 +3242,17 @@ function loadSettings(): WilyTraderDesktopSettings {
 function saveSettings(payload: Partial<WilyTraderDesktopSettings>): WilyTraderDesktopSettings {
   const previousHotkey = settings.tradeSessionHotkey;
   const previousOutputDir = settings.outputDir;
-  settings = sanitizeSettings({ ...settings, ...payload });
+  const previousMasterTradingLogPath = settings.masterTradingLogPath;
+  const mergedSettings = { ...settings, ...payload };
+  const nextOutputDir = strOrNull(mergedSettings.outputDir) ?? previousOutputDir;
+  if (
+    nextOutputDir !== previousOutputDir &&
+    previousMasterTradingLogPath === defaultMasterTradingLogPath(previousOutputDir) &&
+    (!strOrNull(payload.masterTradingLogPath) || payload.masterTradingLogPath === previousMasterTradingLogPath)
+  ) {
+    mergedSettings.masterTradingLogPath = defaultMasterTradingLogPath(nextOutputDir);
+  }
+  settings = sanitizeSettings(mergedSettings);
   fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
   fs.writeFileSync(settingsPath(), JSON.stringify(settings, null, 2), 'utf-8');
   if (settings.tradeSessionHotkey !== previousHotkey) registerTradeSessionHotkey();
@@ -3252,7 +3268,7 @@ function sanitizeSettings(value: WilyTraderDesktopSettings): WilyTraderDesktopSe
     microphoneCaptureEnabled: Boolean(value.microphoneCaptureEnabled),
     saveBrowserScreenshots: Boolean(value.saveBrowserScreenshots),
     generateTradeLogOnStop: Boolean(value.generateTradeLogOnStop),
-    masterSyncScriptsDir: strOrNull(value.masterSyncScriptsDir) ?? defaultMasterSyncScriptsDir(strOrNull(value.outputDir) ?? defaults.outputDir),
+    masterTradingLogPath: strOrNull(value.masterTradingLogPath) ?? defaultMasterTradingLogPath(strOrNull(value.outputDir) ?? defaults.outputDir),
     autoCheckExtensionUpdates: Boolean(value.autoCheckExtensionUpdates),
     tradeSessionHotkey: isUsableHotkey(value.tradeSessionHotkey) ? value.tradeSessionHotkey.trim() : defaults.tradeSessionHotkey,
     llmMode: value.llmMode === 'api' ? 'api' : 'gemini-cli',
@@ -3284,8 +3300,12 @@ function defaultCapturesRoot(): string {
   return path.join(baseDir, 'WilyTrader Captures');
 }
 
-function defaultMasterSyncScriptsDir(outputDir: string): string {
-  return path.join(outputDir, 'Trade Sync Scripts');
+function defaultMasterTradingLogPath(outputDir: string): string {
+  return path.join(outputDir, 'master trading log.xlsx');
+}
+
+function bundledMasterSyncScriptsDir(): string {
+  return path.resolve(__dirname, '..', 'trade-sync');
 }
 
 function isOldDefaultOutputDir(outputDir: string): boolean {
@@ -4342,9 +4362,9 @@ async function syncMasterTradingLog(): Promise<MasterSyncResult> {
     return emptyMasterSyncResult(false, 'Wait for the active WilyTrader session to finish before syncing the master trading log.');
   }
 
-  const syncScriptsDir = settings.masterSyncScriptsDir || defaultMasterSyncScriptsDir(settings.outputDir);
+  const syncScriptsDir = bundledMasterSyncScriptsDir();
   const scriptPath = path.join(syncScriptsDir, 'run-trade-sync.ps1');
-  const masterPath = path.join(settings.outputDir, 'master trading log.xlsx');
+  const masterPath = settings.masterTradingLogPath || defaultMasterTradingLogPath(settings.outputDir);
   if (!fs.existsSync(scriptPath)) {
     return emptyMasterSyncResult(false, `Sync script was not found: ${scriptPath}`, masterPath, syncScriptsDir);
   }
@@ -4414,7 +4434,7 @@ async function syncMasterTradingLog(): Promise<MasterSyncResult> {
   };
 }
 
-function emptyMasterSyncResult(ok: boolean, message: string, masterPath: string | null = null, syncScriptsDir = settings.masterSyncScriptsDir): MasterSyncResult {
+function emptyMasterSyncResult(ok: boolean, message: string, masterPath: string | null = null, syncScriptsDir = bundledMasterSyncScriptsDir()): MasterSyncResult {
   return {
     ok,
     message,

@@ -139,7 +139,7 @@ export interface WilyTraderDesktopSettings {
   microphoneCaptureEnabled: boolean;
   saveBrowserScreenshots: boolean;
   generateTradeLogOnStop: boolean;
-  masterSyncScriptsDir: string;
+  masterTradingLogPath: string;
   autoCheckExtensionUpdates: boolean;
   tradeSessionHotkey: string;
   llmMode: 'gemini-cli' | 'api';
