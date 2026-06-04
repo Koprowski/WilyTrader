@@ -44,3 +44,28 @@ Validation:
 - `npm --prefix E:\Apps\wilytrader\desktop run typecheck`
 - `npm --prefix E:\Apps\wilytrader\desktop run build`
 - `git diff --check`
+
+## 2026-06-04 Trade Log Size Basis and Screenshot Formula Links
+
+Session reviewed: `E:\Apps\WilyTrader Captures\20260603.2224 Trade`.
+
+Finding: the Desktop workbook normalized `sol_invested` as
+`investedNative + buyFeesNative`, so a 0.5 SOL requested entry exported as
+0.521 SOL and failed `size_ok`. The underlying extension execution model still
+tracks the wallet debit separately, but the workbook sizing and trade-level P&L
+basis should use the requested/base investment amount.
+
+Resolution in Desktop `0.1.9` and extension `0.3.54`: trade-log export now uses
+`investedNative` as `sol_invested`, calculates post-fee P&L from
+`netReceivedNative - investedNative`, preserves buy/sell fees in their own
+columns, and keeps exit-leg cost-basis allocation on the base investment plus
+prorated entry fees. The Trade Log sheet also adds an
+`ohlc_screenshot_path` column written as an Excel `HYPERLINK(...)` formula with
+the local PNG path as visible text.
+
+Validation:
+
+- `npm --prefix E:\Apps\wilytrader\desktop run typecheck`
+- `npm --prefix E:\Apps\wilytrader\desktop run build`
+- `node --check extension\src\content.js`
+- `git diff --check`

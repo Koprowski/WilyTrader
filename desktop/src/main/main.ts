@@ -142,6 +142,7 @@ type XlsxStyleKey = 'integer' | 'sol3' | 'percent1' | 'nativePrice' | 'date';
 type XlsxCell = string | number | {
   text: string;
   hyperlink?: string;
+  formula?: string;
   tooltip?: string;
   style?: XlsxStyleKey;
 };
@@ -1656,6 +1657,12 @@ function normalizeWilyTraderTrades(parsed: unknown): NormalizedTrade[] {
       positionExecutions.map((execution) => strOrNull(execution.tokenName)).find(Boolean) ??
       tokenAddress ??
       'Unknown token';
+    const solInvested = numberOrNull(position.investedNative);
+    const solReceived = coalesceNumber(
+      numberOrNull(position.netReceivedNative),
+      sumNullable(solInvested, numberOrNull(position.pnlPostFeeNative))
+    );
+    const pnlSol = computeNetPnl(solReceived, solInvested) ?? numberOrNull(position.pnlPostFeeNative);
     trades.push({
       id: strOrNull(position.id) ?? `wilytrader-${timestampMs ?? Date.now()}-${tokenName}`,
       tokenName,
@@ -1670,18 +1677,12 @@ function normalizeWilyTraderTrades(parsed: unknown): NormalizedTrade[] {
       ohlcSampleCount: numberOrNull(position.ohlcSampleCount),
       ohlcSampleIntervalMs: numberOrNull(position.ohlcSampleIntervalMs),
       ohlcRangeSource: strOrNull(position.ohlcSource),
-      solInvested: sumNullable(numberOrNull(position.investedNative), numberOrNull(position.buyFeesNative)),
-      solReceived: coalesceNumber(
-        numberOrNull(position.netReceivedNative),
-        sumNullable(
-          sumNullable(numberOrNull(position.investedNative), numberOrNull(position.buyFeesNative)),
-          numberOrNull(position.pnlPostFeeNative)
-        )
-      ),
+      solInvested,
+      solReceived,
       buyFeesNative: numberOrNull(position.buyFeesNative),
       sellFeesNative: numberOrNull(position.sellFeesNative),
-      pnlSol: numberOrNull(position.pnlPostFeeNative),
-      pnlPercentage: numberOrNull(position.pnlPct),
+      pnlSol,
+      pnlPercentage: computeNetPnlPct(pnlSol, solInvested) ?? numberOrNull(position.pnlPct),
       timestampMs,
       entryTimestampMs,
       timeInTradeSeconds: numberOrNull(position.timeInTradeSeconds),
@@ -1697,39 +1698,45 @@ function normalizeMockApeCompatibleTrades(value: unknown): NormalizedTrade[] {
   if (!Array.isArray(value)) return [];
   return value
     .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
-    .map((row) => ({
-      id: strOrNull(row.id) ?? '',
-      tokenName: strOrNull(row.tokenName) ?? 'Unknown token',
-      platform: strOrNull(row.platform) ?? '',
-      chain: strOrNull(row.chain) ?? 'SOL',
-      entryMarketCap: numberOrNull(row.entryMarketCap),
-      exitMarketCap: numberOrNull(row.exitMarketCap),
-      highMarketCapAfterEntry: numberOrNull(row.highMarketCapAfterEntry),
-      highMarketCapAtMs: parseTimestampMs(row.highMarketCapAt),
-      lowMarketCapAfterEntry: numberOrNull(row.lowMarketCapAfterEntry),
-      lowMarketCapAtMs: parseTimestampMs(row.lowMarketCapAt),
-      ohlcSampleCount: numberOrNull(row.ohlcSampleCount),
-      ohlcSampleIntervalMs: numberOrNull(row.ohlcSampleIntervalMs),
-      ohlcRangeSource: strOrNull(row.ohlcSource),
-      solInvested: numberOrNull(row.solInvested),
-      solReceived: coalesceNumber(
+    .map((row) => {
+      const solInvested = coalesceNumber(numberOrNull(row.investedNative), numberOrNull(row.solInvested));
+      const solReceived = coalesceNumber(
+        numberOrNull(row.netReceivedNative),
         numberOrNull(row.solReceived),
-        sumNullable(numberOrNull(row.solInvested), numberOrNull(row.pnlSol))
-      ),
-      buyFeesNative: numberOrNull(row.buyFeesNative),
-      sellFeesNative: numberOrNull(row.sellFeesNative),
-      pnlSol: numberOrNull(row.pnlSol),
-      pnlPercentage: numberOrNull(row.pnlPercentage),
-      timestampMs: numberOrNull(row.timestamp),
-      entryTimestampMs:
-        numberOrNull(row.entryTimestamp) ??
-        numberOrNull(row.entryTimestampMs) ??
-        parseTimestampMs(row.firstEntryAt) ??
-        parseTimestampMs(row.entryAt),
-      timeInTradeSeconds: numberOrNull(row.timeInTradeSeconds),
-      tokenAddress: strOrNull(row.tokenAddress),
-      executions: [],
-    }));
+        sumNullable(solInvested, numberOrNull(row.pnlSol))
+      );
+      const pnlSol = computeNetPnl(solReceived, solInvested) ?? numberOrNull(row.pnlSol);
+      return {
+        id: strOrNull(row.id) ?? '',
+        tokenName: strOrNull(row.tokenName) ?? 'Unknown token',
+        platform: strOrNull(row.platform) ?? '',
+        chain: strOrNull(row.chain) ?? 'SOL',
+        entryMarketCap: numberOrNull(row.entryMarketCap),
+        exitMarketCap: numberOrNull(row.exitMarketCap),
+        highMarketCapAfterEntry: numberOrNull(row.highMarketCapAfterEntry),
+        highMarketCapAtMs: parseTimestampMs(row.highMarketCapAt),
+        lowMarketCapAfterEntry: numberOrNull(row.lowMarketCapAfterEntry),
+        lowMarketCapAtMs: parseTimestampMs(row.lowMarketCapAt),
+        ohlcSampleCount: numberOrNull(row.ohlcSampleCount),
+        ohlcSampleIntervalMs: numberOrNull(row.ohlcSampleIntervalMs),
+        ohlcRangeSource: strOrNull(row.ohlcSource),
+        solInvested,
+        solReceived,
+        buyFeesNative: numberOrNull(row.buyFeesNative),
+        sellFeesNative: numberOrNull(row.sellFeesNative),
+        pnlSol,
+        pnlPercentage: computeNetPnlPct(pnlSol, solInvested) ?? numberOrNull(row.pnlPercentage),
+        timestampMs: numberOrNull(row.timestamp),
+        entryTimestampMs:
+          numberOrNull(row.entryTimestamp) ??
+          numberOrNull(row.entryTimestampMs) ??
+          parseTimestampMs(row.firstEntryAt) ??
+          parseTimestampMs(row.entryAt),
+        timeInTradeSeconds: numberOrNull(row.timeInTradeSeconds),
+        tokenAddress: strOrNull(row.tokenAddress),
+        executions: [],
+      };
+    });
 }
 
 async function enrichTradesForSession(
@@ -2273,6 +2280,16 @@ function normalizedPnlPercentage(trade: NormalizedTrade): number | null {
   return trade.pnlPercentage;
 }
 
+function computeNetPnl(solReceived: number | null, solInvested: number | null): number | null {
+  if (solReceived === null || solInvested === null) return null;
+  return solReceived - solInvested;
+}
+
+function computeNetPnlPct(pnlSol: number | null, solInvested: number | null): number | null {
+  if (pnlSol === null || solInvested === null || solInvested <= 0) return null;
+  return (pnlSol / solInvested) * 100;
+}
+
 function coalesceNumber(...values: Array<number | null>): number | null {
   return values.find((value): value is number => value !== null && Number.isFinite(value)) ?? null;
 }
@@ -2510,6 +2527,7 @@ const XLSX_COLUMNS = [
   'ohlc_sol_close',
   'ohlc_sample_count',
   'ohlc_source',
+  'ohlc_screenshot_path',
 ] as const;
 
 const EXIT_LEG_COLUMNS = [
@@ -2643,6 +2661,7 @@ function buildTradeRow(
     (entry && exit ? Math.max(0, Math.round((exit.getTime() - entry.getTime()) / 1000)) : null);
   const ohlcSource = trade.ohlcSource ?? 'execution-ledger';
   const ohlcScreenshot = selectTradeOhlcScreenshot(session, trade);
+  const ohlcScreenshotLink = ohlcScreenshot ? filePathToHyperlinkTarget(ohlcScreenshot) : null;
   return {
     source_session: path.basename(session.sessionDir),
     source_log_type: trade.enrichmentSource === 'llm' ? 'wilytrader-desktop-enriched' : 'wilytrader-desktop-audio',
@@ -2714,10 +2733,17 @@ function buildTradeRow(
     ohlc_source: ohlcScreenshot
       ? {
           text: ohlcSource,
-          hyperlink: filePathToHyperlinkTarget(ohlcScreenshot),
+          hyperlink: ohlcScreenshotLink ?? undefined,
           tooltip: `Open chart screenshot: ${ohlcScreenshot}`,
         }
       : ohlcSource,
+    ohlc_screenshot_path: ohlcScreenshot
+      ? {
+          text: ohlcScreenshot,
+          formula: xlsxHyperlinkFormula(ohlcScreenshotLink ?? ohlcScreenshot, ohlcScreenshot),
+          tooltip: `Open chart screenshot: ${ohlcScreenshot}`,
+        }
+      : '',
   };
 }
 
@@ -2733,7 +2759,7 @@ function buildExitLegRows(
   const totalBuyFees = trade.buyFeesNative ?? sumExecutionNumbers(buyExecutions, 'feeNative');
   const totalEntryCost = trade.solInvested === null
     ? sumExecutionNumbers(buyExecutions, 'grossNative')
-    : Math.max(0, trade.solInvested - totalBuyFees);
+    : trade.solInvested;
 
   return sellExecutions.map((execution, legIndex) => {
     const tokenAmount = execution.tokenAmount ?? 0;
@@ -2808,6 +2834,10 @@ function xmlWorksheet(
             });
           }
           const styleAttr = cell.styleId ? ` s="${cell.styleId}"` : '';
+          if (cell.formula) {
+            const cachedValue = cell.text ? `<v>${escapeXml(cell.text)}</v>` : '';
+            return `<c r="${ref}"${styleAttr} t="str"><f>${escapeXml(cell.formula)}</f>${cachedValue}</c>`;
+          }
           if (cell.number !== undefined) return `<c r="${ref}"${styleAttr}><v>${xlsxNumberValue(cell.number)}</v></c>`;
           return `<c r="${ref}"${styleAttr} t="inlineStr"><is><t>${escapeXml(cell.text)}</t></is></c>`;
         })
@@ -2827,12 +2857,13 @@ function xmlWorksheet(
 function normalizeXlsxCell(
   value: XlsxCell,
   columnStyle?: XlsxStyleKey
-): { text: string; number?: number; hyperlink?: string; tooltip?: string; styleId?: number } {
+): { text: string; number?: number; formula?: string; hyperlink?: string; tooltip?: string; styleId?: number } {
   const styleId = valueStyleId(typeof value === 'object' && value !== null ? value.style ?? columnStyle : columnStyle);
   if (typeof value === 'number') return { text: '', number: value, styleId };
   if (typeof value === 'string') return { text: value, styleId };
   return {
     text: value.text,
+    formula: value.formula,
     hyperlink: value.hyperlink,
     tooltip: value.tooltip,
     styleId,
@@ -4872,6 +4903,14 @@ function filePathToHyperlinkTarget(filePath: string): string {
     .map((segment, index) => (index === 0 && /^[A-Za-z]:$/.test(segment) ? segment : encodeURIComponent(segment)))
     .join('/');
   return `file:///${encoded}`;
+}
+
+function xlsxHyperlinkFormula(target: string, label: string): string {
+  return `HYPERLINK(${xlsxFormulaString(target)},${xlsxFormulaString(label)})`;
+}
+
+function xlsxFormulaString(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
 }
 
 function sanitizeFilePart(value: unknown): string {
