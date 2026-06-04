@@ -100,6 +100,8 @@
   const AXIOM_CHART_MARKET_CAP_SOURCE = "axiom-chart-latest";
   const AXIOM_CHART_MARKET_CAP_MAX_AGE_MS = 2_000;
   const AXIOM_MARKET_CAP_SOURCE_AGREEMENT_MAX_PCT = 8;
+  const AXIOM_EXECUTION_QUOTE_STABLE_MS = 900;
+  const AXIOM_EXECUTION_CHART_CONFIRM_MAX_MISMATCH_PCT = 12;
   const AXIOM_HEADER_MARKET_CAP_SELECTORS = [
     String.raw`#platform-layout-container > div.hidden.flex-col.sm\:flex > div > div > div.flex.h-\[calc\(100vh\+360px\)\].min-w-0.flex-1.flex-col.border-primaryStroke.border-r > div.flex.min-h-\[0px\].flex-1.flex-col > div > div.flex.min-h-\[0px\].min-w-\[0px\].flex-1.flex-col > div.relative.flex.max-h-\[64px\].min-h-\[64px\].flex-row.items-center.justify-start.border-b.border-primaryStroke.sm\:pl-\[34px\] > div.flex.flex-1.flex-row.items-center.justify-start.overflow-x-auto.overflow-y-hidden.\[-ms-overflow-style\:none\].\[scrollbar-width\:none\].\[\&\:\:-webkit-scrollbar\]\:hidden > div > div:nth-child(2) > div > span > span`,
   ];
@@ -192,6 +194,7 @@
   let lastAxiomExitTargetSyncKey = null;
   let lastAxiomExitTargetLineKeys = new Set();
   let lastAxiomChartMarketCapQuote = null;
+  let lastAxiomExecutionQuoteStability = null;
   let targetExitInFlight = null;
   let lastExitTargetMenuOpenedAt = 0;
   let pulseQuickBuyBound = false;
@@ -445,6 +448,10 @@
       axiomVisible: round(detectAxiomVisibleMarketCap(), 2),
       axiomChartLatest: round(axiomChartQuote?.marketCap, 2),
       axiomChartLatestAgeMs: axiomChartQuote ? Math.max(0, Date.now() - Number(axiomChartQuote.readAtMs || 0)) : null,
+      axiomExecutionQuoteStableMs: lastAxiomExecutionQuoteStability
+        ? Math.max(0, Date.now() - Number(lastAxiomExecutionQuoteStability.firstSeenAtMs || 0))
+        : null,
+      axiomExecutionQuoteKey: lastAxiomExecutionQuoteStability?.quoteKey || null,
       pageTitle: document.title || "",
     };
   }
@@ -1261,15 +1268,128 @@
     return candidates[0]?.marketCap || null;
   }
 
-  function isAuthoritativeAxiomTokenPageQuote(token) {
-    if (token?.platform !== "axiom" || !token?.key) return true;
-    if (!isAxiomMemeRoute(new URL(window.location.href))) return false;
-    if (/^\s*Axiom(?:\s+SOL)?\s*\|\s*Pulse\s*$/i.test(document.title || "")) return false;
-    if (token.marketCapSource !== AXIOM_TITLE_MARKET_CAP_SOURCE) return false;
+  function getAxiomExecutionQuoteReadiness(token) {
+    if (token?.platform !== "axiom" || !token?.key) return { ready: true, reason: "non-axiom" };
+    if (!isAxiomMemeRoute(new URL(window.location.href))) {
+      resetAxiomExecutionQuoteStability();
+      return { ready: false, message: "Waiting for Axiom token page before execution." };
+    }
+    if (/^\s*Axiom(?:\s+SOL)?\s*\|\s*Pulse\s*$/i.test(document.title || "")) {
+      resetAxiomExecutionQuoteStability();
+      return { ready: false, message: "Waiting for Axiom token title before execution." };
+    }
+    if (token.marketCapSource !== AXIOM_TITLE_MARKET_CAP_SOURCE) {
+      resetAxiomExecutionQuoteStability();
+      return { ready: false, message: "Waiting for Axiom title market cap before execution." };
+    }
     const mismatchPct = Number(token.marketCapMismatchPct || 0);
     const rejectedMarketCap = Number(token.marketCapRejectedMarketCap || 0);
-    if (rejectedMarketCap > 0 && mismatchPct > AXIOM_MARKET_CAP_SOURCE_AGREEMENT_MAX_PCT) return false;
-    return true;
+    if (rejectedMarketCap > 0 && mismatchPct > AXIOM_MARKET_CAP_SOURCE_AGREEMENT_MAX_PCT) {
+      resetAxiomExecutionQuoteStability();
+      return {
+        ready: false,
+        message: "Waiting for Axiom title/header market caps to agree before execution.",
+        mismatchPct: round(mismatchPct, 4),
+      };
+    }
+
+    const stability = updateAxiomExecutionQuoteStability(token);
+    const chartQuote = getFreshAxiomChartMarketCapQuote();
+    if (chartQuote?.marketCap) {
+      const chartMismatchPct = calculateMarketCapMismatchPct(token.marketCap, chartQuote.marketCap);
+      if (chartMismatchPct <= AXIOM_EXECUTION_CHART_CONFIRM_MAX_MISMATCH_PCT) {
+        return {
+          ready: true,
+          reason: "chart-confirmed",
+          stableMs: stability.stableMs,
+          chartMarketCap: round(chartQuote.marketCap, 2),
+          chartMismatchPct: round(chartMismatchPct, 4),
+        };
+      }
+      return {
+        ready: false,
+        message: "Waiting for Axiom title market cap to match the live chart before execution.",
+        stableMs: stability.stableMs,
+        chartMarketCap: round(chartQuote.marketCap, 2),
+        chartMismatchPct: round(chartMismatchPct, 4),
+      };
+    }
+
+    if (stability.stableMs >= AXIOM_EXECUTION_QUOTE_STABLE_MS) {
+      return { ready: true, reason: "quote-stable", stableMs: stability.stableMs };
+    }
+
+    return {
+      ready: false,
+      message: "Waiting for Axiom market cap to hydrate before execution.",
+      stableMs: stability.stableMs,
+    };
+  }
+
+  function isAuthoritativeAxiomTokenPageQuote(token) {
+    return Boolean(getAxiomExecutionQuoteReadiness(token).ready);
+  }
+
+  async function waitForAxiomExecutionQuoteReady(token, timeoutMs = AXIOM_EXECUTION_QUOTE_STABLE_MS + 1_100) {
+    let latestToken = token;
+    let latestReadiness = getAxiomExecutionQuoteReadiness(latestToken);
+    if (latestReadiness.ready) return { ready: true, token: latestToken, quoteReadiness: latestReadiness };
+
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
+      updateActiveToken();
+      if (activeToken?.key && activeToken.key !== token?.key) {
+        return {
+          ready: false,
+          token: activeToken,
+          quoteReadiness: { ready: false, message: "Execution cancelled: token changed while waiting for Axiom market cap." },
+        };
+      }
+      latestToken = activeToken?.key === token?.key ? activeToken : latestToken;
+      latestReadiness = getAxiomExecutionQuoteReadiness(latestToken);
+      if (latestReadiness.ready) return { ready: true, token: latestToken, quoteReadiness: latestReadiness };
+    }
+
+    return { ready: false, token: latestToken, quoteReadiness: latestReadiness };
+  }
+
+  function updateAxiomExecutionQuoteStability(token) {
+    const now = Date.now();
+    const quoteKey = axiomExecutionQuoteKey(token);
+    const routeKey = `${window.location.pathname}${window.location.search}`;
+    if (
+      !lastAxiomExecutionQuoteStability ||
+      lastAxiomExecutionQuoteStability.quoteKey !== quoteKey ||
+      lastAxiomExecutionQuoteStability.routeKey !== routeKey ||
+      lastAxiomExecutionQuoteStability.tokenKey !== token.key
+    ) {
+      lastAxiomExecutionQuoteStability = {
+        quoteKey,
+        routeKey,
+        tokenKey: token.key,
+        firstSeenAtMs: now,
+      };
+    }
+    return {
+      ...lastAxiomExecutionQuoteStability,
+      stableMs: Math.max(0, now - Number(lastAxiomExecutionQuoteStability.firstSeenAtMs || now)),
+    };
+  }
+
+  function resetAxiomExecutionQuoteStability() {
+    lastAxiomExecutionQuoteStability = null;
+  }
+
+  function axiomExecutionQuoteKey(token) {
+    return [
+      token?.key || "",
+      round(token?.marketCap, 2) || "",
+      token?.marketCapSource || "",
+      token?.marketCapRawText || "",
+      token?.marketCapRejectedMarketCap || "",
+      round(token?.marketCapMismatchPct, 4) || "",
+    ].join("|");
   }
 
   function parseCurrencyMarketCap(value) {
@@ -1662,6 +1782,7 @@
       lastAxiomChartArtifactKey = null;
       lastAxiomExitTargetSyncKey = null;
       lastAxiomChartMarketCapQuote = null;
+      resetAxiomExecutionQuoteStability();
       injectAxiomChartBridgeScript();
       render();
       window.setTimeout(render, 500);
@@ -2725,7 +2846,8 @@
     if (!detectMarketCap()) {
       return { ready: false, message: `Waiting for Axiom market cap before auto-buying ${amount}.` };
     }
-    if (!isAuthoritativeAxiomTokenPageQuote(token)) return { ready: false, message: `Waiting for current Axiom market cap before auto-buying ${amount}.` };
+    const quoteReadiness = getAxiomExecutionQuoteReadiness(token);
+    if (!quoteReadiness.ready) return { ready: false, message: `Waiting for current Axiom market cap before auto-buying ${amount}.` };
     return { ready: true, message: "" };
   }
 
@@ -3427,7 +3549,7 @@
     if (!Number.isFinite(amountNative) || amountNative <= 0) return setStatus("Enter a valid buy amount.");
     tradeInFlight = true;
     try {
-      const token = tokenOverride || (updateActiveToken(), activeToken);
+      let token = tokenOverride || (updateActiveToken(), activeToken);
       if (tokenOverride) activeToken = tokenOverride;
       emitDiagnostic("buy-start", {
         amountNative,
@@ -3442,9 +3564,16 @@
         emitDiagnostic("buy-blocked-no-price", { amountNative, token: summarizeToken(token), marketCaps: buildMarketCapDiagnostics() });
         return setStatus(`Price unavailable. Wait for ${token.platformLabel || "the platform"} market cap to load.`);
       }
-      if (!isAuthoritativeAxiomTokenPageQuote(token)) {
-        emitDiagnostic("buy-blocked-no-current-axiom-quote", { amountNative, token: summarizeToken(token), marketCaps: buildMarketCapDiagnostics() });
-        return setStatus("Waiting for current Axiom market cap before buying.");
+      const quoteReady = await waitForAxiomExecutionQuoteReady(token);
+      token = quoteReady.token || token;
+      if (!quoteReady.ready) {
+        emitDiagnostic("buy-blocked-no-current-axiom-quote", {
+          amountNative,
+          token: summarizeToken(token),
+          quoteReadiness: quoteReady.quoteReadiness,
+          marketCaps: buildMarketCapDiagnostics(),
+        });
+        return setStatus(quoteReady.quoteReadiness?.message || "Waiting for current Axiom market cap before buying.");
       }
 
       const delayedToken = await waitForSimulatedExecution("buy", token, options);
@@ -3542,7 +3671,7 @@
     tradeInFlight = true;
     try {
     updateActiveToken();
-    const token = activeToken;
+    let token = activeToken;
     const position = token.key ? state.positions[token.key] : null;
     emitDiagnostic("sell-start", {
       percent,
@@ -3558,9 +3687,16 @@
       emitDiagnostic("sell-blocked-no-price", { percent, token: summarizeToken(token), marketCaps: buildMarketCapDiagnostics() });
       return setStatus(`Price unavailable. Wait for ${token.platformLabel || "the platform"} market cap to load.`);
     }
-    if (!isAuthoritativeAxiomTokenPageQuote(token)) {
-      emitDiagnostic("sell-blocked-no-current-axiom-quote", { percent, token: summarizeToken(token), marketCaps: buildMarketCapDiagnostics() });
-      return setStatus("Waiting for current Axiom market cap before selling.");
+    const quoteReady = await waitForAxiomExecutionQuoteReady(token);
+    token = quoteReady.token || token;
+    if (!quoteReady.ready) {
+      emitDiagnostic("sell-blocked-no-current-axiom-quote", {
+        percent,
+        token: summarizeToken(token),
+        quoteReadiness: quoteReady.quoteReadiness,
+        marketCaps: buildMarketCapDiagnostics(),
+      });
+      return setStatus(quoteReady.quoteReadiness?.message || "Waiting for current Axiom market cap before selling.");
     }
 
     const delayedToken = await waitForSimulatedExecution("sell", token);
@@ -3830,18 +3966,26 @@
       setStatus("Execution cancelled: token or price changed.");
       return null;
     }
-    if (!isAuthoritativeAxiomTokenPageQuote(delayedToken)) {
-      setStatus("Execution cancelled: current Axiom market cap unavailable.");
+    const quoteReady = await waitForAxiomExecutionQuoteReady(delayedToken, AXIOM_EXECUTION_QUOTE_STABLE_MS + 600);
+    const executionToken = quoteReady.token || delayedToken;
+    if (!quoteReady.ready) {
+      emitDiagnostic(`${side}-blocked-no-current-axiom-quote-after-delay`, {
+        originalToken: summarizeToken(token),
+        delayedToken: summarizeToken(executionToken),
+        quoteReadiness: quoteReady.quoteReadiness,
+        marketCaps: buildMarketCapDiagnostics(),
+      });
+      setStatus(quoteReady.quoteReadiness?.message || "Execution cancelled: current Axiom market cap unavailable.");
       return null;
     }
     const slippageLimit = Number(side === "buy" ? state.settings.buySlippagePct : state.settings.sellSlippagePct) || 0;
-    const priceMovePct = calculatePriceMovePct(token.unitPriceNative, delayedToken.unitPriceNative);
+    const priceMovePct = calculatePriceMovePct(token.unitPriceNative, executionToken.unitPriceNative);
     if (Math.abs(priceMovePct) > slippageLimit) {
       setStatus(`Execution cancelled: price moved ${Math.abs(priceMovePct).toFixed(2)}%.`);
       return null;
     }
     const totalExecutionDelayMs = Math.max(0, Math.round(Date.now() - delayStartedAtMs));
-    return { ...delayedToken, executionDelayMs: totalExecutionDelayMs, priceMovePct };
+    return { ...executionToken, executionDelayMs: totalExecutionDelayMs, priceMovePct };
   }
 
   async function resolveExecutionTokenAfterDelay(token, options = {}) {

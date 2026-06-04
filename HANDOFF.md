@@ -1,5 +1,33 @@
 # WilyTrader Handoff
 
+## 2026-06-04 Axiom Execution Quote Hydration Gate
+
+Session reviewed: `E:\Apps\WilyTrader Captures\20260603.2313 Trade`.
+
+Finding: the Screwworm Pulse buy did not fire before the token page loaded, but
+the newly loaded Axiom page briefly reported a stale title/header quote of
+`$1.99K` before updating to `$5.58K` and then `$6.62K` within about one second.
+The execution guard trusted the first title/header quote as long as those two
+sources agreed, so the buy was recorded at the stale `$1.99K` value.
+
+Resolution in extension `0.3.56`: Axiom buy/sell execution now waits for the
+title/header market cap to be execution-ready. A quote is ready only after a
+fresh chart quote confirms it within tolerance, or after the same title/header
+quote has remained stable for at least 900 ms. Manual buy/sell clicks wait
+briefly inside the original action so the first click is not lost; Pulse
+auto-buy continues to retry through its queued readiness loop.
+
+Validation:
+
+- `node --check extension\src\content.js`
+- `node --check extension\src\userscript-wrapper.user.js`
+- `git diff --check`
+
+Next manual test: reload the unpacked extension, confirm version `0.3.56`, use
+Pulse quick buy on a fast-moving Axiom token, and confirm session logs show
+`buy-blocked-no-current-axiom-quote` while the title/header quote is still
+hydrating instead of recording an early stale fill.
+
 ## 2026-06-03 Axiom Stop Trigger Source
 
 Session reviewed: `E:\Apps\WilyTrader Captures\20260603.1700 Trade`.
