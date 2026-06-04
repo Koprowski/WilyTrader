@@ -46,6 +46,18 @@ Canonical policy: `E:\Apps\mission-control\resources\repo-change-traceability.md
 
 ## Recent handoff notes
 
+- **Master workbook/export alignment (local branch):** Desktop trade logs now
+  sort trades by exit time, emit `entry_date` and `exit_date` instead of the
+  old `trade_date`/`entry_time_inferred` shape, and carry workbook formulas for
+  P&L %, time buckets, running counts, OHLC %, cooldown, cluster, and
+  `trade_num_in_session` columns so the session workbook lines up with the
+  current master workbook schema. The live WilyTrader-owned sync script at
+  `E:\Apps\WilyTrader Captures\Trade Sync Scripts\finalize-master-workbook.ps1`
+  was also updated to use `entry_date`, trim chart ranges to real non-error
+  data rows, and adjust X-axis label intervals for chart 1 and chart 2. A live
+  finalizer run against `E:\Apps\WilyTrader Captures\master trading log.xlsx`
+  completed with no warnings after backing up the workbook under
+  `Archive\master trading log backups`.
 - **Axiom token names for Snipalot trade logs (local branch):** WilyTrader now
   tries to read Axiom chart/header text such as `Save Snuggles/USD on Pump V1`
   before falling back to a shortened mint address, and

@@ -589,8 +589,9 @@ async function stopSession(): Promise<StopSessionResult> {
       })
     : { trades, promptPath: null, responsePath: null, warnings: [] };
   warnings.push(...enrichment.warnings);
-  const tradeLogMdPath = settings.generateTradeLogOnStop ? writeTradeLogMd(session, enrichment.trades) : '';
-  const tradeLogXlsxPath = settings.generateTradeLogOnStop ? await writeTradeLogXlsx(session, enrichment.trades, stoppedAtMs) : '';
+  const sortedTrades = sortTradesByExitDateTime(enrichment.trades);
+  const tradeLogMdPath = settings.generateTradeLogOnStop ? writeTradeLogMd(session, sortedTrades) : '';
+  const tradeLogXlsxPath = settings.generateTradeLogOnStop ? await writeTradeLogXlsx(session, sortedTrades, stoppedAtMs) : '';
   updateFinalizationProgress(session, 'complete', 'Session finalized.', 100);
   writeStatusFileForSession(session, 'complete', {
     durationMs: stoppedAtMs - session.sessionStartedAtMs,
@@ -2489,10 +2490,10 @@ const XLSX_COLUMNS = [
   'processed_at',
   'trade_id',
   'token_name',
-  'trade_date',
+  'entry_date',
+  'exit_date',
   'video_start_time',
   'entry_commentary_time',
-  'entry_time_inferred',
   'exit_commentary_time',
   'exit_time_actual',
   'time_in_trade_seconds',
@@ -2542,14 +2543,26 @@ const XLSX_COLUMNS = [
   'ohlc_mc_high',
   'ohlc_mc_low',
   'ohlc_mc_close',
-  'ohlc_pct_high',
-  'ohlc_pct_low',
-  'ohlc_pct_close',
   'ohlc_sol_open',
   'ohlc_sol_high',
   'ohlc_sol_low',
   'ohlc_sol_close',
+  'ohlc_pct_high',
+  'ohlc_pct_low',
+  'ohlc_pct_close',
   'ohlc_screenshot',
+  'is_new_cluster_start',
+  'prior_cluster_id',
+  'prior_cluster_last_exit_dt',
+  'this_trade_entry_dt',
+  'cooldown_minutes',
+  'prior_cluster_outcome',
+  'cooldown_bucket',
+  'cluster_group_id',
+  'cluster_total_pnl_sol',
+  'cluster_avg_pnl_pct',
+  'cluster_win',
+  'trade_num_in_session',
 ] as const;
 
 const EXIT_LEG_COLUMNS = [
@@ -2586,7 +2599,8 @@ const XLSX_STYLE_IDS: Record<XlsxStyleKey, number> = {
 
 const TRADE_LOG_COLUMN_STYLES: Partial<Record<typeof XLSX_COLUMNS[number], XlsxStyleKey>> = {
   trade_id: 'integer',
-  trade_date: 'date',
+  entry_date: 'date',
+  exit_date: 'date',
   time_in_trade_seconds: 'integer',
   entry_mc_actual: 'integer',
   target_exit_low_mc: 'integer',
@@ -2613,13 +2627,14 @@ const TRADE_LOG_COLUMN_STYLES: Partial<Record<typeof XLSX_COLUMNS[number], XlsxS
   ohlc_mc_high: 'integer',
   ohlc_mc_low: 'integer',
   ohlc_mc_close: 'integer',
-  ohlc_pct_high: 'percent1',
-  ohlc_pct_low: 'percent1',
-  ohlc_pct_close: 'percent1',
   ohlc_sol_open: 'sol3',
   ohlc_sol_high: 'sol3',
   ohlc_sol_low: 'sol3',
   ohlc_sol_close: 'sol3',
+  ohlc_pct_high: 'percent1',
+  ohlc_pct_low: 'percent1',
+  ohlc_pct_close: 'percent1',
+  cluster_avg_pnl_pct: 'percent1',
 };
 
 const EXIT_LEG_COLUMN_STYLES: Partial<Record<typeof EXIT_LEG_COLUMNS[number], XlsxStyleKey>> = {
@@ -2667,6 +2682,19 @@ async function writeTradeLogXlsx(session: ActiveTradeSession, trades: Normalized
   return xlsxPath;
 }
 
+function sortTradesByExitDateTime(trades: NormalizedTrade[]): NormalizedTrade[] {
+  return [...trades].sort((a, b) =>
+    sortableTimestampMs(a.timestampMs) - sortableTimestampMs(b.timestampMs) ||
+    sortableTimestampMs(a.entryTimestampMs) - sortableTimestampMs(b.entryTimestampMs) ||
+    String(a.id ?? '').localeCompare(String(b.id ?? ''), undefined, { numeric: true }) ||
+    String(a.tokenName ?? '').localeCompare(String(b.tokenName ?? ''), undefined, { numeric: true })
+  );
+}
+
+function sortableTimestampMs(value: number | null | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : Number.MAX_SAFE_INTEGER;
+}
+
 function buildTradeRow(
   session: ActiveTradeSession,
   trade: NormalizedTrade,
@@ -2675,8 +2703,7 @@ function buildTradeRow(
 ): Record<string, XlsxCell> {
   const entry = trade.entryTimestampMs ? new Date(trade.entryTimestampMs) : null;
   const exit = trade.timestampMs ? new Date(trade.timestampMs) : null;
-  const hour = entry?.getHours();
-  const tradeDate = exit ?? entry;
+  const rowNumber = index + 1;
   const timeInTradeSeconds =
     trade.timeInTradeSeconds ??
     (entry && exit ? Math.max(0, Math.round((exit.getTime() - entry.getTime()) / 1000)) : null);
@@ -2690,10 +2717,10 @@ function buildTradeRow(
     processed_at: new Date().toISOString(),
     trade_id: xlsxInteger(index),
     token_name: trade.tokenName,
-    trade_date: xlsxDate(tradeDate),
+    entry_date: xlsxDate(entry),
+    exit_date: xlsxDate(exit),
     video_start_time: formatTradeTime(session.sessionStartedAtMs),
     entry_commentary_time: formatSessionOffsetTime(session, trade.entryCommentaryOffsetMs ?? null),
-    entry_time_inferred: formatTradeTime(trade.entryTimestampMs),
     exit_commentary_time: formatSessionOffsetTime(session, trade.exitCommentaryOffsetMs ?? null),
     exit_time_actual: formatTradeTime(trade.timestampMs),
     time_in_trade_seconds: xlsxInteger(timeInTradeSeconds),
@@ -2706,7 +2733,7 @@ function buildTradeRow(
     sol_invested: xlsxDecimal(trade.solInvested, 3),
     sol_received: xlsxDecimal(normalizedSolReceived(trade), 3),
     pnl_sol: xlsxDecimal(normalizedPnlSol(trade), 3),
-    pnl_percentage: xlsxPercent(normalizedPnlPercentage(trade)),
+    pnl_percentage: xlsxFormula(`IFERROR(V${rowNumber}/T${rowNumber},"")`),
     rationale: trade.rationale ?? '',
     pre_transcript_excerpt: trade.preTranscriptExcerpt ?? '',
     post_transcript_excerpt: trade.postTranscriptExcerpt ?? '',
@@ -2714,10 +2741,10 @@ function buildTradeRow(
     notes: buildTradeNotes(trade, entry, exit),
     needs_review: formatBoolean(trade.needsReview),
     mockape_trade_id: trade.id,
-    Hour: xlsxInteger(hour ?? null),
-    Weekday: entry ? entry.toLocaleDateString('en-US', { weekday: 'long' }) : '',
-    WeekdayNum: xlsxInteger(entry ? entry.getDay() : null),
-    TimeBucket: formatTradeTimeBucket(entry),
+    Hour: xlsxFormula(`IFERROR(HOUR(IFERROR(IFERROR(IFERROR(TIMEVALUE(J${rowNumber}),TIMEVALUE(I${rowNumber})),TIMEVALUE(L${rowNumber})),TIMEVALUE(H${rowNumber}))),"")`),
+    Weekday: xlsxFormula(`IFERROR(TEXT(IF(ISNUMBER(G${rowNumber}),G${rowNumber},DATEVALUE(G${rowNumber})),"ddd"),"")`),
+    WeekdayNum: xlsxFormula(`IFERROR(WEEKDAY(IF(ISNUMBER(G${rowNumber}),G${rowNumber},DATEVALUE(G${rowNumber})),2),"")`),
+    TimeBucket: xlsxFormula(timeBucketFormula(rowNumber)),
     meta_cluster_id: trade.metaClusterId ?? 'unknown',
     meta_name: trade.metaName ?? 'unknown',
     N_score: xlsxInteger(trade.nScore ?? null),
@@ -2735,21 +2762,21 @@ function buildTradeRow(
     trade_type: trade.tradeType ?? '',
     counts_toward_50: xlsxBooleanCount(trade.countsToward50),
     hard_reset: xlsxBooleanCount(trade.hardReset),
-    running_count: xlsxInteger(trade.runningCount ?? null),
-    non_nics_pnl_pct: xlsxPercent(trade.nonNicsPnlPct ?? null),
-    cluster_pnl_pct: xlsxPercent(trade.clusterPnlPct ?? null),
+    running_count: xlsxFormula(`IF(AY${rowNumber}=TRUE,0,N(AZ${rowNumber - 1})+AX${rowNumber})`),
+    non_nics_pnl_pct: xlsxFormula(`IF(AW${rowNumber}="Non-NICS",W${rowNumber},"")`),
+    cluster_pnl_pct: xlsxFormula(`IFERROR(SUMIF(AI:AI,AI${rowNumber},V:V)/SUMIF(AI:AI,AI${rowNumber},T:T),0)`),
     llm_grade_notes: trade.llmGradeNotes ?? '',
     ohlc_mc_open: xlsxInteger(trade.ohlcMc?.open ?? null),
     ohlc_mc_high: xlsxInteger(trade.ohlcMc?.high ?? null),
     ohlc_mc_low: xlsxInteger(trade.ohlcMc?.low ?? null),
     ohlc_mc_close: xlsxInteger(trade.ohlcMc?.close ?? null),
-    ohlc_pct_high: xlsxPercent(trade.ohlcPct?.high ?? null),
-    ohlc_pct_low: xlsxPercent(trade.ohlcPct?.low ?? null),
-    ohlc_pct_close: xlsxPercent(trade.ohlcPct?.close ?? null),
     ohlc_sol_open: xlsxDecimal(trade.ohlcSol?.open ?? null, 3),
     ohlc_sol_high: xlsxDecimal(trade.ohlcSol?.high ?? null, 3),
     ohlc_sol_low: xlsxDecimal(trade.ohlcSol?.low ?? null, 3),
     ohlc_sol_close: xlsxDecimal(trade.ohlcSol?.close ?? null, 3),
+    ohlc_pct_high: xlsxFormula(`IFERROR(BE${rowNumber}/BD${rowNumber}-1,"")`),
+    ohlc_pct_low: xlsxFormula(`IFERROR(BF${rowNumber}/BD${rowNumber}-1,"")`),
+    ohlc_pct_close: xlsxFormula(`IFERROR(BG${rowNumber}/BD${rowNumber}-1,"")`),
     ohlc_screenshot: ohlcScreenshot && ohlcScreenshotName
       ? {
           text: ohlcScreenshotName,
@@ -2757,6 +2784,18 @@ function buildTradeRow(
           tooltip: `Open chart screenshot: ${ohlcScreenshot}`,
         }
       : '',
+    is_new_cluster_start: xlsxFormula(`IF(AI${rowNumber}<>AI${rowNumber - 1},1,0)`),
+    prior_cluster_id: xlsxFormula(`IF(BP${rowNumber}=1,IF(ROW()=2,"",AI${rowNumber - 1}),"")`),
+    prior_cluster_last_exit_dt: xlsxFormula(`IF(AND(BP${rowNumber}=1,ROW()>2),G${rowNumber - 1}+IFERROR(TIMEVALUE(L${rowNumber - 1}),0),"")`),
+    this_trade_entry_dt: xlsxFormula(`IF(BP${rowNumber}=1,G${rowNumber}+IFERROR(TIMEVALUE(J${rowNumber}),IFERROR(TIMEVALUE(L${rowNumber})-M${rowNumber}/86400,0)),"")`),
+    cooldown_minutes: xlsxFormula(`IF(AND(BP${rowNumber}=1,ISNUMBER(BR${rowNumber}),ISNUMBER(BS${rowNumber})),(BS${rowNumber}-BR${rowNumber})*1440,"")`),
+    prior_cluster_outcome: xlsxFormula(`IF(BQ${rowNumber}="","",IF(SUMIF(AI:AI,BQ${rowNumber},V:V)>0,"Win","Loss"))`),
+    cooldown_bucket: xlsxFormula(`IF(NOT(ISNUMBER(BT${rowNumber})),"",IF(BT${rowNumber}<5,"0"&UNICHAR(8211)&"5 min",IF(BT${rowNumber}<10,"5"&UNICHAR(8211)&"10 min",IF(BT${rowNumber}<15,"10"&UNICHAR(8211)&"15 min",IF(BT${rowNumber}<30,"15"&UNICHAR(8211)&"30 min","30 min+")))))`),
+    cluster_group_id: xlsxFormula(`SUM($BP$2:BP${rowNumber})`),
+    cluster_total_pnl_sol: xlsxFormula(`IF(AND($BP${rowNumber}=1,NOT(ISBLANK($BV${rowNumber}))),SUMIFS(V:V,BW:BW,$BW${rowNumber}),"")`),
+    cluster_avg_pnl_pct: xlsxFormula(`IF(AND($BP${rowNumber}=1,NOT(ISBLANK($BV${rowNumber}))),IFERROR(AVERAGEIFS(W:W,BW:BW,$BW${rowNumber}),""),"")`),
+    cluster_win: xlsxFormula(`IF(AND($BP${rowNumber}=1,NOT(ISBLANK($BV${rowNumber}))),IF($BX${rowNumber}>0,1,0),"")`),
+    trade_num_in_session: xlsxFormula(`COUNTIFS($A$2:$A${rowNumber},$A${rowNumber})`),
   };
 }
 
@@ -2849,7 +2888,8 @@ function xmlWorksheet(
           const styleAttr = cell.styleId ? ` s="${cell.styleId}"` : '';
           if (cell.formula) {
             const cachedValue = cell.text ? `<v>${escapeXml(cell.text)}</v>` : '';
-            return `<c r="${ref}"${styleAttr} t="str"><f>${escapeXml(cell.formula)}</f>${cachedValue}</c>`;
+            const typeAttr = cell.text ? ' t="str"' : '';
+            return `<c r="${ref}"${styleAttr}${typeAttr}><f>${escapeXml(cell.formula)}</f>${cachedValue}</c>`;
           }
           if (cell.number !== undefined) return `<c r="${ref}"${styleAttr}><v>${xlsxNumberValue(cell.number)}</v></c>`;
           return `<c r="${ref}"${styleAttr} t="inlineStr"><is><t>${escapeXml(cell.text)}</t></is></c>`;
@@ -2893,7 +2933,7 @@ function xlsxNumberValue(value: number): string {
 
 function xlsxHeaderLabel(column: string): string {
   if (column === 'mockape_trade_id') return 'source_trade_id';
-  return column === 'entry_time_inferred' ? 'entry_time_actual' : column;
+  return column;
 }
 
 function xmlContentTypes(): string {
@@ -4834,23 +4874,6 @@ function formatSessionOffsetTime(session: ActiveTradeSession, offsetMs: number |
     : formatTradeTime(session.sessionStartedAtMs + offsetMs);
 }
 
-function formatTradeTimeBucket(entry: Date | null): string {
-  if (!entry) return '';
-  const hour = entry.getHours();
-  const day = entry.getDay();
-  const isWeekend = day === 0 || day === 6;
-  if (isWeekend) {
-    if (hour < 2 || hour >= 18) return '6 PM - 2 AM';
-    if (hour < 6) return '2 AM - 6 AM';
-    if (hour < 12) return '6 AM - 12 PM';
-    return '12 PM - 6 PM';
-  }
-  if (hour < 6) return '12 AM - 6 AM';
-  if (hour < 12) return '6 AM - 12 PM';
-  if (hour < 18) return '12 PM - 6 PM';
-  return '6 PM - 12 AM';
-}
-
 function formatDollars(value: number | null): string {
   return value === null ? 'unknown' : `$${Math.round(value).toLocaleString('en-US')}`;
 }
@@ -4878,6 +4901,10 @@ function xlsxPercent(value: number | null | undefined): number | '' {
   return xlsxDecimal(Number(value) / 100, 3);
 }
 
+function xlsxFormula(formula: string, text = ''): XlsxCell {
+  return { text, formula };
+}
+
 function xlsxDate(value: Date | null | undefined): number | '' {
   if (!value || Number.isNaN(value.getTime())) return '';
   const localDateUtc = Date.UTC(value.getFullYear(), value.getMonth(), value.getDate());
@@ -4899,9 +4926,6 @@ function buildTradeNotes(trade: NormalizedTrade, entry: Date | null, exit: Date 
   const notes: string[] = [];
   if (trade.tokenAddress) notes.push(`tokenAddress=${trade.tokenAddress}`);
   if (trade.notes) notes.push(trade.notes);
-  if (entry && exit && formatTradeDate(entry) !== formatTradeDate(exit)) {
-    notes.push(`overnight_entry_date=${formatTradeDate(entry)}`);
-  }
   return notes.join('; ');
 }
 
@@ -4910,12 +4934,7 @@ function markdownPath(value: string): string {
 }
 
 function filePathToHyperlinkTarget(filePath: string): string {
-  const normalized = path.resolve(filePath).replace(/\\/g, '/');
-  const encoded = normalized
-    .split('/')
-    .map((segment, index) => (index === 0 && /^[A-Za-z]:$/.test(segment) ? segment : encodeURIComponent(segment)))
-    .join('/');
-  return `file:///${encoded}`;
+  return path.resolve(filePath);
 }
 
 function xlsxHyperlinkFormula(target: string, label: string): string {
@@ -4924,6 +4943,26 @@ function xlsxHyperlinkFormula(target: string, label: string): string {
 
 function xlsxFormulaString(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;
+}
+
+function timeBucketFormula(rowNumber: number): string {
+  const hour = `AE${rowNumber}`;
+  const weekday = `AG${rowNumber}`;
+  return [
+    `IF(${hour}="","",`,
+    `IF(AND(${weekday}<=4,${hour}<18),"WD 6am-6pm",`,
+    `IF(AND(${weekday}=5,${hour}<18),"WD 6am-6pm",`,
+    `IF(AND(${weekday}<=4,OR(${hour}=18,${hour}=19)),"WD 6pm-8pm",`,
+    `IF(AND(${weekday}<=4,${hour}>=20,${hour}<=23),"WD 8pm-12am",`,
+    `IF(AND(${weekday}<=4,OR(${hour}=0,${hour}=1)),"WD 6am-6pm",`,
+    `IF(AND(OR(${weekday}=6,${weekday}=7),${hour}>=2,${hour}<=11),"WE 6am-12pm",`,
+    `IF(AND(OR(${weekday}=6,${weekday}=7),${hour}>=12,${hour}<=17),"WE 12pm-6pm",`,
+    `IF(AND(OR(${weekday}=5,${weekday}=6,${weekday}=7),OR(${hour}=18,${hour}=19)),"WE 6pm-8pm",`,
+    `IF(AND(${weekday}=5,${hour}>=20,${hour}<=23),"WE 8pm-2am",`,
+    `IF(AND(${weekday}=6,OR(${hour}>=20,${hour}<=1)),"WE 8pm-2am",`,
+    `IF(AND(${weekday}=7,${hour}>=20,${hour}<=23),"WE 8pm-2am",`,
+    `IF(AND(${weekday}=7,OR(${hour}=0,${hour}=1)),"WE 8pm-2am","")))))))))))))`,
+  ].join('');
 }
 
 function sanitizeFilePart(value: unknown): string {
