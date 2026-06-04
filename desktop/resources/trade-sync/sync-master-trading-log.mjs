@@ -714,10 +714,11 @@ async function main() {
     supplementalResults.push(await importWorkbookRows(source, { allRows, seen }));
   }
 
+  const metaClusterAssignmentsRepaired = repairMetaClusterAssignments(allRows);
   const rowsToAppend = sortRowsForAppend(allRows.slice(existingRowCount));
   const rowsBackfilled = [...results, ...backfillResults, ...supplementalResults]
     .reduce((sum, result) => sum + (result.rowsBackfilled ?? 0), 0);
-  const forceRewrite = rowsBackfilled > 0 || rowsRemovedBeforeImport > 0;
+  const forceRewrite = rowsBackfilled > 0 || rowsRemovedBeforeImport > 0 || metaClusterAssignmentsRepaired;
   const rowsForSave = forceRewrite
     ? [...allRows.slice(0, existingRowCount), ...rowsToAppend]
     : allRows;
@@ -741,6 +742,7 @@ async function main() {
     skippedArchivedFolders: archivedReadiness.skipped.map((entry) => entry.sessionName),
     skippedArchivedFolderDetails: archivedReadiness.skipped,
     rowsRemovedBeforeImport,
+    metaClusterAssignmentsRepaired,
     rowsInMaster: allRows.length,
     rowsAppended: rowsToAppend.length,
     rowsBackfilled,
@@ -1466,20 +1468,7 @@ function reconcileNicsFields(rawRows, existingRows, sessionName) {
 
   for (const row of rows) {
     if (isBlank(row.source_session)) row.source_session = sessionName;
-    if (isBlank(row.meta_name)) row.meta_name = row.token_name ?? "";
-
-    const metaKey = metaKeyFor(row);
-    if (metaKey) {
-      let clusterId = firstNonBlank(row.meta_cluster_id, state.clusterByMeta.get(metaKey));
-      if (!clusterId) {
-        const dateCode = clusterDateCode(row, sessionName);
-        const next = (state.nextClusterByDate.get(dateCode) ?? 1);
-        clusterId = `M.${dateCode}.${next}`;
-        state.nextClusterByDate.set(dateCode, next + 1);
-      }
-      row.meta_cluster_id = clusterId;
-      state.clusterByMeta.set(metaKey, clusterId);
-    }
+    assignMetaClusterId(row, state, sessionName);
 
     fillNicsScore(row);
     fillSetupFlags(row);
@@ -1509,34 +1498,62 @@ function backfillMissingNicsFields(allRows, key, sourceRow) {
 }
 
 function buildNicsReconciliationState(existingRows) {
-  const clusterByMeta = new Map();
+  const clusterByKnownMeta = new Map();
   const nextClusterByDate = new Map();
   const history = [];
+  const state = { clusterByKnownMeta, nextClusterByDate, history };
 
   for (const row of existingRows) {
-    const clusterId = String(row.meta_cluster_id ?? "").trim();
-    const metaKey = metaKeyFor(row);
-    if (clusterId && metaKey && !clusterByMeta.has(metaKey)) clusterByMeta.set(metaKey, clusterId);
-    const parsed = parseClusterId(clusterId);
-    if (parsed) {
-      const next = Math.max(nextClusterByDate.get(parsed.dateCode) ?? 1, parsed.index + 1);
-      nextClusterByDate.set(parsed.dateCode, next);
-    }
+    assignMetaClusterId({ ...row }, state, row.source_session);
     history.push(row);
   }
 
-  return { clusterByMeta, nextClusterByDate, history };
+  return state;
 }
 
-function parseClusterId(value) {
-  const match = String(value ?? "").trim().match(/^M\.(\d{6})\.(\d+)$/i);
-  if (!match) return null;
-  return { dateCode: match[1], index: Number(match[2]) };
+function repairMetaClusterAssignments(rows) {
+  const state = buildNicsReconciliationState([]);
+  let changed = false;
+  for (const row of rows) {
+    changed = assignMetaClusterId(row, state, row.source_session) || changed;
+  }
+  return changed;
 }
 
-function metaKeyFor(row) {
-  const raw = firstNonBlank(row.meta_name, row.token_name);
-  return String(raw ?? "")
+function assignMetaClusterId(row, state, sessionName) {
+  let changed = false;
+  const normalizedMetaName = normalizeMetaName(row.meta_name);
+  if (String(row.meta_name ?? "") !== normalizedMetaName) {
+    row.meta_name = normalizedMetaName;
+    changed = true;
+  }
+
+  const metaKey = knownMetaKeyForName(normalizedMetaName);
+  let clusterId = metaKey ? state.clusterByKnownMeta.get(metaKey) : "";
+  if (!clusterId) {
+    const dateCode = clusterDateCode(row, sessionName);
+    const next = state.nextClusterByDate.get(dateCode) ?? 1;
+    clusterId = `WT.${dateCode}.${next}`;
+    state.nextClusterByDate.set(dateCode, next + 1);
+    if (metaKey) state.clusterByKnownMeta.set(metaKey, clusterId);
+  }
+
+  if (String(row.meta_cluster_id ?? "").trim() !== clusterId) {
+    row.meta_cluster_id = clusterId;
+    changed = true;
+  }
+  return changed;
+}
+
+function normalizeMetaName(value) {
+  const text = String(value ?? "").trim();
+  if (!text || /^(none|null|n\/?a|unknown|unclear|missing)$/i.test(text)) return "unknown";
+  return text;
+}
+
+function knownMetaKeyForName(metaName) {
+  if (metaName === "unknown") return "";
+  return String(metaName ?? "")
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")

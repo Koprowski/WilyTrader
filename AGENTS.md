@@ -53,6 +53,10 @@ Canonical policy: `E:\Apps\mission-control\resources\repo-change-traceability.md
   `run-trade-sync.ps1` with `-CapturesRoot` and `-MasterPath` only, so it does
   not request archive backfill, then opens the configured master workbook when
   the sync succeeds.
+- **Master sync meta clusters (local branch):** Desktop export and bundled
+  master sync normalize missing meta names to `unknown` and assign
+  `WT.yymmdd.n` cluster IDs. Known repeat metas reuse their first assigned
+  cluster ID, while `unknown` rows always allocate the next daily cluster ID.
 - **Master workbook/export alignment (local branch):** Desktop trade logs now
   sort trades by exit time, emit `entry_date` and `exit_date` instead of the
   old `trade_date`/`entry_time_inferred` shape, and carry workbook formulas for

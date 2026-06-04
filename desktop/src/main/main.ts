@@ -1993,17 +1993,21 @@ function assignSessionMetaClusterIds(trades: NormalizedTrade[], session: ActiveT
   const stamp = formatClusterDateStamp(new Date(session.sessionStartedAtMs));
   let next = 1;
   return trades.map((trade) => {
-    const metaName = trade.metaName?.trim();
-    if (!metaName) return trade;
-    const key = metaName.toLowerCase();
-    let clusterId = clusterIds.get(key);
+    const metaName = normalizeTradeMetaName(trade.metaName);
+    const key = metaName === 'unknown' ? '' : metaName.toLowerCase();
+    let clusterId = key ? clusterIds.get(key) : undefined;
     if (!clusterId) {
       clusterId = `WT.${stamp}.${next}`;
-      clusterIds.set(key, clusterId);
+      if (key) clusterIds.set(key, clusterId);
       next += 1;
     }
-    return { ...trade, metaClusterId: clusterId };
+    return { ...trade, metaName, metaClusterId: clusterId };
   });
+}
+
+function normalizeTradeMetaName(value: string | null | undefined): string {
+  const text = value?.trim() ?? '';
+  return text && !/^(none|null|n\/?a|unknown|unclear|missing)$/i.test(text) ? text : 'unknown';
 }
 
 function reconcileTradeReviewFields(session: ActiveTradeSession, trades: NormalizedTrade[]): NormalizedTrade[] {
@@ -2748,7 +2752,7 @@ function buildTradeRow(
     WeekdayNum: xlsxFormula(`IFERROR(WEEKDAY(IF(ISNUMBER(G${rowNumber}),G${rowNumber},DATEVALUE(G${rowNumber})),2),"")`),
     TimeBucket: xlsxFormula(timeBucketFormula(rowNumber)),
     meta_cluster_id: trade.metaClusterId ?? 'unknown',
-    meta_name: trade.metaName ?? 'unknown',
+    meta_name: normalizeTradeMetaName(trade.metaName),
     N_score: xlsxInteger(trade.nScore ?? null),
     N_why: trade.nWhy ?? '',
     I_score: xlsxInteger(trade.iScore ?? null),
