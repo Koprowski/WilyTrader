@@ -26,3 +26,21 @@ Validation:
 Next manual test: reload the unpacked extension, confirm version `0.3.53`, open
 an Axiom token page, arm a 100% stop and target, and confirm session logs show
 `axiomChartLatest` plus `target-trigger-quote` when a target is touched.
+
+## 2026-06-04 Trade Log Workbook Formatting
+
+Desktop `0.1.8` fixes two workbook export gaps:
+
+- `trade_date` is now written as an Excel numeric date serial with date number
+  formatting instead of text.
+- `ohlc_source` hyperlink matching now resolves the exit PNG by execution id
+  first, then falls back to token name/address matching. The prior fallback
+  preferred token address, but screenshot filenames use token name plus
+  execution id, so rows were exported without hyperlink relationships even when
+  `Inputs\trade-screenshots\*.png` existed.
+
+Validation:
+
+- `npm --prefix E:\Apps\wilytrader\desktop run typecheck`
+- `npm --prefix E:\Apps\wilytrader\desktop run build`
+- `git diff --check`

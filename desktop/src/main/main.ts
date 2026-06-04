@@ -137,7 +137,7 @@ interface TradeExecutionPoint {
   screenshotPath?: string | null;
 }
 
-type XlsxStyleKey = 'integer' | 'sol3' | 'percent1' | 'nativePrice';
+type XlsxStyleKey = 'integer' | 'sol3' | 'percent1' | 'nativePrice' | 'date';
 
 type XlsxCell = string | number | {
   text: string;
@@ -2541,10 +2541,12 @@ const XLSX_STYLE_IDS: Record<XlsxStyleKey, number> = {
   sol3: 2,
   percent1: 3,
   nativePrice: 4,
+  date: 5,
 };
 
 const TRADE_LOG_COLUMN_STYLES: Partial<Record<typeof XLSX_COLUMNS[number], XlsxStyleKey>> = {
   trade_id: 'integer',
+  trade_date: 'date',
   time_in_trade_seconds: 'integer',
   entry_mc_actual: 'integer',
   target_exit_low_mc: 'integer',
@@ -2648,7 +2650,7 @@ function buildTradeRow(
     processed_at: new Date().toISOString(),
     trade_id: xlsxInteger(index),
     token_name: trade.tokenName,
-    trade_date: formatTradeDate(tradeDate),
+    trade_date: xlsxDate(tradeDate),
     video_start_time: formatTradeTime(session.sessionStartedAtMs),
     entry_commentary_time: formatSessionOffsetTime(session, trade.entryCommentaryOffsetMs ?? null),
     entry_time_inferred: formatTradeTime(trade.entryTimestampMs),
@@ -2883,12 +2885,13 @@ function xmlStyles(): string {
     '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>',
     '<borders count="1"><border/></borders>',
     '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>',
-    '<cellXfs count="5">',
+    '<cellXfs count="6">',
     '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>',
     '<xf numFmtId="1" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>',
     '<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>',
     '<xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>',
     '<xf numFmtId="166" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>',
+    '<xf numFmtId="14" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>',
     '</cellXfs>',
     '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>',
     '</styleSheet>',
@@ -3032,20 +3035,40 @@ function selectTradeOhlcScreenshot(session: ActiveTradeSession, trade: Normalize
   const fromExecutions = (trade.executions ?? [])
     .map((execution) => execution.screenshotPath)
     .filter((screenshotPath): screenshotPath is string => Boolean(screenshotPath && fs.existsSync(screenshotPath)));
-  const candidates = fromExecutions.length > 0 ? fromExecutions : findTradeScreenshots(session, trade);
+  const fromExecutionIds = fromExecutions.length > 0 ? [] : findTradeScreenshotsByExecutionId(session, trade);
+  const candidates = fromExecutions.length > 0
+    ? fromExecutions
+    : fromExecutionIds.length > 0
+      ? fromExecutionIds
+      : findTradeScreenshots(session, trade);
   if (candidates.length === 0) return null;
   const sorted = [...new Set(candidates)].sort((a, b) => a.localeCompare(b));
   const sellScreenshot = [...sorted].reverse().find((screenshot) => /(?:^|-|\\|\/)sell(?:-|\.|\\|\/)/i.test(screenshot));
   return sellScreenshot ?? sorted[sorted.length - 1] ?? null;
 }
 
-function findTradeScreenshots(session: ActiveTradeSession, trade: NormalizedTrade): string[] {
+function findTradeScreenshotsByExecutionId(session: ActiveTradeSession, trade: NormalizedTrade): string[] {
   if (!fs.existsSync(session.screenshotDir)) return [];
-  const token = (trade.tokenAddress || trade.tokenName || '').toLowerCase();
+  const executionIds = (trade.executions ?? [])
+    .map((execution) => execution.id?.toLowerCase())
+    .filter((id): id is string => Boolean(id));
+  if (executionIds.length === 0) return [];
   return fs
     .readdirSync(session.screenshotDir)
     .filter((name) => name.toLowerCase().endsWith('.png'))
-    .filter((name) => !token || name.toLowerCase().includes(sanitizeFilePart(token).toLowerCase().slice(0, 24)))
+    .filter((name) => executionIds.some((id) => name.toLowerCase().includes(id)))
+    .map((name) => path.join(session.screenshotDir, name));
+}
+
+function findTradeScreenshots(session: ActiveTradeSession, trade: NormalizedTrade): string[] {
+  if (!fs.existsSync(session.screenshotDir)) return [];
+  const tokenCandidates = [trade.tokenName, trade.tokenAddress]
+    .map((value) => sanitizeFilePart(value).toLowerCase())
+    .filter((value) => value.length >= 2);
+  return fs
+    .readdirSync(session.screenshotDir)
+    .filter((name) => name.toLowerCase().endsWith('.png'))
+    .filter((name) => tokenCandidates.length === 0 || tokenCandidates.some((token) => name.toLowerCase().includes(token.slice(0, 24))))
     .map((name) => path.join(session.screenshotDir, name));
 }
 
@@ -4809,6 +4832,13 @@ function xlsxDecimal(value: number | null | undefined, decimals: number): number
 function xlsxPercent(value: number | null | undefined): number | '' {
   if (!Number.isFinite(Number(value))) return '';
   return xlsxDecimal(Number(value) / 100, 3);
+}
+
+function xlsxDate(value: Date | null | undefined): number | '' {
+  if (!value || Number.isNaN(value.getTime())) return '';
+  const localDateUtc = Date.UTC(value.getFullYear(), value.getMonth(), value.getDate());
+  const excelEpochUtc = Date.UTC(1899, 11, 30);
+  return Math.round((localDateUtc - excelEpochUtc) / 86_400_000);
 }
 
 function xlsxBooleanCount(value: boolean | null | undefined): number | '' {
