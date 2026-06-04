@@ -1,4 +1,9 @@
 const UPDATE_TAGS_URL = "https://api.github.com/repos/Koprowski/WilyTrader/tags?per_page=10";
+const AXIOM_QUOTE_MAX_AGE_MS = 5_000;
+const AXIOM_QUOTE_REGISTRY_MAX_ENTRIES = 200;
+const AXIOM_ADDRESS_PATTERN = /[1-9A-HJ-NP-Za-km-z]{32,44}/;
+
+const quoteRegistry = new Map();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message?.type) return false;
@@ -31,8 +36,189 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "WILYTRADER_QUOTE_HEARTBEAT") {
+    sendResponse(storeContentQuoteHeartbeat(message, sender));
+    return false;
+  }
+
+  if (message.type === "WILYTRADER_GET_TOKEN_QUOTE") {
+    sendResponse(getTokenQuote(message));
+    return false;
+  }
+
   return false;
 });
+
+if (chrome?.tabs?.onUpdated) {
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (!changeInfo?.title && !changeInfo?.url) return;
+    storeTabTitleQuote(tab || { id: tabId });
+  });
+}
+
+if (chrome?.tabs?.query) {
+  chrome.runtime.onStartup?.addListener?.(() => refreshAxiomTabQuotes());
+  chrome.runtime.onInstalled?.addListener?.(() => refreshAxiomTabQuotes());
+  refreshAxiomTabQuotes();
+}
+
+function refreshAxiomTabQuotes() {
+  try {
+    chrome.tabs.query({ url: "https://axiom.trade/meme/*" }, (tabs) => {
+      if (chrome.runtime.lastError) return;
+      (tabs || []).forEach((tab) => storeTabTitleQuote(tab));
+    });
+  } catch {
+    // Best-effort only; content heartbeats will fill the registry too.
+  }
+}
+
+function storeContentQuoteHeartbeat(message, sender) {
+  const quote = normalizeQuote({
+    ...(message.quote || {}),
+    tabId: sender?.tab?.id ?? message.quote?.tabId ?? null,
+    windowId: sender?.tab?.windowId ?? message.quote?.windowId ?? null,
+    url: sender?.tab?.url || message.quote?.url || null,
+    title: sender?.tab?.title || message.quote?.title || null,
+    source: message.quote?.source || "content-heartbeat",
+  });
+  if (!quote) return { ok: false, error: "Invalid quote heartbeat." };
+  storeQuote(quote);
+  return { ok: true, quote };
+}
+
+function storeTabTitleQuote(tab) {
+  const quote = quoteFromTab(tab);
+  if (!quote) return null;
+  storeQuote(quote);
+  return quote;
+}
+
+function quoteFromTab(tab) {
+  const url = parseUrl(tab?.url);
+  if (!url || url.hostname !== "axiom.trade" || !normalizePathname(url.pathname).startsWith("/meme/")) return null;
+  const address = extractAxiomAddress(url);
+  if (!address) return null;
+  const marketCap = parseAxiomTitleMarketCap(tab?.title);
+  if (!marketCap) return null;
+  return normalizeQuote({
+    platform: "axiom",
+    chain: "SOL",
+    tokenAddress: address,
+    tokenKey: `axiom:SOL:${address}`,
+    tokenName: parseAxiomTitleTokenName(tab?.title),
+    marketCap,
+    source: "axiom-tab-title",
+    rawText: tab?.title || null,
+    url: tab?.url || null,
+    title: tab?.title || null,
+    tabId: tab?.id ?? null,
+    windowId: tab?.windowId ?? null,
+    readAtMs: Date.now(),
+  });
+}
+
+function getTokenQuote(message) {
+  pruneQuoteRegistry();
+  const tokenKey = normalizeString(message.tokenKey);
+  const tokenAddress = normalizeString(message.tokenAddress);
+  const candidates = Array.from(quoteRegistry.values())
+    .filter((quote) => {
+      if (tokenKey && quote.tokenKey === tokenKey) return true;
+      if (tokenAddress && quote.tokenAddress === tokenAddress) return true;
+      return false;
+    })
+    .sort((a, b) => Number(b.readAtMs || 0) - Number(a.readAtMs || 0));
+  const maxAgeMs = Number(message.maxAgeMs || AXIOM_QUOTE_MAX_AGE_MS);
+  const quote = candidates.find((item) => Date.now() - Number(item.readAtMs || 0) <= maxAgeMs) || null;
+  return { ok: true, quote };
+}
+
+function storeQuote(quote) {
+  quoteRegistry.set(quote.registryKey, quote);
+  pruneQuoteRegistry();
+}
+
+function pruneQuoteRegistry() {
+  const now = Date.now();
+  for (const [key, quote] of quoteRegistry.entries()) {
+    if (now - Number(quote.readAtMs || 0) > AXIOM_QUOTE_MAX_AGE_MS * 6) quoteRegistry.delete(key);
+  }
+  if (quoteRegistry.size <= AXIOM_QUOTE_REGISTRY_MAX_ENTRIES) return;
+  Array.from(quoteRegistry.entries())
+    .sort((a, b) => Number(a[1].readAtMs || 0) - Number(b[1].readAtMs || 0))
+    .slice(0, quoteRegistry.size - AXIOM_QUOTE_REGISTRY_MAX_ENTRIES)
+    .forEach(([key]) => quoteRegistry.delete(key));
+}
+
+function normalizeQuote(input) {
+  const tokenAddress = normalizeString(input?.tokenAddress);
+  const tokenKey = normalizeString(input?.tokenKey) || (tokenAddress ? `axiom:SOL:${tokenAddress}` : "");
+  const marketCap = Number(input?.marketCap || 0);
+  if (!tokenKey || !tokenAddress || !Number.isFinite(marketCap) || marketCap <= 0) return null;
+  const tabId = Number.isFinite(Number(input?.tabId)) ? Number(input.tabId) : null;
+  return {
+    platform: input?.platform || "axiom",
+    chain: input?.chain || "SOL",
+    tokenKey,
+    tokenAddress,
+    tokenName: normalizeString(input?.tokenName) || null,
+    marketCap,
+    source: normalizeString(input?.source) || "unknown",
+    rawText: normalizeString(input?.rawText) || null,
+    url: normalizeString(input?.url) || null,
+    title: normalizeString(input?.title) || null,
+    tabId,
+    windowId: Number.isFinite(Number(input?.windowId)) ? Number(input.windowId) : null,
+    readAtMs: Number.isFinite(Number(input?.readAtMs)) ? Number(input.readAtMs) : Date.now(),
+    registryKey: `${tokenKey}|${tabId ?? "tab"}|${normalizeString(input?.source) || "unknown"}`,
+  };
+}
+
+function parseAxiomTitleMarketCap(title) {
+  const match = String(title || "").match(/\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*([KMB])?/i);
+  if (!match) return null;
+  return parseCompactNumber(match[1], match[2]);
+}
+
+function parseAxiomTitleTokenName(title) {
+  const text = String(title || "").split("|")[0] || "";
+  const beforePrice = text.split("$")[0] || "";
+  return beforePrice.replace(/[↑↓↗↘▲▼]/g, "").trim() || null;
+}
+
+function parseCompactNumber(value, suffix = "") {
+  const parsed = Number.parseFloat(String(value || "").replace(/,/g, ""));
+  if (!Number.isFinite(parsed)) return null;
+  const normalized = String(suffix || "").toUpperCase();
+  if (normalized === "K") return parsed * 1_000;
+  if (normalized === "M") return parsed * 1_000_000;
+  if (normalized === "B") return parsed * 1_000_000_000;
+  return parsed;
+}
+
+function extractAxiomAddress(url) {
+  const parts = normalizePathname(url.pathname).split("/").filter(Boolean);
+  const memeIndex = parts.indexOf("meme");
+  const candidate = memeIndex >= 0 ? parts[memeIndex + 1] : null;
+  return AXIOM_ADDRESS_PATTERN.test(candidate || "") ? candidate : null;
+}
+
+function normalizePathname(pathname) {
+  return String(pathname || "").replace(/\/+/g, "/").replace(/\/$/, "");
+}
+
+function parseUrl(value) {
+  try {
+    return new URL(value || "");
+  } catch {
+    return null;
+  }
+}
+
+function normalizeString(value) {
+  return value == null ? "" : String(value).trim();
+}
 
 async function checkForUpdate() {
   const installedVersion = chrome.runtime.getManifest().version;

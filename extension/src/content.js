@@ -15,6 +15,8 @@
   const PULSE_AUTO_BUY_TTL_MS = 2 * 60 * 1000;
   const PULSE_AUTO_BUY_CHECK_MS = 350;
   const AXIOM_TARGET_TRIGGER_INTERVAL_MS = 500;
+  const AXIOM_QUOTE_HEARTBEAT_MS = 750;
+  const AXIOM_QUOTE_REGISTRY_MAX_AGE_MS = 5_000;
   const MARKET_CAP_ROLLING_SAMPLE_INTERVAL_MS = 250;
   const MARKET_CAP_ROLLING_PERSIST_THROTTLE_MS = 2_000;
   const EXIT_TARGET_MARKET_CAP_STEP = 1000;
@@ -267,6 +269,7 @@
     bindRollingMarketCapSampler();
     bindLivePositionWatcher();
     bindExitTargetWatcher();
+    bindAxiomQuoteHeartbeat();
     bindDesktopStatusHeartbeat();
     startUpdateChecks();
     runTask(sendDesktopExtensionStatus("startup"));
@@ -926,6 +929,33 @@
     if (token?.platform !== "axiom") return token;
     const chartQuote = getFreshAxiomChartMarketCapQuote();
     return chartQuote ? cloneTokenWithMarketCapQuote(token, chartQuote) : token;
+  }
+
+  async function getRegistryMarketCapTrackingToken(token) {
+    if (token?.platform !== "axiom" || !token?.key) return token;
+    const response = await sendRuntimeMessage({
+      type: "WILYTRADER_GET_TOKEN_QUOTE",
+      tokenKey: token.key,
+      tokenAddress: token.address || null,
+      maxAgeMs: AXIOM_QUOTE_REGISTRY_MAX_AGE_MS,
+    });
+    const quote = response?.quote || null;
+    if (!quote?.marketCap) return token;
+    return cloneTokenWithMarketCapQuote(token, {
+      marketCap: Number(quote.marketCap),
+      source: quote.source || "quote-registry",
+      rawText: quote.rawText || quote.title || null,
+      selector: null,
+      readAtMs: quote.readAtMs || Date.now(),
+    });
+  }
+
+  async function getExitTargetTriggerToken(token) {
+    const localToken = getMarketCapTrackingToken(token);
+    const registryToken = await getRegistryMarketCapTrackingToken(localToken);
+    const localReadAtMs = Number(localToken?.marketCapReadAtMs || 0);
+    const registryReadAtMs = Number(registryToken?.marketCapReadAtMs || 0);
+    return registryReadAtMs >= localReadAtMs ? registryToken : localToken;
   }
 
   function detectPadreToken(url) {
@@ -2784,6 +2814,16 @@
       return;
     }
     const sourceTokenMismatch = Boolean(pending.sourceTokenKey && token.key !== pending.sourceTokenKey);
+    if (sourceTokenMismatch) {
+      emitDiagnostic("pulse-auto-buy-source-mismatch-blocked", {
+        pendingTokenKey: pending.sourceTokenKey || null,
+        pendingTokenName: pending.tokenName || null,
+        openedToken: summarizeToken(token),
+      });
+      clearPendingPulseAutoBuy();
+      setStatus(`Pulse opened ${token.name || shortenAddress(token.address)}, but it did not match the queued token. Auto-buy cancelled.`);
+      return;
+    }
 
     const readiness = getPulseAutoBuyReadiness(token, pending);
     if (!readiness.ready) {
@@ -2821,9 +2861,7 @@
         executeAfterAt,
         remainingDelayMs,
       });
-      setStatus(sourceTokenMismatch
-        ? `Pulse opened ${token.name || shortenAddress(token.address)}; auto-buying page token ${formatters.native(pending.amountNative, token.chain)}.`
-        : `Auto-buying ${formatters.native(pending.amountNative, token.chain)} from Pulse.`);
+      setStatus(`Auto-buying ${formatters.native(pending.amountNative, token.chain)} from Pulse.`);
       const execution = await buy(amountNative, token, {
         delayMs: remainingDelayMs,
         delayStartedAtMs: clickCreatedAt,
@@ -5622,6 +5660,39 @@
     }, 1000);
   }
 
+  function bindAxiomQuoteHeartbeat() {
+    window.setInterval(() => {
+      if (!extensionContextValid) return;
+      runTask(sendAxiomQuoteHeartbeat());
+    }, AXIOM_QUOTE_HEARTBEAT_MS);
+    runTask(sendAxiomQuoteHeartbeat());
+  }
+
+  async function sendAxiomQuoteHeartbeat() {
+    if (!isAxiomMemeRoute(new URL(window.location.href))) return;
+    updateActiveToken();
+    const token = getMarketCapTrackingToken(activeToken);
+    if (!token?.key || !token.address) return;
+    const marketCap = Number(token.marketCap || 0);
+    if (!Number.isFinite(marketCap) || marketCap <= 0) return;
+    await sendRuntimeMessage({
+      type: "WILYTRADER_QUOTE_HEARTBEAT",
+      quote: {
+        platform: token.platform || "axiom",
+        chain: token.chain || "SOL",
+        tokenKey: token.key,
+        tokenAddress: token.address,
+        tokenName: token.name || null,
+        marketCap,
+        source: token.marketCapSource || "content-heartbeat",
+        rawText: token.marketCapRawText || document.title || null,
+        url: window.location.href,
+        title: document.title || null,
+        readAtMs: token.marketCapReadAtMs || Date.now(),
+      },
+    });
+  }
+
   function emitLivePositionDiagnostic(reason) {
     const token = activeToken;
     const position = token?.key ? state?.positions?.[token.key] : null;
@@ -5662,14 +5733,16 @@
     if (!isAxiomMemeRoute(new URL(window.location.href))) return;
     updateActiveToken();
     const token = activeToken;
-    const triggerToken = getMarketCapTrackingToken(token);
-    const marketCapUsd = Number(triggerToken?.marketCap || 0);
-    if (!token?.key || !Number.isFinite(marketCapUsd) || marketCapUsd <= 0) return;
+    if (!token?.key) return;
     const position = state.positions[token.key];
     if (!position) return;
-    const targets = Object.values(state.exitTargets || {})
-      .filter((target) => target?.positionId === position.positionId && !target.triggeredAt)
-      .sort((a, b) => targetTriggerPriority(a, b, marketCapUsd));
+    const activeTargets = Object.values(state.exitTargets || {})
+      .filter((target) => target?.positionId === position.positionId && !target.triggeredAt);
+    if (!activeTargets.length) return;
+    const triggerToken = await getExitTargetTriggerToken(token);
+    const marketCapUsd = Number(triggerToken?.marketCap || 0);
+    if (!Number.isFinite(marketCapUsd) || marketCapUsd <= 0) return;
+    const targets = activeTargets.sort((a, b) => targetTriggerPriority(a, b, marketCapUsd));
     const triggered = targets.find((target) => isExitTargetTriggered(target, marketCapUsd));
     if (!triggered) return;
     targetExitInFlight = triggered.id;

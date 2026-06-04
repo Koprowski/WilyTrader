@@ -1,5 +1,33 @@
 # WilyTrader Handoff
 
+## 2026-06-04 Axiom Multi-Tab Target Monitoring Phase 1
+
+Session reviewed: `E:\Apps\WilyTrader Captures\20260604.1851 Trade`.
+
+Finding: the Fortnite/FORTNIT Pulse path queued one token key but Axiom opened
+a different token page. The old Pulse auto-buy path continued with the opened
+page token, and the local buy did not persist/sync to the Desktop ledger, so no
+durable exit target existed for the intended Fortnite token. Separately, the
+per-tab content-script model made multi-tab quote monitoring fragile because
+the active tab could be FIXER while another tab's title showed FORTNIT moving.
+
+Resolution in extension `0.3.59`: Pulse auto-buy now cancels on source token
+mismatch. The background worker keeps a lightweight Axiom quote registry fed by
+content-script heartbeats and Chrome tab-title updates. Armed exit targets now
+query that registry for the freshest matching-token quote before evaluating
+stop/target triggers.
+
+Validation:
+
+- `node --check extension\src\content.js`
+- `node --check extension\src\background.js`
+- `node --check extension\src\userscript-wrapper.user.js`
+- `git diff --check`
+
+Next manual test: reload the unpacked extension, confirm version `0.3.59`, open
+multiple Axiom token tabs, arm a target/stop, and confirm session logs show
+quote heartbeats plus target-trigger diagnostics for the matching token.
+
 ## 2026-06-04 Axiom Platform Fee Default
 
 Finding: Axiom's published fee table lists the base Wood tier net fee as
