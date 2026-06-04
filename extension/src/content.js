@@ -2,7 +2,7 @@
   "use strict";
 
   const STORAGE_KEY = "wilytrader_state_v2";
-  const SCHEMA_VERSION = 14;
+  const SCHEMA_VERSION = 15;
   const PANEL_SCALE_MIN = 0.7;
   const PANEL_SCALE_MAX = 1.5;
   const PANEL_VIEWPORT_MARGIN = 8;
@@ -133,7 +133,7 @@
       defaultBuyAmount: 0.5,
       buyAmounts: [0.1, 0.25, 0.5, 1, 2, 5],
       sellPercents: [5, 10, 15, 33, 50, 67, 85, 100],
-      platformFeePct: 2,
+      platformFeePct: 0.95,
       buyGasFeeNative: AGGRESSIVE_MEME_FEES.gasFeeNative,
       sellGasFeeNative: AGGRESSIVE_MEME_FEES.gasFeeNative,
       buyPriorityFeeNative: AGGRESSIVE_MEME_FEES.priorityFeeNative,
@@ -697,6 +697,9 @@
     }
     if (Number(storedSettings.sellBribeFeeNative) === 0.003) {
       settings.sellBribeFeeNative = DEFAULT_STATE.settings.sellBribeFeeNative;
+    }
+    if (Number(storedSettings.platformFeePct) === 2 || storedSettings.platformFeePct === undefined) {
+      settings.platformFeePct = DEFAULT_STATE.settings.platformFeePct;
     }
     if (storedSettings.useCustomDelay === undefined || storedSettings.useCustomDelay === false) {
       settings.useCustomDelay = DEFAULT_STATE.settings.useCustomDelay;
@@ -1632,7 +1635,7 @@
               </div>
               <div class="wt-setting-group">
                 <label class="wt-label" for="wt-platform-fee">Platform fee %</label>
-                <input id="wt-platform-fee" class="wt-input" data-setting="platformFeePct" type="number" min="0" step="0.1" />
+                <input id="wt-platform-fee" class="wt-input" data-setting="platformFeePct" type="number" min="0" step="0.01" />
               </div>
               <div class="wt-setting-group">
                 <label class="wt-label" for="wt-delay">Custom delay ms</label>

@@ -1,5 +1,22 @@
 # WilyTrader Handoff
 
+## 2026-06-04 Axiom Platform Fee Default
+
+Finding: Axiom's published fee table lists the base Wood tier net fee as
+`0.95%`, not `0.095%`. The WilyTrader setting is stored as a percent value and
+divided by 100 during fee calculation, so the correct default value is `0.95`.
+
+Resolution in extension `0.3.57`: default `platformFeePct` is now `0.95`,
+the settings input accepts hundredths, and stored profiles that still have the
+old `2%` default migrate to `0.95%`. User-customized non-2% values are left
+alone.
+
+Validation:
+
+- `node --check extension\src\content.js`
+- `node --check extension\src\userscript-wrapper.user.js`
+- `git diff --check`
+
 ## 2026-06-04 Desktop OHLC SOL Marking
 
 Session reviewed: `E:\Apps\WilyTrader Captures\20260603.2349 Trade`.
