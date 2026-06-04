@@ -4365,6 +4365,7 @@
     if (!root || !state) return;
     const panelVisible = applyOverlayVisibility();
     updateActiveToken();
+    updateActivePositionMarketCapRange();
     renderFloatingTracker();
     syncActiveAxiomChartArtifacts();
     if (!panelVisible) return;
