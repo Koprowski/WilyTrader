@@ -2035,7 +2035,7 @@ function reconcileTradeReviewFields(session: ActiveTradeSession, trades: Normali
     else if (counts) runningCount += 1;
     const marketCapSeries = buildTradeMarketCapSeries(trade, session.marketCapObservations);
     const ohlcMc = computeNumberOhlc(marketCapSeries.map((point) => point.marketCapUsd));
-    const ohlcSol = computeTradeSolOhlc(trade, cumulativeSol);
+    const ohlcSol = computeTradeSolOhlc(trade, ohlcMc, cumulativeSol);
     rows[item.index] = {
       ...trade,
       countsToward50: counts,
@@ -2242,17 +2242,37 @@ function computeTradePctOhlc(trade: NormalizedTrade, marketCapOhlc: TradeOhlc | 
   };
 }
 
-function computeTradeSolOhlc(trade: NormalizedTrade, cumulativeOpen: number): TradeOhlc | null {
+function computeTradeSolOhlc(
+  trade: NormalizedTrade,
+  marketCapOhlc: TradeOhlc | null,
+  cumulativeOpen: number
+): TradeOhlc | null {
   const openingFeeHole = Math.max(0, trade.buyFeesNative ?? 0) * 2;
   const open = cumulativeOpen - openingFeeHole;
   const points = [open];
-  let realized = 0;
-  for (const execution of trade.executions ?? []) {
-    if (execution.side !== 'sell' || execution.pnlNative === null) continue;
-    realized += execution.pnlNative;
-    points.push(open + realized);
+  const entryMarketCap = trade.entryMarketCap;
+  const solInvested = trade.solInvested;
+  if (
+    marketCapOhlc &&
+    entryMarketCap !== null &&
+    entryMarketCap > 0 &&
+    solInvested !== null &&
+    Number.isFinite(solInvested)
+  ) {
+    points.push(
+      solAtMarketCap(open, solInvested, entryMarketCap, marketCapOhlc.high),
+      solAtMarketCap(open, solInvested, entryMarketCap, marketCapOhlc.low),
+      solAtMarketCap(open, solInvested, entryMarketCap, marketCapOhlc.close)
+    );
+  } else {
+    let realized = 0;
+    for (const execution of trade.executions ?? []) {
+      if (execution.side !== 'sell' || execution.pnlNative === null) continue;
+      realized += execution.pnlNative;
+      points.push(open + realized);
+    }
   }
-  const close = cumulativeOpen + (trade.pnlSol ?? realized);
+  const close = cumulativeOpen + (normalizedPnlSol(trade) ?? 0);
   points.push(close);
   return {
     open,
@@ -2260,6 +2280,10 @@ function computeTradeSolOhlc(trade: NormalizedTrade, cumulativeOpen: number): Tr
     low: Math.min(...points),
     close,
   };
+}
+
+function solAtMarketCap(open: number, solInvested: number, entryMarketCap: number, marketCap: number): number {
+  return open + solInvested * ((marketCap - entryMarketCap) / entryMarketCap);
 }
 
 function normalizedSolReceived(trade: NormalizedTrade): number | null {

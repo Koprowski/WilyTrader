@@ -1,5 +1,26 @@
 # WilyTrader Handoff
 
+## 2026-06-04 Desktop OHLC SOL Marking
+
+Session reviewed: `E:\Apps\WilyTrader Captures\20260603.2349 Trade`.
+
+Clarification: `ohlc_sol_open` was intentionally calculated as prior
+cumulative SOL P&L minus `2 * buyFeesNative`. In the reviewed UPTIMIST trade,
+buy fees were `0.021005 SOL`, so the open printed as about `-0.042 SOL`.
+That represents the conservative entry-fee plus estimated exit-fee hole.
+
+Resolution in Desktop `0.1.11`: `ohlc_sol_high`, `ohlc_sol_low`, and the
+sampled close point now use the sampled market-cap OHLC movement from entry
+market cap, instead of relying only on execution points. The final
+`ohlc_sol_close` remains anchored to the actual post-exit trade P&L so it still
+matches `pnl_sol`.
+
+Validation:
+
+- `npm --prefix E:\Apps\wilytrader\desktop run typecheck`
+- `npm --prefix E:\Apps\wilytrader\desktop run build`
+- `git diff --check`
+
 ## 2026-06-04 Axiom Execution Quote Hydration Gate
 
 Session reviewed: `E:\Apps\WilyTrader Captures\20260603.2313 Trade`.
