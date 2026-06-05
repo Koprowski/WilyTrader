@@ -146,6 +146,7 @@ const extensionVersionEl = document.querySelector<HTMLElement>('[data-extension-
 const extensionUpdateEl = document.querySelector<HTMLElement>('[data-extension-update]');
 const extensionGuidanceEl = document.querySelector<HTMLElement>('[data-extension-guidance]');
 const extensionUpdateActionsEl = document.querySelector<HTMLElement>('[data-extension-update-actions]');
+const extensionDownloadUpdateButton = document.querySelector<HTMLButtonElement>('[data-action="download-extension-update"]');
 const desktopVersionEl = document.querySelector<HTMLElement>('[data-desktop-version]');
 const desktopUpdateEl = document.querySelector<HTMLElement>('[data-desktop-update]');
 const desktopGuidanceEl = document.querySelector<HTMLElement>('[data-desktop-guidance]');
@@ -600,7 +601,7 @@ function renderDesktopUpdateStatus(update: WilyTraderDesktopStatus['desktopUpdat
   if (desktopGuidanceEl) {
     desktopGuidanceEl.hidden = !update.updateAvailable;
     desktopGuidanceEl.textContent = update.updateAvailable && update.latestVersion
-      ? `Download and run the WilyTrader Desktop ${update.latestVersion} installer.`
+      ? `WilyTrader checks automatically at startup. Download and run the WilyTrader Desktop ${update.latestVersion} installer to update this app.`
       : '';
   }
   if (desktopUpdateActionsEl) desktopUpdateActionsEl.hidden = !update.updateAvailable;
@@ -659,12 +660,13 @@ function renderExtensionUpdateGuidance(extension: {
     extensionGuidanceEl.textContent = !shouldShow
       ? ''
       : localAlreadyUpdated
-        ? `Local files are already ${local}. Open Chrome Extensions, find WilyTrader, then press Reload. No download is needed.`
+        ? `Local extension files are already ${local}. Open Chrome Extensions, find WilyTrader, then press Reload. No download is needed.`
         : needsFiles
-          ? `Download WilyTrader ${latest}, extract or copy it into the extension folder, then open Chrome Extensions and press Reload on WilyTrader.`
-          : `Open Chrome Extensions and press Reload on WilyTrader. If Chrome still shows the old version, download the latest zip and replace the extension folder first.`;
+          ? `Download the WilyTrader ${latest} extension zip only if these local files are not already updated. Replace the extension folder, then open Chrome Extensions and press Reload on WilyTrader.`
+          : `Open Chrome Extensions, find WilyTrader, then press Reload. Download the zip only if Chrome still shows an older version after the local folder is updated.`;
   }
   if (extensionUpdateActionsEl) extensionUpdateActionsEl.hidden = !shouldShow;
+  if (extensionDownloadUpdateButton) extensionDownloadUpdateButton.hidden = !needsFiles;
   if (extensionPathEl) {
     extensionPathEl.title = localPath && needsFiles
       ? 'Replace this folder with the downloaded extension files, then reload WilyTrader in Chrome.'

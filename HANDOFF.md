@@ -8,11 +8,14 @@ the OHLC percent columns moved to `BL:BN`. New Desktop installs also did not
 seed a master workbook into the selected captures folder, so Sync Master could
 fail before the user had a correctly shaped workbook.
 
-Resolution: the finalizer now applies OHLC formats by header pattern, the
-packaged trade-sync resources include `master trading log - Template.xlsx`, and
-Desktop copies that template to `<captures folder>\master trading log.xlsx`
-when the configured master path is the default path and the workbook does not
-already exist. Existing master workbooks are not overwritten.
+Resolution in Desktop/extension `0.4.1`: the finalizer now applies OHLC formats
+by header pattern, the packaged trade-sync resources include
+`master trading log - Template.xlsx`, and Desktop copies that template to
+`<captures folder>\master trading log.xlsx` when the configured master path is
+the default path and the workbook does not already exist. Existing master
+workbooks are not overwritten. Desktop update checks now run automatically at
+startup and every six hours, and the update UI distinguishes Desktop installer
+downloads from extension reloads in Chrome.
 
 Validation:
 

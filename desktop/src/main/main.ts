@@ -30,6 +30,7 @@ const WILYTRADER_DESKTOP_ASSET_SUFFIX = 'desktop-setup.exe';
 const WILYTRADER_EXTENSION_ASSET_SUFFIX = 'extension.zip';
 const MASTER_TRADING_LOG_FILE_NAME = 'master trading log.xlsx';
 const MASTER_TRADING_LOG_TEMPLATE_FILE_NAME = 'master trading log - Template.xlsx';
+const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const ffmpegPath = require('ffmpeg-static') as string | null;
 
 interface ActiveTradeSession {
@@ -233,6 +234,7 @@ let bridgeServer: http.Server | null = null;
 let settings: WilyTraderDesktopSettings = fallbackSettings();
 let extensionStatus: WilyTraderExtensionStatus = defaultExtensionStatus();
 let desktopUpdateStatus: WilyTraderDesktopUpdateStatus = defaultDesktopUpdateStatus();
+let updateCheckTimer: NodeJS.Timeout | null = null;
 let registeredTradeSessionHotkey: string | null = null;
 let activeGeminiSigninChild: ReturnType<typeof spawn> | null = null;
 let lastCompletedSessionDir: string | null = null;
@@ -284,8 +286,7 @@ app.whenReady().then(() => {
   registerTradeSessionHotkey();
   createWindow();
   console.log(`[WilyTrader Desktop] started. Bridge port ${BRIDGE_PORT}. Output: ${settings.outputDir}`);
-  if (settings.autoCheckExtensionUpdates) void checkExtensionUpdates();
-  if (settings.autoCheckExtensionUpdates) void checkDesktopUpdates();
+  scheduleUpdateChecks();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -297,6 +298,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('will-quit', () => {
+  if (updateCheckTimer) clearInterval(updateCheckTimer);
   globalShortcut.unregisterAll();
 });
 
@@ -3327,6 +3329,7 @@ function saveSettings(payload: Partial<WilyTraderDesktopSettings>): WilyTraderDe
   const previousHotkey = settings.tradeSessionHotkey;
   const previousOutputDir = settings.outputDir;
   const previousMasterTradingLogPath = settings.masterTradingLogPath;
+  const previousAutoCheckExtensionUpdates = settings.autoCheckExtensionUpdates;
   const mergedSettings = { ...settings, ...payload };
   const nextOutputDir = strOrNull(mergedSettings.outputDir) ?? previousOutputDir;
   if (
@@ -3345,6 +3348,7 @@ function saveSettings(payload: Partial<WilyTraderDesktopSettings>): WilyTraderDe
   }
   if (settings.tradeSessionHotkey !== previousHotkey) registerTradeSessionHotkey();
   if (settings.outputDir !== previousOutputDir) lastCompletedSessionDir = findLastCompletedSessionDir(settings.outputDir);
+  if (settings.autoCheckExtensionUpdates && !previousAutoCheckExtensionUpdates) void checkExtensionUpdates(true);
   broadcastStatus();
   return settings;
 }
@@ -3488,6 +3492,23 @@ function detectLocalExtensionManifest(): Partial<WilyTraderExtensionStatus> {
     }
   }
   return {};
+}
+
+function scheduleUpdateChecks(): void {
+  void refreshUpdateStatuses('startup', true);
+  if (updateCheckTimer) clearInterval(updateCheckTimer);
+  updateCheckTimer = setInterval(() => {
+    void refreshUpdateStatuses('scheduled', true);
+  }, UPDATE_CHECK_INTERVAL_MS);
+}
+
+async function refreshUpdateStatuses(reason: 'startup' | 'scheduled' | 'manual', force = false): Promise<void> {
+  debugLog('updates', 'checking update status', { reason, force });
+  const tasks: Array<Promise<void>> = [checkDesktopUpdates(force)];
+  if (settings.autoCheckExtensionUpdates || reason === 'manual') {
+    tasks.push(checkExtensionUpdates(force));
+  }
+  await Promise.all(tasks);
 }
 
 async function checkExtensionUpdates(force = false): Promise<void> {
