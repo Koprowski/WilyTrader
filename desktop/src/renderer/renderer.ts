@@ -579,10 +579,9 @@ function renderStatus(status: WilyTraderDesktopStatus): void {
   }
   if (finalizing && status.finalization) showFinalizationProgress(status.finalization);
   else if (!stopping && !discarding) hideFinalizationProgress();
-  const installed = status.extension.runtimeInstalledVersion ?? status.extension.localManifestVersion ?? 'Not detected';
-  const heartbeat = status.extension.runtimeLastSeenAt ? `, last seen ${new Date(status.extension.runtimeLastSeenAt).toLocaleTimeString()}` : '';
-  if (extensionVersionEl) extensionVersionEl.textContent = `Installed: ${installed}${heartbeat}`;
-  if (settingsExtensionVersionEl) settingsExtensionVersionEl.textContent = installed;
+  const extensionVersionSummary = formatExtensionVersionSummary(status.extension);
+  if (extensionVersionEl) extensionVersionEl.textContent = extensionVersionSummary;
+  if (settingsExtensionVersionEl) settingsExtensionVersionEl.textContent = extensionVersionSummary;
   if (extensionUpdateEl) {
     const tradingTarget = formatExtensionTradingTarget(status.extension);
     extensionUpdateEl.textContent = tradingTarget
@@ -610,6 +609,22 @@ function renderDesktopUpdateStatus(update: WilyTraderDesktopStatus['desktopUpdat
       : '';
   }
   if (desktopUpdateActionsEl) desktopUpdateActionsEl.hidden = !update.updateAvailable;
+}
+
+function formatExtensionVersionSummary(extension: {
+  runtimeInstalledVersion: string | null;
+  localManifestVersion: string | null;
+  runtimeLastSeenAt: string | null;
+}): string {
+  const runtime = extension.runtimeInstalledVersion;
+  const local = extension.localManifestVersion;
+  const heartbeat = extension.runtimeLastSeenAt ? `, last seen ${new Date(extension.runtimeLastSeenAt).toLocaleTimeString()}` : '';
+  if (runtime && local && runtime !== local) {
+    return `Running tab: ${runtime}${heartbeat}; local files: ${local}`;
+  }
+  if (runtime) return `Running tab: ${runtime}${heartbeat}`;
+  if (local) return `Local files: ${local}`;
+  return 'Not detected';
 }
 
 function formatExtensionTradingTarget(extension: {

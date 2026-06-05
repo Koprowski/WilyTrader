@@ -3128,8 +3128,10 @@ function receiveExtensionStatus(payload: unknown): void {
   if (!payload || typeof payload !== 'object') return;
   const record = payload as Record<string, unknown>;
   const installedVersion = strOrNull(record.installedVersion);
+  const localManifest = detectLocalExtensionManifest();
   extensionStatus = {
     ...extensionStatus,
+    ...localManifest,
     runtimeInstalledVersion: installedVersion,
     runtimeExtensionId: strOrNull(record.extensionId),
     runtimeLastSeenAt: new Date().toISOString(),
@@ -3141,8 +3143,8 @@ function receiveExtensionStatus(payload: unknown): void {
   if (extensionStatus.latestVersion && installedVersion) {
     extensionStatus.updateAvailable = isRemoteVersionNewer(installedVersion, extensionStatus.latestVersion);
     extensionStatus.updateMessage = extensionStatus.updateAvailable
-      ? `Extension ${extensionStatus.latestVersion} is available; installed ${installedVersion}.`
-      : `Extension is up to date (${installedVersion}).`;
+      ? `Extension ${extensionStatus.latestVersion} is available; running tab has ${installedVersion}.`
+      : `Running extension is up to date (${installedVersion}).`;
   }
   appendSessionLog('extension-status', String(record.reason || 'heartbeat'), {
     installedVersion,
@@ -3672,17 +3674,31 @@ async function refreshUpdateStatuses(reason: 'startup' | 'scheduled' | 'manual',
 
 async function checkExtensionUpdates(force = false): Promise<void> {
   if (!force && extensionStatus.checkedAt) return;
+  extensionStatus = {
+    ...extensionStatus,
+    ...detectLocalExtensionManifest(),
+  };
   const installed = extensionStatus.runtimeInstalledVersion ?? extensionStatus.localManifestVersion;
   try {
     const latest = await fetchLatestExtensionVersion();
+    const runtime = extensionStatus.runtimeInstalledVersion;
+    const local = extensionStatus.localManifestVersion;
+    const runtimeBehind = Boolean(runtime && isRemoteVersionNewer(runtime, latest));
+    const localBehind = Boolean(local && isRemoteVersionNewer(local, latest));
     extensionStatus = {
       ...extensionStatus,
       latestVersion: latest,
       updateAvailable: installed ? isRemoteVersionNewer(installed, latest) : false,
       updateMessage: installed
-        ? isRemoteVersionNewer(installed, latest)
-          ? `Extension ${latest} is available; installed ${installed}.`
-          : `Extension is up to date (${installed}).`
+        ? runtime && local && runtime !== local
+          ? runtimeBehind
+            ? `Extension ${latest} is available; running tab has ${runtime}, local files are ${local}.`
+            : `Running extension is ${runtime}; local files are ${local}.`
+          : isRemoteVersionNewer(installed, latest)
+            ? `Extension ${latest} is available; installed ${installed}.`
+            : localBehind
+              ? `Extension ${latest} is available; local files are ${local}.`
+              : `Extension is up to date (${installed}).`
         : `Latest extension version is ${latest}; no installed extension has checked in.`,
       checkedAt: new Date().toISOString(),
     };

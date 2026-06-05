@@ -1,5 +1,23 @@
 # WilyTrader Handoff
 
+## 2026-06-05 Desktop Extension Version Reporting
+
+Finding: Desktop displayed the extension heartbeat version as "Installed," but
+that value is the running content-script version from the active trading tab.
+Chrome Extensions can show newer unpacked extension files while an already-open
+Axiom/Padre tab keeps sending an older heartbeat until the tab is reloaded.
+Desktop also only detected the local extension manifest at startup.
+
+Resolution in Desktop/extension `0.4.4`: Desktop now refreshes the local
+manifest during update checks and renders extension status as `Running tab:
+<version>; local files: <version>` when the two differ. Update messages now
+call out stale running tabs instead of implying the local install is stale.
+
+Validation:
+
+- `npm --prefix desktop run typecheck`
+- `npm --prefix desktop run dist:win`
+
 ## 2026-06-05 Desktop UI Reload Update Refresh
 
 Resolution in Desktop/extension `0.4.3`: renderer startup now forces Desktop
