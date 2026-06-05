@@ -165,6 +165,18 @@ function Set-MasterFormulaByHeader($sheet, [string]$HeaderName, [int]$lastColumn
   Set-FormulaDown $sheet (Get-ColumnLetter $column) 2 $lastRow $formula
 }
 
+function Set-MasterNumberFormatByHeaderPattern($sheet, [int]$lastColumn, [int]$lastRow, [string]$Pattern, [string]$NumberFormat) {
+  if ($lastRow -lt 2) { return }
+  for ($column = 1; $column -le $lastColumn; $column++) {
+    $header = Invoke-ExcelRetry { [string]$sheet.Cells(1, $column).Value2 }
+    if ($header -match $Pattern) {
+      Invoke-ExcelRetry {
+        $sheet.Range($sheet.Cells(2, $column), $sheet.Cells($lastRow, $column)).NumberFormat = $NumberFormat
+      } | Out-Null
+    }
+  }
+}
+
 function Refresh-CooldownFormulas($masterSheet, [int]$lastColumn, [int]$lastRow) {
   if ($lastRow -lt 2) { return }
   Set-MasterFormulaByHeader $masterSheet "prior_cluster_last_exit_dt" $lastColumn $lastRow '=IF(AND(BP2=1,ROW()>2),G1+IFERROR(TIMEVALUE(L1),0),"")'
@@ -469,8 +481,8 @@ try {
   $master.Range("T2:V$lastMasterRow").NumberFormat = "0.000"
   $master.Range("W2:W$lastMasterRow").NumberFormat = "0.0%"
   $master.Range("BA2:BB$lastMasterRow").NumberFormat = "0.0%"
-  $master.Range("BH2:BJ$lastMasterRow").NumberFormat = "0.0%"
-  $master.Range("BK2:BN$lastMasterRow").NumberFormat = "0.000"
+  Set-MasterNumberFormatByHeaderPattern $master $lastTradeColumn $lastMasterRow '^ohlc_(sol|sold)_(open|high|low|close)$' "0.000"
+  Set-MasterNumberFormatByHeaderPattern $master $lastTradeColumn $lastMasterRow '^ohlc_pct_' "0.0%"
   $master.Range("BR2:BS$lastMasterRow").NumberFormat = "yymmdd.hhmm"
   $master.Range("BT2:BT$lastMasterRow").NumberFormat = "0.0"
 

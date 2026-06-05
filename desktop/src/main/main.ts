@@ -28,6 +28,8 @@ const WILYTRADER_TAGS_API_URL = 'https://api.github.com/repos/Koprowski/WilyTrad
 const WILYTRADER_RELEASE_BASE_URL = 'https://github.com/Koprowski/WilyTrader/releases';
 const WILYTRADER_DESKTOP_ASSET_SUFFIX = 'desktop-setup.exe';
 const WILYTRADER_EXTENSION_ASSET_SUFFIX = 'extension.zip';
+const MASTER_TRADING_LOG_FILE_NAME = 'master trading log.xlsx';
+const MASTER_TRADING_LOG_TEMPLATE_FILE_NAME = 'master trading log - Template.xlsx';
 const ffmpegPath = require('ffmpeg-static') as string | null;
 
 interface ActiveTradeSession {
@@ -3337,6 +3339,10 @@ function saveSettings(payload: Partial<WilyTraderDesktopSettings>): WilyTraderDe
   settings = sanitizeSettings(mergedSettings);
   fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
   fs.writeFileSync(settingsPath(), JSON.stringify(settings, null, 2), 'utf-8');
+  const seededMaster = ensureDefaultMasterTradingLog(settings.outputDir, settings.masterTradingLogPath);
+  if (seededMaster.copied) {
+    debugLog('master-sync', 'seeded default master trading log', seededMaster);
+  }
   if (settings.tradeSessionHotkey !== previousHotkey) registerTradeSessionHotkey();
   if (settings.outputDir !== previousOutputDir) lastCompletedSessionDir = findLastCompletedSessionDir(settings.outputDir);
   broadcastStatus();
@@ -3383,11 +3389,43 @@ function defaultCapturesRoot(): string {
 }
 
 function defaultMasterTradingLogPath(outputDir: string): string {
-  return path.join(outputDir, 'master trading log.xlsx');
+  return path.join(outputDir, MASTER_TRADING_LOG_FILE_NAME);
 }
 
 function bundledMasterSyncScriptsDir(): string {
   return path.resolve(__dirname, '..', 'trade-sync');
+}
+
+function bundledMasterTradingLogTemplatePath(): string {
+  return path.join(bundledMasterSyncScriptsDir(), MASTER_TRADING_LOG_TEMPLATE_FILE_NAME);
+}
+
+function sameResolvedPath(left: string, right: string): boolean {
+  return path.resolve(left).toLowerCase() === path.resolve(right).toLowerCase();
+}
+
+function ensureDefaultMasterTradingLog(outputDir: string, masterPath: string): { copied: boolean; masterPath: string; templatePath: string | null } {
+  const targetMasterPath = path.resolve(masterPath || defaultMasterTradingLogPath(outputDir));
+  if (!sameResolvedPath(targetMasterPath, defaultMasterTradingLogPath(outputDir))) {
+    return { copied: false, masterPath: targetMasterPath, templatePath: null };
+  }
+  if (fs.existsSync(targetMasterPath)) {
+    return { copied: false, masterPath: targetMasterPath, templatePath: null };
+  }
+
+  const templatePath = bundledMasterTradingLogTemplatePath();
+  if (!fs.existsSync(templatePath)) {
+    throw new Error(`Bundled master trading log template was not found: ${templatePath}`);
+  }
+
+  fs.mkdirSync(path.dirname(targetMasterPath), { recursive: true });
+  try {
+    fs.copyFileSync(templatePath, targetMasterPath, fs.constants.COPYFILE_EXCL);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    return { copied: false, masterPath: targetMasterPath, templatePath };
+  }
+  return { copied: true, masterPath: targetMasterPath, templatePath };
 }
 
 function isOldDefaultOutputDir(outputDir: string): boolean {
@@ -4513,6 +4551,14 @@ async function syncMasterTradingLog(): Promise<MasterSyncResult> {
   const syncScriptsDir = bundledMasterSyncScriptsDir();
   const scriptPath = path.join(syncScriptsDir, 'run-trade-sync.ps1');
   const masterPath = settings.masterTradingLogPath || defaultMasterTradingLogPath(settings.outputDir);
+  try {
+    const seededMaster = ensureDefaultMasterTradingLog(settings.outputDir, masterPath);
+    if (seededMaster.copied) {
+      debugLog('master-sync', 'seeded default master trading log before sync', seededMaster);
+    }
+  } catch (err) {
+    return emptyMasterSyncResult(false, `Could not create the default master trading log: ${(err as Error).message}`, masterPath, syncScriptsDir);
+  }
   if (!fs.existsSync(scriptPath)) {
     return emptyMasterSyncResult(false, `Sync script was not found: ${scriptPath}`, masterPath, syncScriptsDir);
   }

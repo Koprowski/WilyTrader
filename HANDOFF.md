@@ -1,5 +1,26 @@
 # WilyTrader Handoff
 
+## 2026-06-05 Desktop Master Template Seeding
+
+Finding: the master workbook finalizer still applied OHLC SOL/percent formats by
+fixed column ranges. That broke after the OHLC SOL columns moved to `BH:BK` and
+the OHLC percent columns moved to `BL:BN`. New Desktop installs also did not
+seed a master workbook into the selected captures folder, so Sync Master could
+fail before the user had a correctly shaped workbook.
+
+Resolution: the finalizer now applies OHLC formats by header pattern, the
+packaged trade-sync resources include `master trading log - Template.xlsx`, and
+Desktop copies that template to `<captures folder>\master trading log.xlsx`
+when the configured master path is the default path and the workbook does not
+already exist. Existing master workbooks are not overwritten.
+
+Validation:
+
+- PowerShell parser check passed for the repo and live finalizer scripts.
+- A temp workbook finalizer run confirmed `ohlc_sol_*` cells use `0.000` and
+  `ohlc_pct_*` cells use `0.0%`.
+- `npm --prefix desktop run typecheck`
+
 ## 2026-06-04 Axiom Multi-Tab Target Monitoring Phase 1
 
 Session reviewed: `E:\Apps\WilyTrader Captures\20260604.1851 Trade`.
