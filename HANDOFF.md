@@ -1,5 +1,26 @@
 # WilyTrader Handoff
 
+## 2026-06-05 Desktop/Extension One-Click Update Flow
+
+Finding: Desktop and the unpacked Chrome extension need separate update
+handling. The Desktop app can launch its installer directly, but Chrome still
+requires the user to press Reload for an unpacked extension after its local
+files change.
+
+Resolution in Desktop/extension `0.4.5`: the Desktop update action is now
+**Install Update**, which downloads the latest `wilytrader-*-desktop-setup.exe`,
+starts it through PowerShell `Start-Process`, and quits WilyTrader Desktop. The
+extension action is now **Update Extension Files**, which either runs
+`git pull --ff-only` for repo-backed installs or downloads/extracts the latest
+extension zip and replaces the configured unpacked extension folder. It then
+opens Chrome Extensions and copies the Load unpacked path to the clipboard; the
+remaining manual step is pressing Reload on WilyTrader in Chrome.
+
+Validation target: install a previous Desktop build, confirm `0.4.5` is offered,
+press **Install Update**, and verify the installer opens. With a local extension
+manifest below `0.4.5`, press **Update Extension Files**, confirm the manifest is
+updated, then press Reload in Chrome and confirm Chrome reports `0.4.5`.
+
 ## 2026-06-05 Desktop Extension Version Reporting
 
 Finding: Desktop displayed the extension heartbeat version as "Installed," but

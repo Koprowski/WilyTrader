@@ -25,6 +25,7 @@ import type {
 const BRIDGE_PORT = 17365;
 const MAX_BRIDGE_BODY_BYTES = 25 * 1024 * 1024;
 const WILYTRADER_TAGS_API_URL = 'https://api.github.com/repos/Koprowski/WilyTrader/tags?per_page=10';
+const WILYTRADER_LATEST_RELEASE_API_URL = 'https://api.github.com/repos/Koprowski/WilyTrader/releases/latest';
 const WILYTRADER_RELEASE_BASE_URL = 'https://github.com/Koprowski/WilyTrader/releases';
 const WILYTRADER_DESKTOP_ASSET_SUFFIX = 'desktop-setup.exe';
 const WILYTRADER_EXTENSION_ASSET_SUFFIX = 'extension.zip';
@@ -400,6 +401,7 @@ function registerIpc(): void {
   ipcMain.handle('extension:open-chrome-extensions', async () => openChromeExtensionsPage());
   ipcMain.handle('extension:open-latest-release', async () => openLatestExtensionReleasePage());
   ipcMain.handle('extension:download-latest-release', async () => openLatestExtensionDownload());
+  ipcMain.handle('extension:update-latest-release', async () => updateLatestExtensionFiles());
   ipcMain.handle('extension:move-location', async () => moveWilyTraderExtensionLocation());
   ipcMain.handle('desktop:check-updates', async () => {
     await checkDesktopUpdates(true);
@@ -407,6 +409,7 @@ function registerIpc(): void {
   });
   ipcMain.handle('desktop:open-latest-release', async () => openLatestDesktopReleasePage());
   ipcMain.handle('desktop:download-latest-release', async () => openLatestDesktopDownload());
+  ipcMain.handle('desktop:install-latest-release', async () => installLatestDesktopRelease());
 }
 
 function debugLog(scope: string, message: string, details?: unknown): void {
@@ -3761,6 +3764,39 @@ async function fetchLatestWilyTraderVersion(): Promise<string> {
   return latest;
 }
 
+async function fetchLatestWilyTraderRelease(): Promise<WilyTraderReleaseInfo> {
+  const res = await fetch(`${WILYTRADER_LATEST_RELEASE_API_URL}?t=${Date.now()}`, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': `wilytrader-desktop/${app.getVersion() || '0.1.0'}`,
+    },
+  });
+  if (!res.ok) throw new Error(`GitHub release check failed (HTTP ${res.status}).`);
+  const release = await res.json() as {
+    tag_name?: string;
+    name?: string;
+    html_url?: string;
+    assets?: Array<{ name?: string; browser_download_url?: string }>;
+  };
+  const tagName = (release.tag_name ?? release.name ?? '').trim();
+  const version = normalizeVersionTag(tagName);
+  if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Latest release did not include a semantic version tag.');
+  const assets = (release.assets ?? [])
+    .map((asset) => ({
+      name: asset.name ?? '',
+      url: asset.browser_download_url ?? '',
+    }))
+    .filter((asset) => asset.name && /^https?:\/\//i.test(asset.url));
+  return {
+    tagName,
+    version,
+    htmlUrl: release.html_url || `${WILYTRADER_RELEASE_BASE_URL}/tag/v${version}`,
+    desktopInstaller: assets.find((asset) => /^wilytrader-\d+\.\d+\.\d+-desktop-setup\.exe$/i.test(asset.name)) ?? null,
+    extensionZip: assets.find((asset) => /^wilytrader-\d+\.\d+\.\d+-extension\.zip$/i.test(asset.name)) ?? null,
+  };
+}
+
 async function latestKnownExtensionVersion(): Promise<string> {
   if (extensionStatus.latestVersion) return extensionStatus.latestVersion;
   const latest = await fetchLatestExtensionVersion();
@@ -3797,6 +3833,84 @@ async function openLatestExtensionDownload(): Promise<{ ok: boolean; message: st
   return { ok: true, message: `Opened WilyTrader ${latest} extension zip download.`, url };
 }
 
+async function updateLatestExtensionFiles(): Promise<{
+  ok: boolean;
+  message: string;
+  version: string | null;
+  repoPath: string | null;
+  extensionPath: string | null;
+  releaseUrl?: string | null;
+}> {
+  const release = await fetchLatestWilyTraderRelease();
+  const install = detectCurrentWilyTraderInstall();
+  if (!install) {
+    return {
+      ok: false,
+      message: 'No local WilyTrader extension folder was found. Use Move Location first, or install the extension zip manually once.',
+      version: null,
+      repoPath: null,
+      extensionPath: null,
+      releaseUrl: release.htmlUrl,
+    };
+  }
+
+  try {
+    if (fs.existsSync(path.join(install.repoPath, '.git'))) {
+      const result = await runProcessProbe('git', ['-C', install.repoPath, 'pull', '--ff-only'], 120_000);
+      if (!result.ok) {
+        throw new Error(tail(result.stderr || result.stdout || result.error || 'git pull failed', 700));
+      }
+    } else {
+      if (!release.extensionZip) throw new Error(`Release ${release.version} does not include a WilyTrader extension zip asset.`);
+      const downloadDir = path.join(os.tmpdir(), 'wilytrader-extension-updates');
+      const zipPath = path.join(downloadDir, safeUpdateFileName(release.extensionZip.name));
+      const extractDir = path.join(downloadDir, `extract-${release.version}-${Date.now()}`);
+      await downloadFile(release.extensionZip.url, zipPath);
+      await extractZipFile(zipPath, extractDir);
+      const extracted = readWilyTraderManifest(extractDir);
+      if (!extracted) throw new Error('Downloaded extension zip did not contain a valid WilyTrader manifest.');
+      replaceDirectoryContents(extracted.extensionPath, install.extensionPath);
+    }
+
+    const updated = readWilyTraderManifest(install.repoPath) ?? readWilyTraderManifest(install.extensionPath);
+    if (!updated) throw new Error('Updated extension files, but the manifest could not be verified.');
+    saveSettings({ wilyTraderInstallPath: updated.repoPath });
+    extensionStatus = {
+      ...extensionStatus,
+      ...detectLocalExtensionManifest(),
+      latestVersion: release.version,
+      updateAvailable: extensionStatus.runtimeInstalledVersion
+        ? isRemoteVersionNewer(extensionStatus.runtimeInstalledVersion, release.version)
+        : false,
+      updateMessage: extensionStatus.runtimeInstalledVersion && isRemoteVersionNewer(extensionStatus.runtimeInstalledVersion, release.version)
+        ? `Local files are ${updated.version}; reload WilyTrader in Chrome to update the running tab.`
+        : `Extension files are updated to ${updated.version}.`,
+      checkedAt: new Date().toISOString(),
+    };
+    clipboard.writeText(updated.extensionPath);
+    await revealExtensionFolder(updated.extensionPath);
+    await openChromeExtensionsPage();
+    broadcastStatus();
+    return {
+      ok: true,
+      message: `Updated extension files to ${updated.version}. Chrome Extensions is open; press Reload on WilyTrader. The Load unpacked path is copied to the clipboard.`,
+      version: updated.version,
+      repoPath: updated.repoPath,
+      extensionPath: updated.extensionPath,
+      releaseUrl: release.htmlUrl,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      message: `Extension update failed: ${(err as Error).message}`,
+      version: install.version,
+      repoPath: install.repoPath,
+      extensionPath: install.extensionPath,
+      releaseUrl: release.htmlUrl,
+    };
+  }
+}
+
 async function openLatestDesktopReleasePage(): Promise<{ ok: boolean; message: string; url?: string }> {
   const latest = await latestKnownDesktopVersion();
   const url = `${WILYTRADER_RELEASE_BASE_URL}/tag/v${latest}`;
@@ -3809,6 +3923,46 @@ async function openLatestDesktopDownload(): Promise<{ ok: boolean; message: stri
   const url = `${WILYTRADER_RELEASE_BASE_URL}/download/v${latest}/wilytrader-${latest}-${WILYTRADER_DESKTOP_ASSET_SUFFIX}`;
   await shell.openExternal(url);
   return { ok: true, message: `Opened WilyTrader Desktop ${latest} installer download.`, url };
+}
+
+async function installLatestDesktopRelease(): Promise<{ ok: boolean; message: string; installerPath?: string; releaseUrl?: string | null }> {
+  const release = await fetchLatestWilyTraderRelease();
+  const currentVersion = app.getVersion() || '0.0.0';
+  if (!isRemoteVersionNewer(currentVersion, release.version)) {
+    return { ok: false, message: `WilyTrader Desktop is already up to date (${currentVersion}).`, releaseUrl: release.htmlUrl };
+  }
+  if (!release.desktopInstaller) {
+    return { ok: false, message: `Desktop ${release.version} is available, but no installer asset was found.`, releaseUrl: release.htmlUrl };
+  }
+
+  const updateDir = path.join(os.tmpdir(), 'wilytrader-desktop-updates');
+  const installerPath = path.join(updateDir, safeUpdateFileName(release.desktopInstaller.name));
+  try {
+    await downloadFile(release.desktopInstaller.url, installerPath);
+    await launchUpdateInstaller(installerPath);
+    setTimeout(() => app.quit(), 750);
+    return {
+      ok: true,
+      message: `Downloaded WilyTrader Desktop ${release.version}. WilyTrader will close and launch the installer.`,
+      installerPath,
+      releaseUrl: release.htmlUrl,
+    };
+  } catch (err) {
+    if (fs.existsSync(installerPath)) {
+      shell.showItemInFolder(installerPath);
+      return {
+        ok: false,
+        message: `Installer downloaded, but Windows did not launch it automatically: ${(err as Error).message}. The installer is shown in File Explorer.`,
+        installerPath,
+        releaseUrl: release.htmlUrl,
+      };
+    }
+    return {
+      ok: false,
+      message: `Desktop install failed: ${(err as Error).message}`,
+      releaseUrl: release.htmlUrl,
+    };
+  }
 }
 
 interface DependencyProbeResult {
@@ -3829,6 +3983,19 @@ interface OpenRouterModelSummary {
 interface GeminiCliModelSummary {
   id: string;
   createdAtMs: number;
+}
+
+interface WilyTraderReleaseAsset {
+  name: string;
+  url: string;
+}
+
+interface WilyTraderReleaseInfo {
+  tagName: string;
+  version: string;
+  htmlUrl: string;
+  desktopInstaller: WilyTraderReleaseAsset | null;
+  extensionZip: WilyTraderReleaseAsset | null;
 }
 
 interface SettingsTestLlmGuidance {
@@ -5104,6 +5271,64 @@ async function revealExtensionFolder(extensionPath: string): Promise<void> {
     return;
   }
   await shell.openPath(extensionPath);
+}
+
+function safeUpdateFileName(name: string): string {
+  const base = path.basename(name || 'wilytrader-update');
+  return base.replace(/[^a-z0-9._-]/gi, '_') || 'wilytrader-update';
+}
+
+function replaceDirectoryContents(sourceDir: string, destinationDir: string): void {
+  const source = path.resolve(sourceDir);
+  const destination = path.resolve(destinationDir);
+  if (!fs.existsSync(path.join(source, 'manifest.json'))) {
+    throw new Error(`Source extension manifest was not found: ${source}`);
+  }
+  const destinationManifest = path.join(destination, 'manifest.json');
+  if (!fs.existsSync(destinationManifest)) {
+    throw new Error(`Destination extension manifest was not found: ${destination}`);
+  }
+  const current = readWilyTraderManifest(destination);
+  if (!current) throw new Error(`Destination is not a WilyTrader extension folder: ${destination}`);
+
+  const destinationRoot = path.parse(destination).root;
+  if (destination === destinationRoot || destination.length < destinationRoot.length + 8) {
+    throw new Error(`Refusing to replace unsafe extension path: ${destination}`);
+  }
+
+  fs.rmSync(destination, { recursive: true, force: true });
+  fs.mkdirSync(destination, { recursive: true });
+  fs.cpSync(source, destination, { recursive: true, force: true });
+}
+
+async function launchUpdateInstaller(installerPath: string): Promise<void> {
+  const resolved = path.resolve(installerPath);
+  if (!fs.existsSync(resolved)) throw new Error(`Installer not found: ${resolved}`);
+  if (process.platform !== 'win32') {
+    const openError = await shell.openPath(resolved);
+    if (openError) throw new Error(openError);
+    return;
+  }
+
+  const psLiteral = "'" + resolved.replace(/'/g, "''") + "'";
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('powershell.exe', [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      `Start-Process -LiteralPath ${psLiteral}`,
+    ], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    child.once('spawn', () => {
+      child.unref();
+      resolve();
+    });
+    child.once('error', reject);
+  });
 }
 
 function chromeExtensionsTarget(): { url: string; profileName: string | null; extensionId: string | null } {

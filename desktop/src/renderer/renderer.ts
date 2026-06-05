@@ -115,9 +115,18 @@ type WilyTraderDesktopRuntimeApi = typeof window.wilyTraderDesktop & Partial<{
   }>;
   openLatestExtensionRelease: () => Promise<{ ok: boolean; message: string; url?: string }>;
   downloadLatestExtensionRelease: () => Promise<{ ok: boolean; message: string; url?: string }>;
+  updateLatestExtensionFiles: () => Promise<{
+    ok: boolean;
+    message: string;
+    version: string | null;
+    repoPath: string | null;
+    extensionPath: string | null;
+    releaseUrl?: string | null;
+  }>;
   checkDesktopUpdates: () => Promise<WilyTraderDesktopStatus>;
   openLatestDesktopRelease: () => Promise<{ ok: boolean; message: string; url?: string }>;
   downloadLatestDesktopRelease: () => Promise<{ ok: boolean; message: string; url?: string }>;
+  installLatestDesktopRelease: () => Promise<{ ok: boolean; message: string; installerPath?: string; releaseUrl?: string | null }>;
 }>;
 
 const startButton = document.querySelector<HTMLButtonElement>('[data-action="start"]');
@@ -226,10 +235,10 @@ bindAction('gemini-signin-cancel', () => void cancelGeminiSignin());
 bindAction('open-extension-folder', () => void openExtensionFolder());
 bindAction('move-extension-location', () => void moveExtensionLocation());
 bindAction('open-extension-release', () => void openLatestExtensionRelease());
-bindAction('download-extension-update', () => void downloadLatestExtensionRelease());
+bindAction('download-extension-update', () => void updateLatestExtensionFiles());
 bindAction('check-desktop-update', () => void checkDesktopUpdates());
 bindAction('open-desktop-release', () => void openLatestDesktopRelease());
-bindAction('download-desktop-update', () => void downloadLatestDesktopRelease());
+bindAction('download-desktop-update', () => void installLatestDesktopRelease());
 for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>('[data-action="open-chrome-extensions"]'))) {
   debugLog('renderer', 'binding action', { action: 'open-chrome-extensions', found: true });
   button.addEventListener('click', (event) => {
@@ -605,7 +614,7 @@ function renderDesktopUpdateStatus(update: WilyTraderDesktopStatus['desktopUpdat
   if (desktopGuidanceEl) {
     desktopGuidanceEl.hidden = !update.updateAvailable;
     desktopGuidanceEl.textContent = update.updateAvailable && update.latestVersion
-      ? `WilyTrader checks automatically at startup. Download and run the WilyTrader Desktop ${update.latestVersion} installer to update this app.`
+      ? `WilyTrader checks automatically at startup. Install Update downloads WilyTrader Desktop ${update.latestVersion}, starts the installer, and closes this app.`
       : '';
   }
   if (desktopUpdateActionsEl) desktopUpdateActionsEl.hidden = !update.updateAvailable;
@@ -682,8 +691,8 @@ function renderExtensionUpdateGuidance(extension: {
       : localAlreadyUpdated
         ? `Local extension files are already ${local}. Open Chrome Extensions, find WilyTrader, then press Reload. No download is needed.`
         : needsFiles
-          ? `Download the WilyTrader ${latest} extension zip only if these local files are not already updated. Replace the extension folder, then open Chrome Extensions and press Reload on WilyTrader.`
-          : `Open Chrome Extensions, find WilyTrader, then press Reload. Download the zip only if Chrome still shows an older version after the local folder is updated.`;
+          ? `Update Extension Files installs the WilyTrader ${latest} unpacked-extension files, opens Chrome Extensions, and copies the Load unpacked path. Press Reload on WilyTrader after it finishes.`
+          : `Open Chrome Extensions, find WilyTrader, then press Reload. The local folder is already updated.`;
   }
   if (extensionUpdateActionsEl) extensionUpdateActionsEl.hidden = !shouldShow;
   if (extensionDownloadUpdateButton) extensionDownloadUpdateButton.hidden = !needsFiles;
@@ -1056,6 +1065,17 @@ async function downloadLatestExtensionRelease(): Promise<void> {
   setSettingsMessage(result.message, !result.ok);
 }
 
+async function updateLatestExtensionFiles(): Promise<void> {
+  const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi;
+  if (typeof api.updateLatestExtensionFiles !== 'function') {
+    throw new Error('Extension file updates are unavailable in this running app. Restart WilyTrader Desktop.');
+  }
+  setSettingsMessage('Updating WilyTrader extension files...');
+  const result = await api.updateLatestExtensionFiles();
+  setSettingsMessage(result.message, !result.ok);
+  renderStatus(await window.wilyTraderDesktop.getStatus());
+}
+
 async function openLatestDesktopRelease(): Promise<void> {
   const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi;
   if (typeof api.openLatestDesktopRelease !== 'function') {
@@ -1071,6 +1091,17 @@ async function downloadLatestDesktopRelease(): Promise<void> {
     throw new Error('Desktop download links are unavailable in this running app. Restart WilyTrader Desktop.');
   }
   const result = await api.downloadLatestDesktopRelease();
+  setSettingsMessage(result.message, !result.ok);
+}
+
+async function installLatestDesktopRelease(): Promise<void> {
+  const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi;
+  if (typeof api.installLatestDesktopRelease !== 'function') {
+    throw new Error('Desktop update installs are unavailable in this running app. Restart WilyTrader Desktop.');
+  }
+  if (!window.confirm('Download and install the latest WilyTrader Desktop update now? WilyTrader will close after starting the installer.')) return;
+  setSettingsMessage('Downloading WilyTrader Desktop installer...');
+  const result = await api.installLatestDesktopRelease();
   setSettingsMessage(result.message, !result.ok);
 }
 
