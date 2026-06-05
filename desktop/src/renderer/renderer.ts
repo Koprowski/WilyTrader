@@ -19,6 +19,17 @@ let fetchedGeminiCliModels: Array<{ id: string; createdAtMs: number }> = [];
 let finalizationTimer: number | null = null;
 let latestFinalization: WilyTraderSessionFinalization | null = null;
 let latestStatus: WilyTraderDesktopStatus | null = null;
+let desktopUpdateInstalling = false;
+
+interface DesktopUpdateProgress {
+  stage: 'preparing' | 'downloading' | 'downloaded' | 'launching' | 'launched' | 'failed';
+  version: string;
+  installerName: string;
+  message: string;
+  downloadedBytes: number;
+  totalBytes: number | null;
+  percent: number | null;
+}
 
 const INCREMENTAL_AUDIO_CHUNK_MS = 60_000;
 
@@ -128,6 +139,7 @@ type WilyTraderDesktopRuntimeApi = typeof window.wilyTraderDesktop & Partial<{
   openLatestDesktopRelease: () => Promise<{ ok: boolean; message: string; url?: string }>;
   downloadLatestDesktopRelease: () => Promise<{ ok: boolean; message: string; url?: string }>;
   installLatestDesktopRelease: () => Promise<{ ok: boolean; message: string; installerPath?: string; releaseUrl?: string | null }>;
+  onDesktopUpdateProgress: (callback: (progress: DesktopUpdateProgress) => void) => () => void;
 }>;
 
 const startButton = document.querySelector<HTMLButtonElement>('[data-action="start"]');
@@ -161,6 +173,10 @@ const desktopVersionEl = document.querySelector<HTMLElement>('[data-desktop-vers
 const desktopUpdateEl = document.querySelector<HTMLElement>('[data-desktop-update]');
 const desktopGuidanceEl = document.querySelector<HTMLElement>('[data-desktop-guidance]');
 const desktopUpdateActionsEl = document.querySelector<HTMLElement>('[data-desktop-update-actions]');
+const desktopUpdateProgressEl = document.querySelector<HTMLElement>('[data-desktop-update-progress]');
+const desktopUpdateProgressLabelEl = document.querySelector<HTMLElement>('[data-desktop-update-progress-label]');
+const desktopUpdateProgressSizeEl = document.querySelector<HTMLElement>('[data-desktop-update-progress-size]');
+const desktopUpdateProgressFillEl = document.querySelector<HTMLElement>('[data-desktop-update-progress-fill]');
 const extensionPathEl = document.querySelector<HTMLElement>('[data-extension-path]');
 const settingsExtensionVersionEl = document.querySelector<HTMLElement>('[data-settings-extension-version]');
 const dependencyStatusEl = document.querySelector<HTMLElement>('[data-dependency-status]');
@@ -266,6 +282,9 @@ getSelect('geminiCliModels')?.addEventListener('change', () => {
 });
 
 window.wilyTraderDesktop.onStatus(renderStatus);
+if (typeof (window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi).onDesktopUpdateProgress === 'function') {
+  (window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi).onDesktopUpdateProgress(showDesktopUpdateProgress);
+}
 window.wilyTraderDesktop.onToggleSessionHotkey(() => {
   if (stopping || discarding) return;
   if (sessionStartedAtMs || mediaRecorder) void stopAudioFirstSession().catch(showError);
@@ -614,12 +633,15 @@ function renderDesktopUpdateStatus(update: WilyTraderDesktopStatus['desktopUpdat
   if (desktopUpdateEl) desktopUpdateEl.textContent = update.updateMessage;
 
   if (desktopGuidanceEl) {
-    desktopGuidanceEl.hidden = !update.updateAvailable;
-    desktopGuidanceEl.textContent = update.updateAvailable && update.latestVersion
-      ? `WilyTrader checks automatically at startup. Install Update downloads WilyTrader ${update.latestVersion}, starts the installer, and closes this app.`
-      : '';
+    desktopGuidanceEl.hidden = !update.updateAvailable && !desktopUpdateInstalling;
+    desktopGuidanceEl.textContent = desktopUpdateInstalling
+      ? 'Downloading and starting the WilyTrader installer. Keep this window open until the installer appears.'
+      : update.updateAvailable && update.latestVersion
+        ? `WilyTrader checks automatically at startup. Install Update downloads WilyTrader ${update.latestVersion}, starts the installer, and closes this app.`
+        : '';
   }
-  if (desktopUpdateActionsEl) desktopUpdateActionsEl.hidden = !update.updateAvailable;
+  if (desktopUpdateActionsEl) desktopUpdateActionsEl.hidden = !update.updateAvailable && !desktopUpdateInstalling;
+  setDesktopUpdateButtonsDisabled(desktopUpdateInstalling);
 }
 
 function formatExtensionVersionSummary(extension: {
@@ -1116,9 +1138,85 @@ async function installLatestDesktopRelease(): Promise<void> {
     throw new Error('Desktop update installs are unavailable in this running app. Restart WilyTrader.');
   }
   if (!window.confirm('Download and install the latest WilyTrader update now? WilyTrader will close after starting the installer.')) return;
-  setSettingsMessage('Downloading WilyTrader installer...');
-  const result = await api.installLatestDesktopRelease();
-  setSettingsMessage(result.message, !result.ok);
+  desktopUpdateInstalling = true;
+  setDesktopUpdateButtonsDisabled(true);
+  showDesktopUpdateProgress({
+    stage: 'preparing',
+    version: latestStatus?.desktopUpdate.latestVersion ?? '',
+    installerName: '',
+    message: 'Preparing WilyTrader installer download.',
+    downloadedBytes: 0,
+    totalBytes: null,
+    percent: null,
+  });
+  setSettingsMessage('Preparing WilyTrader installer download...');
+  try {
+    const result = await api.installLatestDesktopRelease();
+    setSettingsMessage(result.message, !result.ok);
+    if (!result.ok) {
+      desktopUpdateInstalling = false;
+      setDesktopUpdateButtonsDisabled(false);
+    }
+  } catch (err) {
+    desktopUpdateInstalling = false;
+    setDesktopUpdateButtonsDisabled(false);
+    showDesktopUpdateProgress({
+      stage: 'failed',
+      version: latestStatus?.desktopUpdate.latestVersion ?? '',
+      installerName: '',
+      message: `Desktop install failed: ${(err as Error).message}`,
+      downloadedBytes: 0,
+      totalBytes: null,
+      percent: null,
+    });
+    throw err;
+  }
+}
+
+function setDesktopUpdateButtonsDisabled(disabled: boolean): void {
+  for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>('[data-action="download-desktop-update"]'))) {
+    button.disabled = disabled;
+    button.textContent = disabled ? 'Installing...' : 'Install Update';
+  }
+  for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>('[data-action="check-desktop-update"]'))) {
+    button.disabled = disabled;
+  }
+}
+
+function showDesktopUpdateProgress(progress: DesktopUpdateProgress): void {
+  if (!desktopUpdateProgressEl) return;
+  desktopUpdateProgressEl.hidden = false;
+  desktopUpdateProgressEl.dataset.stage = progress.stage;
+
+  const percent = progress.percent ?? (
+    progress.totalBytes ? Math.round((progress.downloadedBytes / progress.totalBytes) * 100) : null
+  );
+  const width = Math.max(0, Math.min(100, percent ?? (progress.stage === 'preparing' ? 8 : 18)));
+  if (desktopUpdateProgressFillEl) desktopUpdateProgressFillEl.style.width = `${width}%`;
+
+  const version = progress.version ? ` ${progress.version}` : '';
+  const sizeText = formatBytesProgress(progress);
+  const percentText = percent === null ? '' : `${percent}%`;
+  const detail = [percentText, sizeText].filter(Boolean).join(' - ');
+  const label = progress.stage === 'downloading'
+    ? `Downloading WilyTrader${version} installer${detail ? `: ${detail}` : ''}`
+    : progress.message;
+
+  if (desktopUpdateProgressLabelEl) desktopUpdateProgressLabelEl.textContent = label;
+  if (desktopUpdateProgressSizeEl) desktopUpdateProgressSizeEl.textContent = progress.installerName || '';
+  if (desktopUpdateEl) desktopUpdateEl.textContent = label;
+  setSettingsMessage(label, progress.stage === 'failed');
+}
+
+function formatBytesProgress(progress: Pick<DesktopUpdateProgress, 'downloadedBytes' | 'totalBytes'>): string {
+  if (progress.totalBytes) return `${formatBytes(progress.downloadedBytes)} of ${formatBytes(progress.totalBytes)}`;
+  return progress.downloadedBytes > 0 ? formatBytes(progress.downloadedBytes) : '';
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
 }
 
 function renderOpenrouterModelOptions(): void {

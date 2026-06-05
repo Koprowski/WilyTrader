@@ -1,5 +1,16 @@
 # WilyTrader Handoff
 
+## 2026-06-05 Desktop Update Progress UI
+
+Resolution for release tag `0.4.9`: Desktop app version is bumped to `0.2.3`
+and the **Install Update** flow now streams the installer download instead of
+buffering it invisibly. The main process emits `desktop:update-download-progress`
+events with stage, bytes, total bytes, and percent; the Desktop App panel renders
+a compact progress row and disables update controls until the installer handoff
+has started or failed. This only improves update installs initiated from an app
+version that already contains the progress UI; older installed builds still need
+one update into this version before future update progress is visible.
+
 ## 2026-06-05 Desktop 0.2.2 Update Test Release
 
 Resolution for release tag `0.4.8`: Desktop app version is bumped from `0.2.1`

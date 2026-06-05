@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, desktopCapturer, dialog, globalShortcut, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, WebContents, clipboard, desktopCapturer, dialog, globalShortcut, ipcMain, shell } from 'electron';
 import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as os from 'node:os';
@@ -413,7 +413,7 @@ function registerIpc(): void {
   });
   ipcMain.handle('desktop:open-latest-release', async () => openLatestDesktopReleasePage());
   ipcMain.handle('desktop:download-latest-release', async () => openLatestDesktopDownload());
-  ipcMain.handle('desktop:install-latest-release', async () => installLatestDesktopRelease());
+  ipcMain.handle('desktop:install-latest-release', async (event) => installLatestDesktopRelease(event.sender));
 }
 
 function debugLog(scope: string, message: string, details?: unknown): void {
@@ -4041,7 +4041,7 @@ async function openLatestDesktopDownload(): Promise<{ ok: boolean; message: stri
   return { ok: true, message: `Opened WilyTrader ${latest} installer download.`, url };
 }
 
-async function installLatestDesktopRelease(): Promise<{ ok: boolean; message: string; installerPath?: string; releaseUrl?: string | null }> {
+async function installLatestDesktopRelease(sender?: WebContents): Promise<{ ok: boolean; message: string; installerPath?: string; releaseUrl?: string | null }> {
   const release = await fetchLatestWilyTraderRelease();
   const desktopVersion = release.desktopInstaller?.version ?? release.version;
   const currentVersion = app.getVersion() || '0.0.0';
@@ -4054,9 +4054,42 @@ async function installLatestDesktopRelease(): Promise<{ ok: boolean; message: st
 
   const updateDir = path.join(os.tmpdir(), 'wilytrader-desktop-updates');
   const installerPath = path.join(updateDir, safeUpdateFileName(release.desktopInstaller.name));
+  const sendProgress = (stage: DesktopUpdateProgress['stage'], message: string, progress: DownloadProgress = {
+    downloadedBytes: 0,
+    totalBytes: null,
+    percent: null,
+  }) => {
+    if (!sender || sender.isDestroyed()) return;
+    sender.send('desktop:update-download-progress', {
+      stage,
+      version: desktopVersion,
+      installerName: release.desktopInstaller?.name ?? '',
+      message,
+      ...progress,
+    } satisfies DesktopUpdateProgress);
+  };
+
   try {
-    await downloadFile(release.desktopInstaller.url, installerPath);
+    sendProgress('preparing', `Preparing WilyTrader ${desktopVersion} installer download.`);
+    const bytes = await downloadFile(release.desktopInstaller.url, installerPath, {
+      onProgress: (progress) => sendProgress('downloading', `Downloading WilyTrader ${desktopVersion} installer.`, progress),
+    });
+    sendProgress('downloaded', `Downloaded WilyTrader ${desktopVersion} installer.`, {
+      downloadedBytes: bytes,
+      totalBytes: bytes,
+      percent: 100,
+    });
+    sendProgress('launching', `Starting WilyTrader ${desktopVersion} installer.`, {
+      downloadedBytes: bytes,
+      totalBytes: bytes,
+      percent: 100,
+    });
     await launchUpdateInstaller(installerPath);
+    sendProgress('launched', `Installer launched. WilyTrader will close so the update can continue.`, {
+      downloadedBytes: bytes,
+      totalBytes: bytes,
+      percent: 100,
+    });
     setTimeout(() => app.quit(), 750);
     return {
       ok: true,
@@ -4065,6 +4098,7 @@ async function installLatestDesktopRelease(): Promise<{ ok: boolean; message: st
       releaseUrl: release.htmlUrl,
     };
   } catch (err) {
+    sendProgress('failed', `Desktop install failed: ${(err as Error).message}`);
     if (fs.existsSync(installerPath)) {
       shell.showItemInFolder(installerPath);
       return {
@@ -4114,6 +4148,19 @@ interface WilyTraderReleaseInfo {
   htmlUrl: string;
   desktopInstaller: WilyTraderReleaseAsset | null;
   extensionZip: WilyTraderReleaseAsset | null;
+}
+
+interface DownloadProgress {
+  downloadedBytes: number;
+  totalBytes: number | null;
+  percent: number | null;
+}
+
+interface DesktopUpdateProgress extends DownloadProgress {
+  stage: 'preparing' | 'downloading' | 'downloaded' | 'launching' | 'launched' | 'failed';
+  version: string;
+  installerName: string;
+  message: string;
 }
 
 interface SettingsTestLlmGuidance {
@@ -4260,13 +4307,54 @@ async function installWhisperDependency(): Promise<{ ok: boolean; message: strin
   }
 }
 
-async function downloadFile(url: string, dest: string): Promise<number> {
+async function downloadFile(
+  url: string,
+  dest: string,
+  options: { onProgress?: (progress: DownloadProgress) => void } = {}
+): Promise<number> {
   const res = await fetch(url, { redirect: 'follow' });
   if (!res.ok) throw new Error(`Download failed (${res.status}) for ${url}`);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
-  const buffer = Buffer.from(await res.arrayBuffer());
-  fs.writeFileSync(dest, buffer);
-  return buffer.length;
+  const totalHeader = res.headers.get('content-length');
+  const parsedTotal = totalHeader ? Number(totalHeader) : NaN;
+  const totalBytes = Number.isFinite(parsedTotal) && parsedTotal > 0 ? parsedTotal : null;
+  let downloadedBytes = 0;
+  options.onProgress?.({ downloadedBytes, totalBytes, percent: totalBytes ? 0 : null });
+
+  if (!res.body) {
+    const buffer = Buffer.from(await res.arrayBuffer());
+    fs.writeFileSync(dest, buffer);
+    options.onProgress?.({
+      downloadedBytes: buffer.length,
+      totalBytes: totalBytes ?? buffer.length,
+      percent: 100,
+    });
+    return buffer.length;
+  }
+
+  const file = fs.createWriteStream(dest);
+  try {
+    for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+      const buffer = Buffer.from(chunk);
+      downloadedBytes += buffer.length;
+      if (!file.write(buffer)) {
+        await new Promise<void>((resolve) => file.once('drain', resolve));
+      }
+      options.onProgress?.({
+        downloadedBytes,
+        totalBytes,
+        percent: totalBytes ? Math.min(100, Math.round((downloadedBytes / totalBytes) * 100)) : null,
+      });
+    }
+    await new Promise<void>((resolve, reject) => {
+      file.end((err?: Error | null) => err ? reject(err) : resolve());
+    });
+    return downloadedBytes;
+  } catch (err) {
+    file.destroy();
+    try { fs.rmSync(dest, { force: true }); } catch {}
+    throw err;
+  }
 }
 
 async function extractZipFile(zipPath: string, destination: string): Promise<number> {

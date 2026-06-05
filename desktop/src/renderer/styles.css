@@ -212,8 +212,66 @@ summary:focus-visible {
 }
 
 .extension-guidance[hidden],
-.extension-update-actions[hidden] {
+.extension-update-actions[hidden],
+.update-progress[hidden] {
   display: none;
+}
+
+.update-progress {
+  display: grid;
+  gap: 7px;
+  max-width: 640px;
+  padding: 9px 10px;
+  border: 1px solid #2f5f46;
+  border-radius: 7px;
+  background: #0f1d17;
+  color: #e8f8ef;
+}
+
+.update-progress[data-stage="failed"] {
+  border-color: #7f3434;
+  background: #261414;
+  color: #ffe8e8;
+}
+
+.update-progress-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.update-progress-heading span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.update-progress-heading span:last-child {
+  flex: 0 0 auto;
+  color: #9fb6c7;
+  font-size: 12px;
+}
+
+.update-progress-track {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #20313d;
+}
+
+.update-progress-track span {
+  display: block;
+  width: 0%;
+  height: 100%;
+  border-radius: inherit;
+  background: #4ade80;
+  transition: width 120ms linear;
+}
+
+.update-progress[data-stage="failed"] .update-progress-track span {
+  background: #ff6b6b;
 }
 
 .modal[hidden] {

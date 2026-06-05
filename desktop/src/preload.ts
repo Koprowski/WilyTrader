@@ -99,6 +99,27 @@ const api = {
       installerPath?: string;
       releaseUrl?: string | null;
     }>,
+  onDesktopUpdateProgress: (callback: (progress: {
+    stage: 'preparing' | 'downloading' | 'downloaded' | 'launching' | 'launched' | 'failed';
+    version: string;
+    installerName: string;
+    message: string;
+    downloadedBytes: number;
+    totalBytes: number | null;
+    percent: number | null;
+  }) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, progress: {
+      stage: 'preparing' | 'downloading' | 'downloaded' | 'launching' | 'launched' | 'failed';
+      version: string;
+      installerName: string;
+      message: string;
+      downloadedBytes: number;
+      totalBytes: number | null;
+      percent: number | null;
+    }) => callback(progress);
+    ipcRenderer.on('desktop:update-download-progress', listener);
+    return () => ipcRenderer.removeListener('desktop:update-download-progress', listener);
+  },
   moveExtensionLocation: () =>
     ipcRenderer.invoke('extension:move-location') as Promise<{
       ok: boolean;
