@@ -43,6 +43,7 @@ export interface WilyTraderDesktopStatus {
   executionsReceived: number;
   screenshotsReceived: number;
   finalization: WilyTraderSessionFinalization | null;
+  desktopUpdate: WilyTraderDesktopUpdateStatus;
   extension: WilyTraderExtensionStatus;
   settings: WilyTraderDesktopSettings;
 }
@@ -61,6 +62,14 @@ export interface WilyTraderSessionFinalization {
 export interface WilyTraderDesktopAppInfo {
   name: string;
   version: string;
+}
+
+export interface WilyTraderDesktopUpdateStatus {
+  installedVersion: string;
+  latestVersion: string | null;
+  updateAvailable: boolean;
+  updateMessage: string;
+  checkedAt: string | null;
 }
 
 export interface StartSessionResult extends WilyTraderDesktopStatus {

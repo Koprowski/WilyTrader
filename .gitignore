@@ -10,3 +10,4 @@ Thumbs.db
 # Temporary output
 .tmp/
 tmp/
+desktop/release/

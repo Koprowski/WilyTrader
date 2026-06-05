@@ -17,6 +17,7 @@ import type {
   TranscriptSegment,
   WilyTraderDesktopSettings,
   WilyTraderDesktopStatus,
+  WilyTraderDesktopUpdateStatus,
   WilyTraderExtensionStatus,
   WilyTraderSessionFinalization,
 } from '../shared';
@@ -25,6 +26,8 @@ const BRIDGE_PORT = 17365;
 const MAX_BRIDGE_BODY_BYTES = 25 * 1024 * 1024;
 const WILYTRADER_TAGS_API_URL = 'https://api.github.com/repos/Koprowski/WilyTrader/tags?per_page=10';
 const WILYTRADER_RELEASE_BASE_URL = 'https://github.com/Koprowski/WilyTrader/releases';
+const WILYTRADER_DESKTOP_ASSET_SUFFIX = 'desktop-setup.exe';
+const WILYTRADER_EXTENSION_ASSET_SUFFIX = 'extension.zip';
 const ffmpegPath = require('ffmpeg-static') as string | null;
 
 interface ActiveTradeSession {
@@ -227,6 +230,7 @@ let finalizingSession: FinalizingTradeSession | null = null;
 let bridgeServer: http.Server | null = null;
 let settings: WilyTraderDesktopSettings = fallbackSettings();
 let extensionStatus: WilyTraderExtensionStatus = defaultExtensionStatus();
+let desktopUpdateStatus: WilyTraderDesktopUpdateStatus = defaultDesktopUpdateStatus();
 let registeredTradeSessionHotkey: string | null = null;
 let activeGeminiSigninChild: ReturnType<typeof spawn> | null = null;
 let lastCompletedSessionDir: string | null = null;
@@ -279,6 +283,7 @@ app.whenReady().then(() => {
   createWindow();
   console.log(`[WilyTrader Desktop] started. Bridge port ${BRIDGE_PORT}. Output: ${settings.outputDir}`);
   if (settings.autoCheckExtensionUpdates) void checkExtensionUpdates();
+  if (settings.autoCheckExtensionUpdates) void checkDesktopUpdates();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -382,6 +387,12 @@ function registerIpc(): void {
   ipcMain.handle('extension:open-latest-release', async () => openLatestExtensionReleasePage());
   ipcMain.handle('extension:download-latest-release', async () => openLatestExtensionDownload());
   ipcMain.handle('extension:move-location', async () => moveWilyTraderExtensionLocation());
+  ipcMain.handle('desktop:check-updates', async () => {
+    await checkDesktopUpdates(true);
+    return getStatus();
+  });
+  ipcMain.handle('desktop:open-latest-release', async () => openLatestDesktopReleasePage());
+  ipcMain.handle('desktop:download-latest-release', async () => openLatestDesktopDownload());
 }
 
 function debugLog(scope: string, message: string, details?: unknown): void {
@@ -754,6 +765,7 @@ function getStatus(): WilyTraderDesktopStatus {
     executionsReceived: activeSession?.executionsReceived ?? finalizingSession?.executionsReceived ?? 0,
     screenshotsReceived: activeSession?.screenshotsReceived ?? finalizingSession?.screenshotsReceived ?? 0,
     finalization,
+    desktopUpdate: desktopUpdateStatus,
     extension: extensionStatus,
     settings,
   };
@@ -1871,7 +1883,7 @@ Return ONLY a JSON array. No markdown fences. Every object must include:
 - adherence_self_assessment: trader's spoken self-assessment, or null
 - needs_review: true when evidence is ambiguous
 - notes: compact extraction caveats, or null
-- meta_name: repeatable narrative/meta/setup label, or null
+- meta_name: concise token/thread meta label, or null
 - N_score, I_score, C_score, S_score: each 0 or 1
 - N_why, I_why, C_why, S_why: compact evidence for each score
 - NICS_score: N_score + I_score + C_score + S_score, 0 through 4
@@ -1882,7 +1894,7 @@ Return ONLY a JSON array. No markdown fences. Every object must include:
 - llm_grade_notes: one short evidence-based note
 
 NICS scoring:
-- N = trader clearly names the narrative/meta/setup, not just ticker.
+- N = trader clearly names the narrative/thread/setup being traded. A ticker alone is not enough unless the token name itself carries the narrative.
 - I = trader states why this token is the selected ticket or what immediate evidence supports entry.
 - C = trader states the cut/close reason.
 - S = trader states sell/stay plan, profit target, scale-out, cost recovery, or upside management.
@@ -1890,6 +1902,9 @@ NICS scoring:
 - Scout is only for partial named/intentional setup evidence worth reviewing; do not use generic direction labels such as long or short.
 - Count-to-50 eligibility is separate from NICS_score and requires N=1, I=1, and either C=1 or S=1 plus Desktop-computed size/zone checks.
 - Desktop will assign session-local meta_cluster_id values from meta_name after extraction.
+- meta_name must be tied to the token/thread/narrative. Do not use entry mechanics, buttons, signals, or generic reasons such as pulse buy, momentum, volume, interest, activity, first one, scroll and click, testing, scaling, target, or people as meta names.
+- If the transcript only describes why the button was clicked or why the trade was entered, put that in rationale/I_why and set meta_name to null.
+- Prefer labels like "<ticker> <thread/narrative>" when the token name plus transcript gives real context. If no token-specific thread is available, use null.
 
 Anti-fabrication:
 - Targets and stops must come from spoken words. "2x" may be converted from actual entry market cap.
@@ -2007,7 +2022,69 @@ function assignSessionMetaClusterIds(trades: NormalizedTrade[], session: ActiveT
 
 function normalizeTradeMetaName(value: string | null | undefined): string {
   const text = value?.trim() ?? '';
-  return text && !/^(none|null|n\/?a|unknown|unclear|missing)$/i.test(text) ? text : 'unknown';
+  if (!text || /^(none|null|n\/?a|unknown|unclear|missing)$/i.test(text)) return 'unknown';
+  return isGenericTradeMechanicMetaName(text) ? 'unknown' : text;
+}
+
+function isGenericTradeMechanicMetaName(value: string): boolean {
+  const normalized = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+  if (!normalized) return true;
+  const exact = new Set([
+    'pulse',
+    'pulse buy',
+    'pulse trade',
+    'momentum',
+    'volume',
+    'interest',
+    'activity',
+    'people',
+    'lots of people',
+    'first one',
+    'first token',
+    'scroll and click',
+    'testing',
+    'system test',
+    'scaling',
+    'scaling out',
+    'target',
+    'quick target',
+    'quick exit',
+  ]);
+  if (exact.has(normalized)) return true;
+  const words = normalized.split(/\s+/).filter(Boolean);
+  const genericWords = new Set([
+    'pulse',
+    'buy',
+    'trade',
+    'trading',
+    'momentum',
+    'volume',
+    'interest',
+    'activity',
+    'people',
+    'lot',
+    'lots',
+    'first',
+    'one',
+    'token',
+    'scroll',
+    'click',
+    'test',
+    'testing',
+    'system',
+    'scale',
+    'scaling',
+    'out',
+    'target',
+    'exit',
+    'entry',
+    'signal',
+    'reason',
+  ]);
+  return words.length > 0 && words.every((word) => genericWords.has(word));
 }
 
 function reconcileTradeReviewFields(session: ActiveTradeSession, trades: NormalizedTrade[]): NormalizedTrade[] {
@@ -2388,7 +2465,7 @@ function renderNicsBackfillPrompt(session: ActiveTradeSession, trades: Normalize
 Return ONLY a JSON array. Each object must include mockape_trade_id, token_name, meta_name, N_score, N_why, I_score, I_why, C_score, C_why, S_score, S_why, NICS_score, trade_type, llm_grade_notes.
 
 Scoring:
-- N = narrative/meta/setup named, not just ticker.
+- N = narrative/thread/setup named. A ticker alone is not enough unless the token name itself carries the narrative.
 - I = why this token or immediate evidence supports entry.
 - C = cut/close reason.
 - S = sell/stay plan, target, scale-out, cost recovery, or upside management.
@@ -2396,6 +2473,7 @@ Scoring:
 - trade_type must be "Core NICS++", "Scout", or "Non-NICS"; do not use generic direction labels like long or short.
 - Do not populate size_ok, zone_ok, cooldown_ok, counts_toward_50, hard_reset, running_count, non_nics_pnl_pct, or cluster_pnl_pct. Desktop computes those from ledger/session state.
 - Use 0 and explain missing evidence when absent.
+- meta_name must identify the token/thread/narrative, not the button clicked or entry mechanic. Do not use pulse buy, momentum, volume, interest, activity, first one, scroll and click, testing, scaling, target, or people as meta names. Put those in I_why or notes instead. Use null when no token-specific narrative/thread is available.
 
 Rows:
 \`\`\`json
@@ -3336,6 +3414,17 @@ function defaultExtensionStatus(): WilyTraderExtensionStatus {
   };
 }
 
+function defaultDesktopUpdateStatus(): WilyTraderDesktopUpdateStatus {
+  const installedVersion = app.getVersion() || '0.0.0';
+  return {
+    installedVersion,
+    latestVersion: null,
+    updateAvailable: false,
+    updateMessage: `WilyTrader Desktop ${installedVersion}; update status not checked yet.`,
+    checkedAt: null,
+  };
+}
+
 function detectLocalExtensionManifest(): Partial<WilyTraderExtensionStatus> {
   const candidates = [
     settings.wilyTraderInstallPath,
@@ -3390,6 +3479,36 @@ async function checkExtensionUpdates(force = false): Promise<void> {
 }
 
 async function fetchLatestExtensionVersion(): Promise<string> {
+  return fetchLatestWilyTraderVersion();
+}
+
+async function checkDesktopUpdates(force = false): Promise<void> {
+  if (!force && desktopUpdateStatus.checkedAt) return;
+  const installed = app.getVersion() || desktopUpdateStatus.installedVersion || '0.0.0';
+  try {
+    const latest = await fetchLatestWilyTraderVersion();
+    const updateAvailable = isRemoteVersionNewer(installed, latest);
+    desktopUpdateStatus = {
+      installedVersion: installed,
+      latestVersion: latest,
+      updateAvailable,
+      updateMessage: updateAvailable
+        ? `WilyTrader Desktop ${latest} is available; installed ${installed}.`
+        : `WilyTrader Desktop is up to date (${installed}).`,
+      checkedAt: new Date().toISOString(),
+    };
+  } catch (err) {
+    desktopUpdateStatus = {
+      ...desktopUpdateStatus,
+      installedVersion: installed,
+      updateMessage: `Desktop update check failed: ${(err as Error).message}`,
+      checkedAt: new Date().toISOString(),
+    };
+  }
+  broadcastStatus();
+}
+
+async function fetchLatestWilyTraderVersion(): Promise<string> {
   const res = await fetch(`${WILYTRADER_TAGS_API_URL}&t=${Date.now()}`, {
     method: 'GET',
     headers: {
@@ -3419,6 +3538,17 @@ async function latestKnownExtensionVersion(): Promise<string> {
   return latest;
 }
 
+async function latestKnownDesktopVersion(): Promise<string> {
+  if (desktopUpdateStatus.latestVersion) return desktopUpdateStatus.latestVersion;
+  const latest = await fetchLatestWilyTraderVersion();
+  desktopUpdateStatus = {
+    ...desktopUpdateStatus,
+    latestVersion: latest,
+    checkedAt: new Date().toISOString(),
+  };
+  return latest;
+}
+
 async function openLatestExtensionReleasePage(): Promise<{ ok: boolean; message: string; url?: string }> {
   const latest = await latestKnownExtensionVersion();
   const url = `${WILYTRADER_RELEASE_BASE_URL}/tag/v${latest}`;
@@ -3428,9 +3558,23 @@ async function openLatestExtensionReleasePage(): Promise<{ ok: boolean; message:
 
 async function openLatestExtensionDownload(): Promise<{ ok: boolean; message: string; url?: string }> {
   const latest = await latestKnownExtensionVersion();
-  const url = `${WILYTRADER_RELEASE_BASE_URL}/download/v${latest}/wilytrader-${latest}-extension.zip`;
+  const url = `${WILYTRADER_RELEASE_BASE_URL}/download/v${latest}/wilytrader-${latest}-${WILYTRADER_EXTENSION_ASSET_SUFFIX}`;
   await shell.openExternal(url);
   return { ok: true, message: `Opened WilyTrader ${latest} extension zip download.`, url };
+}
+
+async function openLatestDesktopReleasePage(): Promise<{ ok: boolean; message: string; url?: string }> {
+  const latest = await latestKnownDesktopVersion();
+  const url = `${WILYTRADER_RELEASE_BASE_URL}/tag/v${latest}`;
+  await shell.openExternal(url);
+  return { ok: true, message: `Opened WilyTrader Desktop ${latest} release page.`, url };
+}
+
+async function openLatestDesktopDownload(): Promise<{ ok: boolean; message: string; url?: string }> {
+  const latest = await latestKnownDesktopVersion();
+  const url = `${WILYTRADER_RELEASE_BASE_URL}/download/v${latest}/wilytrader-${latest}-${WILYTRADER_DESKTOP_ASSET_SUFFIX}`;
+  await shell.openExternal(url);
+  return { ok: true, message: `Opened WilyTrader Desktop ${latest} installer download.`, url };
 }
 
 interface DependencyProbeResult {
@@ -4482,12 +4626,15 @@ function runProcessProbe(command: string, args: string[], timeoutMs: number): Pr
 }
 
 function resolveLastCompletedSessionFolder(): { ok: true; message: string; path: string } | { ok: false; message: string; path?: string | null } {
-  const sessionDir = lastCompletedSessionDir ?? findLastCompletedSessionDir(settings.outputDir);
+  let sessionDir = lastCompletedSessionDir;
+  if (!sessionDir || !fs.existsSync(sessionDir)) {
+    sessionDir = findLastCompletedSessionDir(settings.outputDir);
+    lastCompletedSessionDir = sessionDir;
+  }
   if (!sessionDir) {
     return { ok: false, message: 'No completed WilyTrader session folder was found.', path: null };
   }
   if (!fs.existsSync(sessionDir)) {
-    lastCompletedSessionDir = findLastCompletedSessionDir(settings.outputDir);
     return {
       ok: false,
       message: `Last completed session folder no longer exists: ${sessionDir}`,
@@ -4953,10 +5100,13 @@ function nextSessionDir(outputDir: string, startedAt: Date): string {
 
 function findLastCompletedSessionDir(outputDir: string): string | null {
   if (!fs.existsSync(outputDir)) return null;
-  const completed = fs.readdirSync(outputDir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => {
-      const sessionDir = path.join(outputDir, entry.name);
+  const searchRoots = [outputDir, path.join(outputDir, 'Archive')]
+    .filter((dir, index, dirs) => fs.existsSync(dir) && dirs.indexOf(dir) === index);
+  const completed = searchRoots
+    .flatMap((rootDir) => fs.readdirSync(rootDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => {
+      const sessionDir = path.join(rootDir, entry.name);
       const statusPath = path.join(sessionDir, 'session_status.json');
       if (!fs.existsSync(statusPath)) return null;
       try {
@@ -4978,7 +5128,7 @@ function findLastCompletedSessionDir(outputDir: string): string | null {
       } catch {
         return null;
       }
-    })
+    }))
     .filter((item): item is { sessionDir: string; sortMs: number } => item !== null)
     .sort((a, b) => b.sortMs - a.sortMs);
   return completed[0]?.sessionDir ?? null;

@@ -66,6 +66,13 @@ interface WilyTraderDesktopStatus {
     updateAvailable: boolean;
     updateMessage: string;
   };
+  desktopUpdate: {
+    installedVersion: string;
+    latestVersion: string | null;
+    updateAvailable: boolean;
+    updateMessage: string;
+    checkedAt: string | null;
+  };
 }
 
 interface WilyTraderSessionFinalization {
@@ -108,6 +115,9 @@ type WilyTraderDesktopRuntimeApi = typeof window.wilyTraderDesktop & Partial<{
   }>;
   openLatestExtensionRelease: () => Promise<{ ok: boolean; message: string; url?: string }>;
   downloadLatestExtensionRelease: () => Promise<{ ok: boolean; message: string; url?: string }>;
+  checkDesktopUpdates: () => Promise<WilyTraderDesktopStatus>;
+  openLatestDesktopRelease: () => Promise<{ ok: boolean; message: string; url?: string }>;
+  downloadLatestDesktopRelease: () => Promise<{ ok: boolean; message: string; url?: string }>;
 }>;
 
 const startButton = document.querySelector<HTMLButtonElement>('[data-action="start"]');
@@ -136,6 +146,10 @@ const extensionVersionEl = document.querySelector<HTMLElement>('[data-extension-
 const extensionUpdateEl = document.querySelector<HTMLElement>('[data-extension-update]');
 const extensionGuidanceEl = document.querySelector<HTMLElement>('[data-extension-guidance]');
 const extensionUpdateActionsEl = document.querySelector<HTMLElement>('[data-extension-update-actions]');
+const desktopVersionEl = document.querySelector<HTMLElement>('[data-desktop-version]');
+const desktopUpdateEl = document.querySelector<HTMLElement>('[data-desktop-update]');
+const desktopGuidanceEl = document.querySelector<HTMLElement>('[data-desktop-guidance]');
+const desktopUpdateActionsEl = document.querySelector<HTMLElement>('[data-desktop-update-actions]');
 const extensionPathEl = document.querySelector<HTMLElement>('[data-extension-path]');
 const settingsExtensionVersionEl = document.querySelector<HTMLElement>('[data-settings-extension-version]');
 const dependencyStatusEl = document.querySelector<HTMLElement>('[data-dependency-status]');
@@ -212,6 +226,9 @@ bindAction('open-extension-folder', () => void openExtensionFolder());
 bindAction('move-extension-location', () => void moveExtensionLocation());
 bindAction('open-extension-release', () => void openLatestExtensionRelease());
 bindAction('download-extension-update', () => void downloadLatestExtensionRelease());
+bindAction('check-desktop-update', () => void checkDesktopUpdates());
+bindAction('open-desktop-release', () => void openLatestDesktopRelease());
+bindAction('download-desktop-update', () => void downloadLatestDesktopRelease());
 for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>('[data-action="open-chrome-extensions"]'))) {
   debugLog('renderer', 'binding action', { action: 'open-chrome-extensions', found: true });
   button.addEventListener('click', (event) => {
@@ -566,12 +583,27 @@ function renderStatus(status: WilyTraderDesktopStatus): void {
       ? `${status.extension.updateMessage} Trading ${tradingTarget}.`
       : status.extension.updateMessage;
   }
+  renderDesktopUpdateStatus(status.desktopUpdate);
   renderExtensionUpdateGuidance(status.extension);
   const extensionPath = status.extension.localExtensionPath ?? 'No local manifest path detected';
   if (extensionPathEl) extensionPathEl.textContent = extensionPath;
   const extensionFolderButton = document.querySelector<HTMLButtonElement>('[data-action="open-extension-folder"]');
   if (extensionFolderButton) extensionFolderButton.textContent = extensionPath;
   populateSettings(status.settings);
+}
+
+function renderDesktopUpdateStatus(update: WilyTraderDesktopStatus['desktopUpdate']): void {
+  const installed = update.installedVersion || 'unknown';
+  if (desktopVersionEl) desktopVersionEl.textContent = `Installed: ${installed}`;
+  if (desktopUpdateEl) desktopUpdateEl.textContent = update.updateMessage;
+
+  if (desktopGuidanceEl) {
+    desktopGuidanceEl.hidden = !update.updateAvailable;
+    desktopGuidanceEl.textContent = update.updateAvailable && update.latestVersion
+      ? `Download and run the WilyTrader Desktop ${update.latestVersion} installer.`
+      : '';
+  }
+  if (desktopUpdateActionsEl) desktopUpdateActionsEl.hidden = !update.updateAvailable;
 }
 
 function formatExtensionTradingTarget(extension: {
@@ -760,6 +792,15 @@ async function saveSettingsFromForm(): Promise<void> {
 async function checkExtensionUpdates(): Promise<void> {
   setUiBusy(false, 'Checking WilyTrader extension update status...');
   renderStatus(await window.wilyTraderDesktop.checkExtensionUpdates());
+}
+
+async function checkDesktopUpdates(): Promise<void> {
+  setUiBusy(false, 'Checking WilyTrader Desktop update status...');
+  const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi;
+  if (typeof api.checkDesktopUpdates !== 'function') {
+    throw new Error('Desktop update checks are unavailable in this running app. Restart WilyTrader Desktop.');
+  }
+  renderStatus(await api.checkDesktopUpdates());
 }
 
 async function refreshDependencyStatus(): Promise<void> {
@@ -978,6 +1019,24 @@ async function downloadLatestExtensionRelease(): Promise<void> {
     throw new Error('Download links are unavailable in this running app. Restart WilyTrader Desktop.');
   }
   const result = await api.downloadLatestExtensionRelease();
+  setSettingsMessage(result.message, !result.ok);
+}
+
+async function openLatestDesktopRelease(): Promise<void> {
+  const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi;
+  if (typeof api.openLatestDesktopRelease !== 'function') {
+    throw new Error('Desktop release links are unavailable in this running app. Restart WilyTrader Desktop.');
+  }
+  const result = await api.openLatestDesktopRelease();
+  setSettingsMessage(result.message, !result.ok);
+}
+
+async function downloadLatestDesktopRelease(): Promise<void> {
+  const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi;
+  if (typeof api.downloadLatestDesktopRelease !== 'function') {
+    throw new Error('Desktop download links are unavailable in this running app. Restart WilyTrader Desktop.');
+  }
+  const result = await api.downloadLatestDesktopRelease();
   setSettingsMessage(result.message, !result.ok);
 }
 

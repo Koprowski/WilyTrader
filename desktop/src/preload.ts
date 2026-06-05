@@ -76,6 +76,11 @@ const api = {
     ipcRenderer.invoke('extension:open-latest-release') as Promise<{ ok: boolean; message: string; url?: string }>,
   downloadLatestExtensionRelease: () =>
     ipcRenderer.invoke('extension:download-latest-release') as Promise<{ ok: boolean; message: string; url?: string }>,
+  checkDesktopUpdates: () => ipcRenderer.invoke('desktop:check-updates') as Promise<WilyTraderDesktopStatus>,
+  openLatestDesktopRelease: () =>
+    ipcRenderer.invoke('desktop:open-latest-release') as Promise<{ ok: boolean; message: string; url?: string }>,
+  downloadLatestDesktopRelease: () =>
+    ipcRenderer.invoke('desktop:download-latest-release') as Promise<{ ok: boolean; message: string; url?: string }>,
   moveExtensionLocation: () =>
     ipcRenderer.invoke('extension:move-location') as Promise<{
       ok: boolean;

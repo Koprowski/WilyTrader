@@ -1368,6 +1368,80 @@
     return Boolean(getAxiomExecutionQuoteReadiness(token).ready);
   }
 
+  function getPulseAutoBuyExecutionQuoteReadiness(token) {
+    if (token?.platform !== "axiom" || !token?.key) return { ready: true, reason: "non-axiom" };
+    if (!isAxiomMemeRoute(new URL(window.location.href))) {
+      resetAxiomExecutionQuoteStability();
+      return { ready: false, message: "Waiting for Axiom token page before Pulse auto-buy." };
+    }
+    if (/^\s*Axiom(?:\s+SOL)?\s*\|\s*Pulse\s*$/i.test(document.title || "")) {
+      resetAxiomExecutionQuoteStability();
+      return { ready: false, message: "Waiting for Axiom token title before Pulse auto-buy." };
+    }
+
+    const mismatchPct = Number(token.marketCapMismatchPct || 0);
+    const rejectedMarketCap = Number(token.marketCapRejectedMarketCap || 0);
+    if (rejectedMarketCap > 0 && mismatchPct > AXIOM_MARKET_CAP_SOURCE_AGREEMENT_MAX_PCT) {
+      resetAxiomExecutionQuoteStability();
+      return {
+        ready: false,
+        message: "Waiting for Axiom title/header market caps to agree before Pulse auto-buy.",
+        mismatchPct: round(mismatchPct, 4),
+      };
+    }
+
+    if (!isPulseAutoBuyHydratedMarketCapSource(token.marketCapSource)) {
+      resetAxiomExecutionQuoteStability();
+      return {
+        ready: false,
+        message: "Waiting for Axiom title market cap before Pulse auto-buy.",
+        marketCapSource: token.marketCapSource || null,
+      };
+    }
+
+    updateAxiomExecutionQuoteStability(token);
+    return {
+      ready: true,
+      reason: "pulse-hydrated-quote",
+      marketCapSource: token.marketCapSource || null,
+    };
+  }
+
+  function isPulseAutoBuyHydratedMarketCapSource(source) {
+    return source === AXIOM_TITLE_MARKET_CAP_SOURCE;
+  }
+
+  async function waitForPulseAutoBuyExecutionQuoteReady(token, timeoutMs = PULSE_AUTO_BUY_CHECK_MS) {
+    let latestToken = token;
+    let latestReadiness = getPulseAutoBuyExecutionQuoteReadiness(latestToken);
+    if (latestReadiness.ready) return { ready: true, token: latestToken, quoteReadiness: latestReadiness };
+
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      await new Promise((resolve) => window.setTimeout(resolve, 50));
+      updateActiveToken();
+      if (activeToken?.key && activeToken.key !== token?.key) {
+        return {
+          ready: false,
+          token: activeToken,
+          quoteReadiness: { ready: false, message: "Execution cancelled: token changed while waiting for Pulse auto-buy market cap." },
+        };
+      }
+      latestToken = activeToken?.key === token?.key ? activeToken : latestToken;
+      latestReadiness = getPulseAutoBuyExecutionQuoteReadiness(latestToken);
+      if (latestReadiness.ready) return { ready: true, token: latestToken, quoteReadiness: latestReadiness };
+    }
+
+    return { ready: false, token: latestToken, quoteReadiness: latestReadiness };
+  }
+
+  async function waitForExecutionQuoteReady(token, options = {}, timeoutMs = AXIOM_EXECUTION_QUOTE_STABLE_MS + 1_100) {
+    if (options.quoteReadinessMode === "pulse-auto-buy") {
+      return waitForPulseAutoBuyExecutionQuoteReady(token, timeoutMs);
+    }
+    return waitForAxiomExecutionQuoteReady(token, timeoutMs);
+  }
+
   async function waitForAxiomExecutionQuoteReady(token, timeoutMs = AXIOM_EXECUTION_QUOTE_STABLE_MS + 1_100) {
     let latestToken = token;
     let latestReadiness = getAxiomExecutionQuoteReadiness(latestToken);
@@ -2274,7 +2348,7 @@
     schedulePendingPulseAutoBuyCheck(PULSE_AUTO_BUY_CHECK_MS);
     window.setTimeout(() => {
       quickBuyBox.classList.remove("wt-axiom-pulse-quick-buy-active");
-      triggerAxiomPulseRowNavigation(row, quickBuyBox, navigationTarget);
+      triggerAxiomPulseRowNavigation(row, quickBuyBox, navigationTarget, token);
       schedulePendingPulseAutoBuyCheck(PULSE_AUTO_BUY_CHECK_MS);
     }, 120);
   }
@@ -2640,6 +2714,12 @@
   }
 
   function findAxiomPulseTokenRow(quickBuyBox) {
+    const dataRow = quickBuyBox?.closest?.("[data-pulse-token-address]");
+    if (dataRow && !root?.contains(dataRow)) {
+      const rect = dataRow.getBoundingClientRect();
+      if (rect?.width > quickBuyBox.getBoundingClientRect().width && rect.height >= 48) return dataRow;
+    }
+
     const quickRect = quickBuyBox.getBoundingClientRect();
     const candidates = [];
     let element = quickBuyBox.parentElement;
@@ -2754,6 +2834,17 @@
     }
   }
 
+  function updatePendingPulseAutoBuy(updates) {
+    const pending = readPendingPulseAutoBuy();
+    if (!pending) return false;
+    try {
+      window.sessionStorage.setItem(PULSE_AUTO_BUY_KEY, JSON.stringify({ ...pending, ...updates }));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function readPendingPulseAutoBuy() {
     try {
       const raw = window.sessionStorage.getItem(PULSE_AUTO_BUY_KEY);
@@ -2813,10 +2904,22 @@
       schedulePendingPulseAutoBuyCheck(PULSE_AUTO_BUY_CHECK_MS);
       return;
     }
-    const sourceTokenMismatch = Boolean(pending.sourceTokenKey && token.key !== pending.sourceTokenKey);
-    if (sourceTokenMismatch) {
+    const expectedPairKey = pending.expectedPairKey || (
+      pending.expectedPairAddress ? `axiom:${pending.chain || token.chain || "SOL"}:${pending.expectedPairAddress}` : null
+    );
+    const expectedKeys = [expectedPairKey, pending.sourceTokenKey].filter(Boolean);
+    const sourceTokenMismatch = expectedKeys.length > 0 ? !expectedKeys.includes(token.key) : false;
+    const acceptedNativePairNavigation = sourceTokenMismatch
+      && pending.navigationMode === "axiom-pulse-native-row"
+      && pending.sourceTokenAddress
+      && token.address
+      && token.address !== pending.sourceTokenAddress
+      && /pump$/i.test(pending.sourceTokenAddress)
+      && !/pump$/i.test(token.address);
+    if (sourceTokenMismatch && !acceptedNativePairNavigation) {
       emitDiagnostic("pulse-auto-buy-source-mismatch-blocked", {
         pendingTokenKey: pending.sourceTokenKey || null,
+        expectedPairKey,
         pendingTokenName: pending.tokenName || null,
         openedToken: summarizeToken(token),
       });
@@ -2824,11 +2927,24 @@
       setStatus(`Pulse opened ${token.name || shortenAddress(token.address)}, but it did not match the queued token. Auto-buy cancelled.`);
       return;
     }
+    if (acceptedNativePairNavigation) {
+      updatePendingPulseAutoBuy({
+        expectedPairAddress: token.address,
+        expectedPairKey: token.key,
+        expectedPairAcceptedAt: Date.now(),
+      });
+      emitDiagnostic("pulse-auto-buy-native-pair-accepted", {
+        pendingTokenKey: pending.sourceTokenKey || null,
+        pendingMintAddress: pending.sourceTokenAddress || null,
+        openedToken: summarizeToken(token),
+      });
+    }
 
     const readiness = getPulseAutoBuyReadiness(token, pending);
     if (!readiness.ready) {
       emitPulseAutoBuyDiagnostic("pulse-auto-buy-wait-readiness", {
         message: readiness.message,
+        quoteReadiness: readiness.quoteReadiness || null,
         token: summarizeToken(token),
         pendingTokenKey: pending.sourceTokenKey || null,
         pendingTokenName: pending.tokenName || null,
@@ -2865,6 +2981,7 @@
       const execution = await buy(amountNative, token, {
         delayMs: remainingDelayMs,
         delayStartedAtMs: clickCreatedAt,
+        quoteReadinessMode: "pulse-auto-buy",
         resolveLatestToken: () => {
           updateActiveToken();
           const latest = activeToken?.key === token.key ? activeToken : null;
@@ -2892,9 +3009,15 @@
     if (!detectMarketCap()) {
       return { ready: false, message: `Waiting for Axiom market cap before auto-buying ${amount}.` };
     }
-    const quoteReadiness = getAxiomExecutionQuoteReadiness(token);
-    if (!quoteReadiness.ready) return { ready: false, message: `Waiting for current Axiom market cap before auto-buying ${amount}.` };
-    return { ready: true, message: "" };
+    const quoteReadiness = getPulseAutoBuyExecutionQuoteReadiness(token);
+    if (!quoteReadiness.ready) {
+      return {
+        ready: false,
+        message: quoteReadiness.message || `Waiting for current Axiom market cap before auto-buying ${amount}.`,
+        quoteReadiness,
+      };
+    }
+    return { ready: true, message: "", quoteReadiness };
   }
 
   function emitPulseAutoBuyDiagnostic(stage, details) {
@@ -2939,7 +3062,71 @@
     return candidates[0]?.text || shortenAddress(address);
   }
 
-  function triggerAxiomPulseRowNavigation(row, quickBuyBox, navigationTarget = null) {
+  function buildAxiomPulseTokenUrl(token) {
+    if (!token?.address) return null;
+    const rawChain = String(token.chain || token.platformChain || "sol").toLowerCase();
+    const chain = rawChain === "sol" || rawChain === "solana" ? "sol" : rawChain;
+    return `https://axiom.trade/meme/${encodeURIComponent(token.address)}?chain=${encodeURIComponent(chain)}`;
+  }
+
+  function triggerAxiomPulseRowNavigation(row, quickBuyBox, navigationTarget = null, token = null) {
+    const nativeRow = findAxiomPulseNativeNavigationRow(row, quickBuyBox);
+    if (nativeRow) {
+      updatePendingPulseAutoBuy({
+        navigationMode: "axiom-pulse-native-row",
+        navigationStartedAt: Date.now(),
+        sourceMintAddress: token?.address || null,
+      });
+      emitDiagnostic("pulse-auto-buy-navigate-native-row", {
+        token: summarizeToken(token),
+        rowMintAddress: nativeRow.getAttribute("data-pulse-token-address") || null,
+        navigationHref: navigationTarget?.getAttribute?.("href") || navigationTarget?.href || null,
+      });
+      if (triggerAxiomPulseNativeRowClick(nativeRow, quickBuyBox)) {
+        window.setTimeout(() => {
+          try {
+            const url = new URL(window.location.href);
+            if (!isAxiomMemeRoute(url)) return;
+            const expectedPairAddress = detectAxiomTokenAddress(url);
+            if (!expectedPairAddress || expectedPairAddress === token?.address) return;
+            updatePendingPulseAutoBuy({
+              expectedPairAddress,
+              expectedPairKey: `axiom:${token?.chain || "SOL"}:${expectedPairAddress}`,
+              expectedPairCapturedAt: Date.now(),
+            });
+          } catch {
+            // Best effort: if the SPA route changed, the new page can still accept the native pair below.
+          }
+        }, 250);
+        return;
+      }
+      emitDiagnostic("pulse-auto-buy-native-row-click-failed", {
+        token: summarizeToken(token),
+        rowMintAddress: nativeRow.getAttribute("data-pulse-token-address") || null,
+      });
+      setStatus("Pulse auto-buy queued, but Axiom row navigation could not be triggered.");
+      return;
+    }
+
+    if (token?.address && /pump$/i.test(token.address)) {
+      emitDiagnostic("pulse-auto-buy-native-row-missing-for-mint", {
+        token: summarizeToken(token),
+      });
+      setStatus("Pulse auto-buy queued, but Axiom pair navigation row was not found.");
+      return;
+    }
+
+    const tokenUrl = buildAxiomPulseTokenUrl(token);
+    if (tokenUrl) {
+      emitDiagnostic("pulse-auto-buy-navigate-token-url", {
+        token: summarizeToken(token),
+        tokenUrl,
+        navigationHref: navigationTarget?.getAttribute?.("href") || navigationTarget?.href || null,
+      });
+      window.location.assign(tokenUrl);
+      return;
+    }
+
     navigationTarget = navigationTarget || findAxiomPulseRowNavigationTarget(row, quickBuyBox);
     if (!navigationTarget) {
       setStatus("Pulse auto-buy queued, but row navigation target was not found.");
@@ -2961,6 +3148,77 @@
       });
       navigationTarget.dispatchEvent(clickEvent);
     }
+  }
+
+  function findAxiomPulseNativeNavigationRow(row, quickBuyBox) {
+    const candidates = [
+      row,
+      quickBuyBox?.closest?.("[data-pulse-token-address]"),
+      row?.closest?.("[data-pulse-token-address]"),
+    ].filter(Boolean);
+    return candidates.find((candidate) => {
+      if (root?.contains(candidate)) return false;
+      if (!candidate.getAttribute?.("data-pulse-token-address")) return false;
+      if (!candidate.contains?.(quickBuyBox)) return false;
+      const rect = candidate.getBoundingClientRect?.();
+      return rect && rect.width >= 240 && rect.height >= 48;
+    }) || null;
+  }
+
+  function triggerAxiomPulseNativeRowClick(row, quickBuyBox) {
+    const clickTarget = findAxiomPulseNativeRowClickTarget(row, quickBuyBox);
+    if (!clickTarget) return false;
+    const { target, x, y } = clickTarget;
+    const eventOptions = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window,
+      clientX: x,
+      clientY: y,
+      button: 0,
+    };
+    ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach((type) => {
+      const EventCtor = type.startsWith("pointer") && typeof window.PointerEvent === "function"
+        ? window.PointerEvent
+        : window.MouseEvent;
+      target.dispatchEvent(new EventCtor(type, eventOptions));
+    });
+    return true;
+  }
+
+  function findAxiomPulseNativeRowClickTarget(row, quickBuyBox) {
+    if (!row?.getBoundingClientRect) return null;
+    const rowRect = getClippedViewportRect(row.getBoundingClientRect());
+    const quickRect = quickBuyBox?.getBoundingClientRect ? getClippedViewportRect(quickBuyBox.getBoundingClientRect()) : null;
+    if (rowRect.width <= 0 || rowRect.height <= 0) return null;
+
+    const rightLimit = quickRect ? Math.max(rowRect.left + 32, quickRect.left - 24) : rowRect.right - 24;
+    const xCandidates = [
+      rowRect.left + Math.min(90, rowRect.width * 0.18),
+      rowRect.left + Math.min(150, rowRect.width * 0.28),
+      rowRect.left + 40,
+      rowRect.left + Math.min(260, rowRect.width * 0.45),
+    ].filter((x) => x > rowRect.left && x < rightLimit);
+    const yCandidates = [
+      rowRect.top + rowRect.height * 0.5,
+      rowRect.top + Math.min(32, rowRect.height * 0.32),
+      rowRect.bottom - Math.min(24, rowRect.height * 0.28),
+    ];
+
+    for (const y of yCandidates) {
+      for (const x of xCandidates) {
+        const stack = document.elementsFromPoint(x, y);
+        if (!stack.some((element) => element === row || row.contains(element))) continue;
+        if (stack.some((element) => element?.closest?.("a[href]") || element === quickBuyBox || quickBuyBox?.contains?.(element))) continue;
+        const target = stack.find((element) => row.contains(element) && !element.closest?.("a[href]")) || row;
+        return { target, x, y };
+      }
+    }
+
+    const fallbackX = Math.min(rightLimit - 4, rowRect.left + 40);
+    const fallbackY = rowRect.top + rowRect.height * 0.5;
+    return { target: row, x: fallbackX, y: fallbackY };
   }
 
   function findAxiomPulseRowNavigationTarget(row, quickBuyBox) {
@@ -3610,7 +3868,7 @@
         emitDiagnostic("buy-blocked-no-price", { amountNative, token: summarizeToken(token), marketCaps: buildMarketCapDiagnostics() });
         return setStatus(`Price unavailable. Wait for ${token.platformLabel || "the platform"} market cap to load.`);
       }
-      const quoteReady = await waitForAxiomExecutionQuoteReady(token);
+      const quoteReady = await waitForExecutionQuoteReady(token, options);
       token = quoteReady.token || token;
       if (!quoteReady.ready) {
         emitDiagnostic("buy-blocked-no-current-axiom-quote", {
@@ -3700,6 +3958,7 @@
         tokenAmount: execution.tokenAmount,
         positionAfter: summarizePosition(updated),
       });
+      syncAxiomExecutionMarker(execution);
       playTradeExecutionSound();
 
       await persistAndSync("buy");
@@ -3821,6 +4080,7 @@
       pnlNative: execution.pnlNative,
       positionAfter: summarizePosition(after),
     });
+    syncAxiomExecutionMarker(execution);
     playTradeExecutionSound();
 
     if (!after) {
@@ -4012,7 +4272,10 @@
       setStatus("Execution cancelled: token or price changed.");
       return null;
     }
-    const quoteReady = await waitForAxiomExecutionQuoteReady(delayedToken, AXIOM_EXECUTION_QUOTE_STABLE_MS + 600);
+    const quoteTimeoutMs = options.quoteReadinessMode === "pulse-auto-buy"
+      ? PULSE_AUTO_BUY_CHECK_MS
+      : AXIOM_EXECUTION_QUOTE_STABLE_MS + 600;
+    const quoteReady = await waitForExecutionQuoteReady(delayedToken, options, quoteTimeoutMs);
     const executionToken = quoteReady.token || delayedToken;
     if (!quoteReady.ready) {
       emitDiagnostic(`${side}-blocked-no-current-axiom-quote-after-delay`, {
@@ -4791,19 +5054,25 @@
     state.executions
       .filter((execution) => executionIds.has(execution.id) && getExecutionTimestampMs(execution) >= cutoffMs)
       .forEach((execution) => {
-        const price = getAxiomExecutionMarkerPrice(execution, token);
-        const time = Math.floor((getExecutionTimestampMs(execution) || Date.now()) / 1000);
-        if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(time)) return;
-        postAxiomChartBridgeMessage({
-          op: "upsertMarker",
-          positionId: summary.id,
-          markerId: execution.id,
-          side: execution.side,
-          time,
-          price,
-          style: buildAxiomExecutionMarkerStyle(execution, price),
-        });
+        syncAxiomExecutionMarker(execution, token, summary.id);
       });
+  }
+
+  function syncAxiomExecutionMarker(execution, token = null, positionId = null) {
+    if (!execution?.id || !execution.positionId) return;
+    if (getExecutionTimestampMs(execution) < getChartArtifactCutoffMs()) return;
+    const price = getAxiomExecutionMarkerPrice(execution, token);
+    const time = Math.floor((getExecutionTimestampMs(execution) || Date.now()) / 1000);
+    if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(time)) return;
+    postAxiomChartBridgeMessage({
+      op: "upsertMarker",
+      positionId: positionId || execution.positionId,
+      markerId: execution.id,
+      side: execution.side,
+      time,
+      price,
+      style: buildAxiomExecutionMarkerStyle(execution, price),
+    });
   }
 
   function getAxiomChartPrice(summary, side, token) {
@@ -4816,11 +5085,11 @@
     return Number.isFinite(estimatedMarketCap) && estimatedMarketCap > 0 ? estimatedMarketCap : 0;
   }
 
-  function getAxiomExecutionMarkerPrice(execution, token) {
+  function getAxiomExecutionMarkerPrice(execution, token = null) {
     const marketCap = Number(execution.executionMarketCapUsd || execution.marketCapUsd || execution.sourceMarketCapUsd || 0);
     if (marketCap > 0) return marketCap;
     const unitNative = Number(execution.unitPriceNative || 0);
-    const chainUsd = DEFAULT_PRICES[token.chain] || 1;
+    const chainUsd = DEFAULT_PRICES[token?.chain || execution.chain] || 1;
     const estimatedMarketCap = unitNative * chainUsd * MARKET_CAP_SUPPLY;
     return Number.isFinite(estimatedMarketCap) && estimatedMarketCap > 0 ? estimatedMarketCap : 0;
   }

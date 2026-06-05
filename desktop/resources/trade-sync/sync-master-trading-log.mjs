@@ -1189,11 +1189,12 @@ Scoring rules:
 - N_score, I_score, C_score, and S_score are binary 0 or 1.
 - NICS_score = N_score + I_score + max(C_score, S_score). It ranges from 0 to 3.
 - A trade counts toward the 50-trade target when size_ok is true, zone_ok is true, N_score = 1, I_score = 1, and at least one of C_score or S_score is 1. Cooldown is tracked as an informational process signal because entry/exit times are inferred.
-- N = the trader clearly names the narrative/meta/setup being traded, not just the ticker.
+- N = the trader clearly names the narrative/thread/setup being traded. A ticker alone is not enough unless the token name itself carries the narrative.
 - I = the trader states why this specific token is the selected ticket for that meta or what immediate evidence supports entry.
 - C = the trader gives the actual cut/close reason: why they got out, what failed, what changed, or what stopped working.
 - S = the trader states the sell/stay plan for a working trade: profit target, scale-out, cost recovery, trailing logic, or upside management.
-- meta_name should identify the repeatable meta cluster, not necessarily the ticker. If multiple tickers are lottery tickets for the same idea, use the same meta_name.
+- meta_name should identify the token/thread/narrative cluster. Do not use entry mechanics, buttons, signals, or generic reasons such as pulse buy, momentum, volume, interest, activity, first one, scroll and click, testing, scaling, target, or people as meta names.
+- If the evidence only says why the button was clicked or why the trade was entered, put that in I_why or notes and set meta_name to null.
 - Use 0 and explain the missing evidence when a component is absent. Do not leave any N/I/C/S fields blank.
 - Use Core NICS++ when N_score = 1, I_score = 1, and at least one of C_score or S_score is 1. Use Scout when the row has partial NICS evidence worth reviewing. Use Non-NICS when it lacks a named/intentional setup.
 - Do not populate meta_cluster_id, size_ok, zone_ok, cooldown_ok, counts_toward_50, hard_reset, running_count, non_nics_pnl_pct, or cluster_pnl_pct. The sync script owns those fields.
@@ -1548,7 +1549,68 @@ function assignMetaClusterId(row, state, sessionName) {
 function normalizeMetaName(value) {
   const text = String(value ?? "").trim();
   if (!text || /^(none|null|n\/?a|unknown|unclear|missing)$/i.test(text)) return "unknown";
-  return text;
+  return isGenericTradeMechanicMetaName(text) ? "unknown" : text;
+}
+
+function isGenericTradeMechanicMetaName(value) {
+  const normalized = String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+  if (!normalized) return true;
+  const exact = new Set([
+    "pulse",
+    "pulse buy",
+    "pulse trade",
+    "momentum",
+    "volume",
+    "interest",
+    "activity",
+    "people",
+    "lots of people",
+    "first one",
+    "first token",
+    "scroll and click",
+    "testing",
+    "system test",
+    "scaling",
+    "scaling out",
+    "target",
+    "quick target",
+    "quick exit",
+  ]);
+  if (exact.has(normalized)) return true;
+  const words = normalized.split(/\s+/).filter(Boolean);
+  const genericWords = new Set([
+    "pulse",
+    "buy",
+    "trade",
+    "trading",
+    "momentum",
+    "volume",
+    "interest",
+    "activity",
+    "people",
+    "lot",
+    "lots",
+    "first",
+    "one",
+    "token",
+    "scroll",
+    "click",
+    "test",
+    "testing",
+    "system",
+    "scale",
+    "scaling",
+    "out",
+    "target",
+    "exit",
+    "entry",
+    "signal",
+    "reason",
+  ]);
+  return words.length > 0 && words.every((word) => genericWords.has(word));
 }
 
 function knownMetaKeyForName(metaName) {
