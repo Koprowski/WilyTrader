@@ -97,6 +97,7 @@ type WilyTraderDesktopRuntimeApi = typeof window.wilyTraderDesktop & Partial<{
     node: { ok: boolean; message: string; version?: string; optional?: boolean };
     geminiCli: { ok: boolean; message: string; version?: string; command?: string };
   }>;
+  chooseOutputFolder: (payload: { currentPath?: string }) => Promise<{ ok: boolean; path: string | null; message: string }>;
   geminiCliSigninStatus: () => Promise<{ signedIn: boolean; subject?: string | null }>;
   geminiCliSignin: (payload: { command?: string }) => Promise<{ ok: boolean; message: string; subject?: string }>;
   logDebug: (scope: string, message: string, details?: unknown) => Promise<{ ok: true }>;
@@ -222,6 +223,7 @@ document.addEventListener('keydown', (event) => {
 });
 
 bindAction('check-dependencies', () => void refreshDependencyStatus());
+bindAction('choose-output-folder', () => void chooseOutputFolder());
 bindAction('install-whisper', () => void runInstaller('Installing Whisper...', () => window.wilyTraderDesktop.installWhisper()));
 bindAction('install-gemini-cli', () => void runInstaller('Installing Gemini CLI...', () => window.wilyTraderDesktop.installGeminiCli()));
 bindAction('install-node', () => void runInstaller('Installing Node.js LTS...', () => window.wilyTraderDesktop.installNode()));
@@ -820,6 +822,20 @@ async function saveSettingsFromForm(): Promise<void> {
   closeSettings();
 }
 
+async function chooseOutputFolder(): Promise<void> {
+  setSettingsMessage('');
+  const result = await window.wilyTraderDesktop.chooseOutputFolder({
+    currentPath: getInputValue('outputDir'),
+  });
+  if (!result.ok || !result.path) {
+    setSettingsMessage(result.message);
+    return;
+  }
+
+  setInputValue('outputDir', result.path, true);
+  setSettingsMessage('Session output folder selected. Save settings to apply it.');
+}
+
 async function checkExtensionUpdates(): Promise<void> {
   setUiBusy(false, 'Checking WilyTrader extension update status...');
   renderStatus(await window.wilyTraderDesktop.checkExtensionUpdates());
@@ -1223,9 +1239,9 @@ function getInputValue(name: string): string {
   return getInput(name)?.value.trim() ?? '';
 }
 
-function setInputValue(name: string, value: string): void {
+function setInputValue(name: string, value: string, force = false): void {
   const input = getInput(name);
-  if (input && document.activeElement !== input) input.value = value;
+  if (input && (force || document.activeElement !== input)) input.value = value;
 }
 
 function getChecked(name: string): boolean {

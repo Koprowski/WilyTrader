@@ -121,7 +121,10 @@
               <div class="section-title">Recording Session</div>
               <label class="field">
                 <span>Session output folder</span>
-                <input data-setting="outputDir" type="text" />
+                <span class="path-picker-row">
+                  <input data-setting="outputDir" type="text" spellcheck="false" autocomplete="off" />
+                  <button class="small-button secondary-button" data-action="choose-output-folder" type="button">Choose Folder</button>
+                </span>
               </label>
               <label class="field">
                 <span>Record / stop trading session hotkey</span>

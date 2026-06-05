@@ -28,6 +28,8 @@ const api = {
   getSettings: () => ipcRenderer.invoke('settings:get') as Promise<WilyTraderDesktopSettings>,
   saveSettings: (payload: Partial<WilyTraderDesktopSettings>) =>
     ipcRenderer.invoke('settings:save', payload) as Promise<WilyTraderDesktopSettings>,
+  chooseOutputFolder: (payload: { currentPath?: string }) =>
+    ipcRenderer.invoke('settings:choose-output-folder', payload) as Promise<{ ok: boolean; path: string | null; message: string }>,
   checkDependencies: (payload: { geminiCliCommand?: string }) =>
     ipcRenderer.invoke('settings:check-dependencies', payload) as Promise<{
       whisper: { ok: boolean; message: string; exePath?: string; modelPath?: string };

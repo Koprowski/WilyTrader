@@ -86,7 +86,8 @@ p {
 
 .inline-actions,
 .button-wrap,
-.input-row {
+.input-row,
+.path-picker-row {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -380,9 +381,14 @@ select {
 }
 
 .input-row input,
-.input-row select {
+.input-row select,
+.path-picker-row input {
   flex: 1;
   min-width: 180px;
+}
+
+.path-picker-row button {
+  flex: 0 0 auto;
 }
 
 .select {

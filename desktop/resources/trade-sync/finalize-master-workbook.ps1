@@ -81,6 +81,10 @@ function Set-FormulaR1C1Down($sheet, [int]$column, [int]$firstRow, [int]$lastRow
 function Fill-MasterCalculatedColumns($masterSheet, [int]$firstCalculatedColumn, [int]$lastCalculatedColumn, [int]$lastRow) {
   if ($lastRow -lt 2 -or $lastCalculatedColumn -lt $firstCalculatedColumn) { return }
   for ($column = $firstCalculatedColumn; $column -le $lastCalculatedColumn; $column++) {
+    $header = Invoke-ExcelRetry { [string]$masterSheet.Cells(1, $column).Value2 }
+    if ([string]::Equals($header, "ohlc_screenshot", [System.StringComparison]::OrdinalIgnoreCase)) {
+      continue
+    }
     $formulaR1C1 = Invoke-ExcelRetry { [string]$masterSheet.Cells(2, $column).FormulaR1C1 }
     Set-FormulaR1C1Down $masterSheet $column 2 $lastRow $formulaR1C1
   }
@@ -165,6 +169,32 @@ function Set-MasterFormulaByHeader($sheet, [string]$HeaderName, [int]$lastColumn
   Set-FormulaDown $sheet (Get-ColumnLetter $column) 2 $lastRow $formula
 }
 
+function Get-WorksheetOrNull($workbook, [string]$Name) {
+  try {
+    return $workbook.Worksheets.Item($Name)
+  } catch {
+    return $null
+  }
+}
+
+function Fill-MasterFormulasFromDefs($workbook, $masterSheet, [int]$lastColumn, [int]$lastRow) {
+  if ($lastRow -lt 2) { return }
+  $defs = Get-WorksheetOrNull $workbook "defs"
+  if ($null -eq $defs) { return }
+
+  for ($column = 1; $column -le $lastColumn; $column++) {
+    $header = Invoke-ExcelRetry { [string]$masterSheet.Cells(1, $column).Value2 }
+    if ([string]::Equals($header, "ohlc_screenshot", [System.StringComparison]::OrdinalIgnoreCase)) {
+      continue
+    }
+    $formulaR1C1 = Invoke-ExcelRetry { [string]$defs.Cells(2, $column).FormulaR1C1 }
+    if (-not $formulaR1C1 -or -not $formulaR1C1.StartsWith("=")) {
+      continue
+    }
+    Set-FormulaR1C1Down $masterSheet $column 2 $lastRow $formulaR1C1
+  }
+}
+
 function Set-MasterNumberFormatByHeaderPattern($sheet, [int]$lastColumn, [int]$lastRow, [string]$Pattern, [string]$NumberFormat) {
   if ($lastRow -lt 2) { return }
   for ($column = 1; $column -le $lastColumn; $column++) {
@@ -183,6 +213,20 @@ function Refresh-CooldownFormulas($masterSheet, [int]$lastColumn, [int]$lastRow)
   Set-MasterFormulaByHeader $masterSheet "this_trade_entry_dt" $lastColumn $lastRow '=IF(BP2=1,G2+IFERROR(TIMEVALUE(J2),IFERROR(TIMEVALUE(L2)-M2/86400,0)),"")'
   Set-MasterFormulaByHeader $masterSheet "cooldown_minutes" $lastColumn $lastRow '=IF(AND(BP2=1,ISNUMBER(BR2),ISNUMBER(BS2)),(BS2-BR2)*1440,"")'
   Set-MasterFormulaByHeader $masterSheet "cooldown_bucket" $lastColumn $lastRow '=IF(NOT(ISNUMBER(BT2)),"",IF(BT2<5,"0"&UNICHAR(8211)&"5 min",IF(BT2<10,"5"&UNICHAR(8211)&"10 min",IF(BT2<15,"10"&UNICHAR(8211)&"15 min",IF(BT2<30,"15"&UNICHAR(8211)&"30 min","30 min+")))))'
+}
+
+function Clear-DuplicatedOhlcScreenshotFormula($sheet, [int]$lastColumn, [int]$lastRow) {
+  if ($lastRow -lt 3) { return }
+  $column = Find-HeaderColumn $sheet "ohlc_screenshot" $lastColumn
+  if ($column -le 0) { return }
+  $templateFormula = Invoke-ExcelRetry { [string]$sheet.Cells(2, $column).Formula }
+  if (-not $templateFormula -or -not $templateFormula.StartsWith("=")) { return }
+  for ($row = 3; $row -le $lastRow; $row++) {
+    $formula = Invoke-ExcelRetry { [string]$sheet.Cells($row, $column).Formula }
+    if ([string]::Equals($formula, $templateFormula, [System.StringComparison]::OrdinalIgnoreCase)) {
+      Invoke-ExcelRetry { $sheet.Cells($row, $column).ClearContents() } | Out-Null
+    }
+  }
 }
 
 function Set-CategoryAxis($chart) {
@@ -465,8 +509,10 @@ try {
   $headerLastColumn = Invoke-ExcelRetry { $master.Cells(1, $master.Columns.Count).End($xlToLeft).Column }
   $lastTradeColumn = [Math]::Max([int]$currentTradeColumnCount, [int]$headerLastColumn)
   Invoke-ExcelRetry { $tblTrades.Resize($master.Range($master.Cells(1, 1), $master.Cells($lastMasterRow, $lastTradeColumn))) } | Out-Null
+  Fill-MasterFormulasFromDefs $workbook $master $lastTradeColumn $lastMasterRow
   Fill-MasterCalculatedColumns $master 56 $lastTradeColumn $lastMasterRow
   Refresh-CooldownFormulas $master $lastTradeColumn $lastMasterRow
+  Clear-DuplicatedOhlcScreenshotFormula $master $lastTradeColumn $lastMasterRow
 
   $tblAnalysis = $analysis.ListObjects.Item("tblAnalysis")
   Invoke-ExcelRetry { $tblAnalysis.Resize($analysis.Range("A1:O$lastMasterRow")) } | Out-Null

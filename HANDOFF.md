@@ -1,5 +1,16 @@
 # WilyTrader Handoff
 
+## 2026-06-05 Desktop 0.2.2 Update Test Release
+
+Resolution for release tag `0.4.8`: Desktop app version is bumped from `0.2.1`
+to `0.2.2` so installed `0.2.1` builds can detect a newer Desktop installer
+from the latest GitHub release. Keep the real installer asset named
+`wilytrader-0.2.2-desktop-setup.exe`, and upload the compatibility alias
+`wilytrader-0.4.8-desktop-setup.exe` only as a legacy asset name. Current
+Desktop release parsing intentionally chooses the lower real Desktop version
+when both assets exist, so installed `0.2.2` should not loop on the `0.4.8`
+compatibility alias.
+
 ## 2026-06-05 Product Install Identity
 
 Resolution for release tag `0.4.7`: the installed Windows product is renamed

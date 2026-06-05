@@ -94,6 +94,21 @@ const OHLC_COLUMNS = [
   "ohlc_screenshot",
 ];
 
+const CLUSTER_COOLDOWN_COLUMNS = [
+  "is_new_cluster_start",
+  "prior_cluster_id",
+  "prior_cluster_last_exit_dt",
+  "this_trade_entry_dt",
+  "cooldown_minutes",
+  "prior_cluster_outcome",
+  "cooldown_bucket",
+  "cluster_group_id",
+  "cluster_total_pnl_sol",
+  "cluster_avg_pnl_pct",
+  "cluster_win",
+  "trade_num_in_session",
+];
+
 const LLM_NICS_COLUMNS = [
   "meta_name",
   "N_score",
@@ -121,6 +136,7 @@ const MASTER_COLUMNS = [
   "TimeBucket",
   ...NICS_COLUMNS,
   ...OHLC_COLUMNS,
+  ...CLUSTER_COOLDOWN_COLUMNS,
 ];
 
 const TRADE_LOG_COLUMNS = MASTER_COLUMNS;
@@ -248,6 +264,21 @@ const BOOLEAN_COLUMNS = new Set([
 const DATE_COLUMNS = new Set([
   "entry_date",
   "exit_date",
+]);
+
+const DATE_TIME_COLUMNS = new Set([
+  "prior_cluster_last_exit_dt",
+  "this_trade_entry_dt",
+]);
+
+const INTEGER_FORMULA_COLUMNS = new Set([
+  "Hour",
+  "WeekdayNum",
+  "running_count",
+  "is_new_cluster_start",
+  "cluster_group_id",
+  "cluster_win",
+  "trade_num_in_session",
 ]);
 
 function folderDate(name) {
@@ -870,7 +901,7 @@ async function importTradeFolder(dir, { allRows, seen, archiveAfterImport, archi
   const finalArchiveTarget = archiveAfterImport ? (archiveTarget ?? plannedArchiveTarget(dir)) : dir;
   if (rawRows.length > 0) {
     rawRows = reconcileNicsFields(rawRows, allRows, sessionName);
-    if (sourceType === "workflow-xlsx" && fss.existsSync(xlsx)) {
+    if (archiveAfterImport && sourceType === "workflow-xlsx" && fss.existsSync(xlsx)) {
       const sessionRows = rawRows.map((row) => normalizeWorkflowRow(row, sessionName, sourceType, finalArchiveTarget));
       await writeTradeLogRowsXlsx(xlsx, sessionRows);
     }
@@ -1494,6 +1525,10 @@ function backfillMissingNicsFields(allRows, key, sourceRow) {
       target[column] = sourceRow[column];
       changed = true;
     }
+  }
+  if (!isBlank(sourceRow.ohlc_screenshot) && target.ohlc_screenshot !== sourceRow.ohlc_screenshot) {
+    target.ohlc_screenshot = sourceRow.ohlc_screenshot;
+    changed = true;
   }
   return changed;
 }
@@ -2956,6 +2991,10 @@ function styleForHeader(column, styles) {
 }
 
 function typedCell(cellRef, column, value, styles = defaultStyleMap()) {
+  const formula = calculatedMasterFormula(column, cellRef);
+  if (formula) {
+    return formulaColumnCell(cellRef, formula, styleForFormulaColumn(column, styles), formulaStringResult(column));
+  }
   if (DATE_COLUMNS.has(column)) return dateCell(cellRef, parseDateSerial(value), styles.date ?? 14);
   if (INTEGER_COLUMNS.has(column)) return numericCell(cellRef, parseNumber(value), styles.data?.[column] ?? styles.integer ?? 3);
   if (WHOLE_NUMBER_COLUMNS.has(column)) return numericCell(cellRef, parseNumber(value), styles.data?.[column] ?? styles.wholeNumber ?? 4);
@@ -2973,6 +3012,79 @@ function typedCell(cellRef, column, value, styles = defaultStyleMap()) {
   if (column === "TimeBucket") return formulaColumnCell(cellRef, timeBucketFormula(cellRef), styles.data?.[column] ?? styles.text ?? 2, true);
   if (column === "ohlc_screenshot") return ohlcScreenshotCell(cellRef, value, styles.data?.[column] ?? styles.text ?? 2);
   return cell(cellRef, value, styles.data?.[column] ?? styles.text ?? 2);
+}
+
+function calculatedMasterFormula(column, cellRef) {
+  const row = rowNumberFromRef(cellRef);
+  if (!row) return null;
+  switch (column) {
+    case "pnl_percentage":
+      return `IFERROR(V${row}/T${row},"")`;
+    case "Hour":
+      return hourFormula(cellRef);
+    case "Weekday":
+      return weekdayFormula(cellRef);
+    case "WeekdayNum":
+      return weekdayNumFormula(cellRef);
+    case "TimeBucket":
+      return timeBucketFormula(cellRef);
+    case "running_count":
+      return `IF(tblTrades[[#This Row],[hard_reset]]=TRUE,0,N(OFFSET(tblTrades[[#This Row],[running_count]],-1,0))+tblTrades[[#This Row],[counts_toward_50]])`;
+    case "non_nics_pnl_pct":
+      return `IF(tblTrades[[#This Row],[trade_type]]="Non-NICS",tblTrades[[#This Row],[pnl_percentage]],"")`;
+    case "cluster_pnl_pct":
+      return `IFERROR(SUMIFS(tblTrades[pnl_sol],tblTrades[meta_cluster_id],tblTrades[[#This Row],[meta_cluster_id]])/SUMIFS(tblTrades[sol_invested],tblTrades[meta_cluster_id],tblTrades[[#This Row],[meta_cluster_id]]),0)`;
+    case "ohlc_pct_high":
+      return `tblTrades[[#This Row],[ohlc_mc_high]]/tblTrades[[#This Row],[ohlc_mc_open]]-1`;
+    case "ohlc_pct_low":
+      return `tblTrades[[#This Row],[ohlc_mc_low]]/tblTrades[[#This Row],[ohlc_mc_open]]-1`;
+    case "ohlc_pct_close":
+      return `tblTrades[[#This Row],[ohlc_mc_close]]/tblTrades[[#This Row],[ohlc_mc_open]]-1`;
+    case "is_new_cluster_start":
+      return `IF(AI${row}<>AI${row - 1},1,0)`;
+    case "prior_cluster_id":
+      return `IF(BP${row}=1,IF(ROW()=2,"",AI${row - 1}),"")`;
+    case "prior_cluster_last_exit_dt":
+      return `IF(AND(BP${row}=1,ROW()>2),G${row - 1}+IFERROR(TIMEVALUE(L${row - 1}),0),"")`;
+    case "this_trade_entry_dt":
+      return `IF(BP${row}=1,G${row}+IFERROR(TIMEVALUE(J${row}),IFERROR(TIMEVALUE(L${row})-M${row}/86400,0)),"")`;
+    case "cooldown_minutes":
+      return `IF(AND(BP${row}=1,ISNUMBER(BR${row}),ISNUMBER(BS${row})),(BS${row}-BR${row})*1440,"")`;
+    case "prior_cluster_outcome":
+      return `IF(BQ${row}="","",IF(SUMIF(AI:AI,BQ${row},V:V)>0,"Win","Loss"))`;
+    case "cooldown_bucket":
+      return `IF(NOT(ISNUMBER(BT${row})),"",IF(BT${row}<5,"0"&UNICHAR(8211)&"5 min",IF(BT${row}<10,"5"&UNICHAR(8211)&"10 min",IF(BT${row}<15,"10"&UNICHAR(8211)&"15 min",IF(BT${row}<30,"15"&UNICHAR(8211)&"30 min","30 min+")))))`;
+    case "cluster_group_id":
+      return `SUM($BP$2:BP${row})`;
+    case "cluster_total_pnl_sol":
+      return `IF(AND($BP${row}=1,NOT(ISBLANK($BV${row}))),SUMIFS(tblTrades[pnl_sol],tblTrades[cluster_group_id],$BW${row}),"")`;
+    case "cluster_avg_pnl_pct":
+      return `IF(AND($BP${row}=1,NOT(ISBLANK($BV${row}))),IFERROR(AVERAGEIFS(tblTrades[pnl_percentage],tblTrades[cluster_group_id],$BW${row}),""),"")`;
+    case "cluster_win":
+      return `IF(AND($BP${row}=1,NOT(ISBLANK($BV${row}))),IF($BX${row}>0,1,0),"")`;
+    case "trade_num_in_session":
+      return `COUNTIFS($A$2:$A${row},$A${row})`;
+    default:
+      return null;
+  }
+}
+
+function styleForFormulaColumn(column, styles) {
+  if (styles.data?.[column]) return styles.data[column];
+  if (DATE_TIME_COLUMNS.has(column)) return styles.date ?? styles.text ?? 2;
+  if (PERCENT_COLUMNS.has(column)) return styles.percent ?? styles.text ?? 2;
+  if (INTEGER_FORMULA_COLUMNS.has(column)) return styles.integer ?? styles.text ?? 2;
+  return styles.text ?? 2;
+}
+
+function formulaStringResult(column) {
+  return [
+    "Weekday",
+    "TimeBucket",
+    "prior_cluster_id",
+    "prior_cluster_outcome",
+    "cooldown_bucket",
+  ].includes(column);
 }
 
 function numericCell(cellRef, value, style) {
