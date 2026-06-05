@@ -188,6 +188,29 @@ interface MarketCapObservation {
   source: string;
 }
 
+interface BridgeExecutionRecord {
+  id: string | null;
+  positionId: string | null;
+  platform: string | null;
+  side: string | null;
+  timestampMs: number | null;
+  tokenName: string | null;
+  tokenAddress: string | null;
+  chain: string | null;
+  marketCapUsd: number | null;
+  unitPriceNative: number | null;
+  requestedSellPct: number | null;
+  tokenAmount: number | null;
+  costNative: number | null;
+  grossNative: number | null;
+  netNative: number | null;
+  feeNative: number | null;
+  costBasisNative: number | null;
+  pnlNative: number | null;
+  pnlPct: number | null;
+  screenshotPath?: string | null;
+}
+
 interface LlmTradeExtraction {
   mockape_trade_id: string | null;
   token_name: string | null;
@@ -1642,14 +1665,21 @@ function mergeDesktopTranscriptSegments(segments: TranscriptSegment[]): Transcri
 
 function loadTradesFromSession(session: ActiveTradeSession, stoppedAtMs: number): NormalizedTrade[] {
   const ledgerPath = path.join(session.inputsDir, 'wilytrader.json');
-  if (!fs.existsSync(ledgerPath)) return [];
+  if (!fs.existsSync(ledgerPath)) {
+    return reconstructClosedTradesFromSessionExecutions(session, stoppedAtMs);
+  }
   try {
     const parsed = JSON.parse(fs.readFileSync(ledgerPath, 'utf-8'));
     const allTrades = normalizeWilyTraderTrades(parsed);
-    const recordingTrades = filterTradesForRecordingWindow(allTrades, session.sessionStartedAtMs, stoppedAtMs);
-    if (recordingTrades.length !== allTrades.length) {
+    const mergedTrades = mergeMissingSessionExecutionTrades(
+      session,
+      allTrades,
+      reconstructClosedTradesFromSessionExecutions(session, stoppedAtMs)
+    );
+    const recordingTrades = filterTradesForRecordingWindow(mergedTrades, session.sessionStartedAtMs, stoppedAtMs);
+    if (recordingTrades.length !== mergedTrades.length) {
       appendSessionLogForSession(session, 'trade-log', 'filtered trades to recording window', {
-        before: allTrades.length,
+        before: mergedTrades.length,
         after: recordingTrades.length,
         recordingStartedAtMs: session.sessionStartedAtMs,
         recordingStoppedAtMs: stoppedAtMs,
@@ -1658,8 +1688,266 @@ function loadTradesFromSession(session: ActiveTradeSession, stoppedAtMs: number)
     return recordingTrades;
   } catch (err) {
     appendSessionLogForSession(session, 'trade-log', 'ledger parse failed', { error: (err as Error).message }, 'error');
-    return [];
+    return reconstructClosedTradesFromSessionExecutions(session, stoppedAtMs);
   }
+}
+
+function mergeMissingSessionExecutionTrades(
+  session: ActiveTradeSession,
+  trades: NormalizedTrade[],
+  reconstructedTrades: NormalizedTrade[]
+): NormalizedTrade[] {
+  if (reconstructedTrades.length === 0) return trades;
+  const existingKeys = new Set(trades.map(tradeIdentityKey).filter((key): key is string => Boolean(key)));
+  const additions = reconstructedTrades.filter((trade) => {
+    const key = tradeIdentityKey(trade);
+    return key ? !existingKeys.has(key) : true;
+  });
+  if (additions.length === 0) return trades;
+  appendSessionLogForSession(session, 'trade-log', 'backfilled closed trades from session execution log', {
+    existing: trades.length,
+    added: additions.map((trade) => ({
+      id: trade.id,
+      tokenName: trade.tokenName,
+      tokenAddress: trade.tokenAddress,
+      entryTimestampMs: trade.entryTimestampMs,
+      timestampMs: trade.timestampMs,
+    })),
+  }, 'warning');
+  return [...trades, ...additions];
+}
+
+function tradeIdentityKey(trade: NormalizedTrade): string | null {
+  const id = trade.id?.trim();
+  if (id) return `id:${id}`;
+  const token = trade.tokenAddress?.toLowerCase() ?? trade.tokenName.toLowerCase();
+  if (!token) return null;
+  return [
+    'token',
+    token,
+    trade.entryTimestampMs !== null ? Math.round(trade.entryTimestampMs / 1000) : '',
+    trade.timestampMs !== null ? Math.round(trade.timestampMs / 1000) : '',
+  ].join(':');
+}
+
+function reconstructClosedTradesFromSessionExecutions(
+  session: ActiveTradeSession,
+  stoppedAtMs: number
+): NormalizedTrade[] {
+  const executions = loadSessionExecutionRecords(session);
+  if (executions.length === 0) return [];
+  const groups = new Map<string, BridgeExecutionRecord[]>();
+  for (const execution of executions) {
+    const timestampMs = execution.timestampMs;
+    if (timestampMs !== null && (timestampMs < session.sessionStartedAtMs || timestampMs > stoppedAtMs)) continue;
+    const key = execution.positionId ?? execution.tokenAddress?.toLowerCase() ?? execution.tokenName?.toLowerCase();
+    if (!key) continue;
+    const current = groups.get(key) ?? [];
+    current.push(execution);
+    groups.set(key, current);
+  }
+
+  const trades: NormalizedTrade[] = [];
+  for (const [key, group] of groups) {
+    const sorted = group.sort((a, b) => (a.timestampMs ?? 0) - (b.timestampMs ?? 0));
+    const buys = sorted.filter((execution) => execution.side === 'buy');
+    const sells = sorted.filter((execution) => execution.side === 'sell');
+    if (buys.length === 0 || sells.length === 0) continue;
+    const firstBuy = buys[0];
+    const lastSell = sells[sells.length - 1];
+    const entryTimestampMs = firstBuy.timestampMs;
+    const timestampMs = lastSell.timestampMs;
+    const solInvested =
+      buys[buys.length - 1].costNative ??
+      sumNullable(...buys.map((execution) => execution.costNative));
+    const sellPnl = sumNullable(...sells.map((execution) => execution.pnlNative));
+    const solReceived = coalesceNumber(
+      sumNullable(...sells.map((execution) => execution.netNative)),
+      sumNullable(...sells.map((execution) => execution.grossNative), ...sells.map((execution) => execution.feeNative === null ? null : -execution.feeNative)),
+      sumNullable(solInvested, sellPnl)
+    );
+    const pnlSol = computeNetPnl(solReceived, solInvested) ?? sellPnl;
+    const executionsForTrade = sorted.map((execution) => ({
+      id: execution.id,
+      side: execution.side,
+      timestampMs: execution.timestampMs,
+      marketCapUsd: execution.marketCapUsd,
+      unitPriceNative: execution.unitPriceNative,
+      requestedSellPct: execution.requestedSellPct,
+      tokenAmount: execution.tokenAmount,
+      grossNative: execution.grossNative,
+      netNative: execution.netNative,
+      feeNative: execution.feeNative,
+      costBasisNative: execution.costBasisNative,
+      pnlNative: execution.pnlNative,
+      pnlPct: execution.pnlPct,
+      screenshotPath: execution.screenshotPath,
+    }));
+    const marketCaps = executionsForTrade
+      .map((execution) => execution.marketCapUsd)
+      .filter((value): value is number => value !== null && Number.isFinite(value));
+    const tokenName = firstBuy.tokenName ?? lastSell.tokenName ?? firstBuy.tokenAddress ?? lastSell.tokenAddress ?? 'Unknown token';
+    trades.push({
+      id: firstBuy.positionId ?? `session-execution-${key}`,
+      tokenName,
+      platform: firstBuy.platform ?? lastSell.platform ?? 'axiom',
+      chain: firstBuy.chain ?? lastSell.chain ?? 'SOL',
+      entryMarketCap: firstBuy.marketCapUsd,
+      exitMarketCap: lastSell.marketCapUsd,
+      highMarketCapAfterEntry: marketCaps.length > 0 ? Math.max(...marketCaps) : null,
+      highMarketCapAtMs: null,
+      lowMarketCapAfterEntry: marketCaps.length > 0 ? Math.min(...marketCaps) : null,
+      lowMarketCapAtMs: null,
+      ohlcSampleCount: marketCaps.length,
+      ohlcSampleIntervalMs: null,
+      ohlcRangeSource: 'session-execution-log',
+      solInvested,
+      solReceived,
+      buyFeesNative: sumNullable(...buys.map((execution) => execution.feeNative)),
+      sellFeesNative: sumNullable(...sells.map((execution) => execution.feeNative)),
+      pnlSol,
+      pnlPercentage: computeNetPnlPct(pnlSol, solInvested),
+      timestampMs,
+      entryTimestampMs,
+      timeInTradeSeconds:
+        entryTimestampMs !== null && timestampMs !== null ? Math.max(0, (timestampMs - entryTimestampMs) / 1000) : null,
+      tokenAddress: firstBuy.tokenAddress ?? lastSell.tokenAddress,
+      executions: executionsForTrade,
+    });
+  }
+  return trades;
+}
+
+function loadSessionExecutionRecords(session: ActiveTradeSession): BridgeExecutionRecord[] {
+  const screenshotByExecutionId = loadBridgeExecutionScreenshotPaths(session);
+  const records = new Map<string, BridgeExecutionRecord>();
+  const sessionLogPath = path.join(session.inputsDir, 'session_log.jsonl');
+  for (const row of readJsonLineObjects(sessionLogPath)) {
+    if (row.message !== 'execution-recorded') continue;
+    const details = row.details && typeof row.details === 'object' ? row.details as Record<string, unknown> : null;
+    const execution = details?.details && typeof details.details === 'object'
+      ? details.details as Record<string, unknown>
+      : null;
+    if (!details || !execution) continue;
+    const record = normalizeLoggedExecutionRecord(row, details, execution, screenshotByExecutionId);
+    if (!record || !record.id) continue;
+    records.set(record.id, record);
+  }
+  if (records.size > 0) return [...records.values()];
+
+  const bridgeLogPath = path.join(session.inputsDir, 'wilytrader-executions.jsonl');
+  for (const row of readJsonLineObjects(bridgeLogPath)) {
+    const event = row.event && typeof row.event === 'object' ? row.event as Record<string, unknown> : null;
+    if (!event) continue;
+    const record = normalizeBridgeEventRecord(event, strOrNull(row.screenshotPath));
+    if (!record || !record.id) continue;
+    records.set(record.id, record);
+  }
+  return [...records.values()];
+}
+
+function normalizeLoggedExecutionRecord(
+  row: Record<string, unknown>,
+  logDetails: Record<string, unknown>,
+  execution: Record<string, unknown>,
+  screenshotByExecutionId: Map<string, string>
+): BridgeExecutionRecord | null {
+  const id = strOrNull(execution.executionId) ?? strOrNull(execution.id);
+  if (!id) return null;
+  const activeToken = logDetails.activeToken && typeof logDetails.activeToken === 'object'
+    ? logDetails.activeToken as Record<string, unknown>
+    : null;
+  const positionAfter = execution.positionAfter && typeof execution.positionAfter === 'object'
+    ? execution.positionAfter as Record<string, unknown>
+    : null;
+  const side = strOrNull(execution.side)?.toLowerCase() ?? null;
+  return {
+    id,
+    positionId: strOrNull(execution.positionId) ?? strOrNull(positionAfter?.positionId),
+    platform: strOrNull(execution.platform) ?? strOrNull(logDetails.platform) ?? 'axiom',
+    side,
+    timestampMs: parseTimestampMs(row.at) ?? parseTimestampMs(logDetails.at) ?? parseTimestampMs(execution.timestampMs),
+    tokenName: strOrNull(activeToken?.name) ?? strOrNull(activeToken?.tokenName) ?? strOrNull(execution.tokenName),
+    tokenAddress: strOrNull(activeToken?.address) ?? strOrNull(activeToken?.tokenAddress) ?? strOrNull(execution.tokenAddress),
+    chain: strOrNull(activeToken?.chain) ?? strOrNull(execution.chain) ?? 'SOL',
+    marketCapUsd:
+      numberOrNull(execution.executionMarketCapUsd) ??
+      numberOrNull(execution.marketCapUsd) ??
+      numberOrNull(execution.sourceMarketCapUsd) ??
+      numberOrNull(activeToken?.marketCap),
+    unitPriceNative: numberOrNull(execution.unitPriceNative),
+    requestedSellPct: numberOrNull(execution.requestedSellPct),
+    tokenAmount: numberOrNull(execution.tokenAmount),
+    costNative:
+      numberOrNull(execution.costNative) ??
+      numberOrNull(execution.costBasisNative) ??
+      numberOrNull(positionAfter?.costNative),
+    grossNative: numberOrNull(execution.grossNative),
+    netNative: numberOrNull(execution.netNative),
+    feeNative: numberOrNull(execution.feeNative),
+    costBasisNative: numberOrNull(execution.costBasisNative),
+    pnlNative: numberOrNull(execution.pnlNative),
+    pnlPct: numberOrNull(execution.pnlPct),
+    screenshotPath: screenshotByExecutionId.get(id) ?? null,
+  };
+}
+
+function normalizeBridgeEventRecord(event: Record<string, unknown>, screenshotPath: string | null): BridgeExecutionRecord | null {
+  const id = strOrNull(event.executionId) ?? strOrNull(event.id);
+  if (!id) return null;
+  return {
+    id,
+    positionId: strOrNull(event.positionId),
+    platform: strOrNull(event.platform),
+    side: strOrNull(event.side)?.toLowerCase() ?? null,
+    timestampMs: parseTimestampMs(event.timestampMs ?? event.timestamp),
+    tokenName: strOrNull(event.tokenName),
+    tokenAddress: strOrNull(event.tokenAddress),
+    chain: strOrNull(event.chain) ?? 'SOL',
+    marketCapUsd:
+      numberOrNull(event.executionMarketCapUsd) ??
+      numberOrNull(event.marketCapUsd) ??
+      numberOrNull(event.sourceMarketCapUsd),
+    unitPriceNative: numberOrNull(event.unitPriceNative),
+    requestedSellPct: numberOrNull(event.requestedSellPct),
+    tokenAmount: numberOrNull(event.tokenAmount),
+    costNative: numberOrNull(event.costNative) ?? numberOrNull(event.costBasisNative),
+    grossNative: numberOrNull(event.grossNative),
+    netNative: numberOrNull(event.netNative),
+    feeNative: numberOrNull(event.feeNative),
+    costBasisNative: numberOrNull(event.costBasisNative),
+    pnlNative: numberOrNull(event.pnlNative),
+    pnlPct: numberOrNull(event.pnlPct),
+    screenshotPath,
+  };
+}
+
+function loadBridgeExecutionScreenshotPaths(session: ActiveTradeSession): Map<string, string> {
+  const paths = new Map<string, string>();
+  const bridgeLogPath = path.join(session.inputsDir, 'wilytrader-executions.jsonl');
+  for (const row of readJsonLineObjects(bridgeLogPath)) {
+    const event = row.event && typeof row.event === 'object' ? row.event as Record<string, unknown> : null;
+    const executionId = strOrNull(event?.executionId);
+    const screenshotPath = strOrNull(row.screenshotPath);
+    if (executionId && screenshotPath) paths.set(executionId, screenshotPath);
+  }
+  return paths;
+}
+
+function readJsonLineObjects(filePath: string): Array<Record<string, unknown>> {
+  if (!fs.existsSync(filePath)) return [];
+  return fs.readFileSync(filePath, 'utf-8')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .flatMap((line) => {
+      try {
+        const parsed = JSON.parse(line);
+        return parsed && typeof parsed === 'object' ? [parsed as Record<string, unknown>] : [];
+      } catch {
+        return [];
+      }
+    });
 }
 
 function filterTradesForRecordingWindow(
@@ -3877,7 +4165,7 @@ async function fetchLatestWilyTraderRelease(): Promise<WilyTraderReleaseInfo> {
   const desktopInstallers = assets
     .map((asset) => ({ ...asset, version: parseDesktopAssetVersion(asset.name) }))
     .filter((asset): asset is WilyTraderReleaseAsset => Boolean(asset.version))
-    .sort((a, b) => compareVersions(a.version, b.version));
+    .sort((a, b) => compareVersions(b.version, a.version));
   const extensionZips = assets
     .map((asset) => ({ ...asset, version: parseExtensionAssetVersion(asset.name) }))
     .filter((asset): asset is WilyTraderReleaseAsset => Boolean(asset.version))
