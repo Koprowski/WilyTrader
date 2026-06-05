@@ -1,5 +1,32 @@
 # WilyTrader Handoff
 
+## 2026-06-05 Restore Separate Desktop/Extension Versions
+
+Finding: Desktop and Chrome extension versions became coupled in commit
+`b9d2968` (`Release WilyTrader 0.4.0`) on 2026-06-04. Before that commit,
+Desktop was `0.1.11` and the extension was `0.3.59`; from `0.4.0` through
+`0.4.5`, both were bumped together.
+
+Resolution for release tag `0.4.6`: Desktop app version is reset to `0.2.0`,
+while the Chrome extension continues on `0.4.6`. Desktop release checks now
+derive Desktop and extension versions from their asset names instead of assuming
+the GitHub release tag is the app version. Desktop also expires stale extension
+runtime heartbeats after 30 seconds so a yesterday heartbeat does not appear as
+the current installed/running extension. The installer handoff now follows the
+Snipalot pattern: `shell.openPath()` first, then PowerShell `Start-Process`
+fallback if Windows needs it.
+
+Release packaging note: for this corrective split-version line, publish a
+monotonic release tag `v0.4.6` so existing Desktop `0.4.5` installs can discover
+the update. Upload the real Desktop installer as
+`wilytrader-0.2.0-desktop-setup.exe` and the real extension zip as
+`wilytrader-extension-0.4.6.zip`. Also upload compatibility aliases
+`wilytrader-0.4.6-desktop-setup.exe` and `wilytrader-0.4.6-extension.zip` for
+older Desktop builds that still construct asset URLs from the GitHub tag. Newer
+Desktop update parsing sorts Desktop installer assets by semantic asset version
+and chooses the lower real app version, so the alias does not create an update
+loop after Desktop `0.2.0` is installed.
+
 ## 2026-06-05 Desktop/Extension One-Click Update Flow
 
 Finding: Desktop and the unpacked Chrome extension need separate update

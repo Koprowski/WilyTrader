@@ -27,11 +27,10 @@ const MAX_BRIDGE_BODY_BYTES = 25 * 1024 * 1024;
 const WILYTRADER_TAGS_API_URL = 'https://api.github.com/repos/Koprowski/WilyTrader/tags?per_page=10';
 const WILYTRADER_LATEST_RELEASE_API_URL = 'https://api.github.com/repos/Koprowski/WilyTrader/releases/latest';
 const WILYTRADER_RELEASE_BASE_URL = 'https://github.com/Koprowski/WilyTrader/releases';
-const WILYTRADER_DESKTOP_ASSET_SUFFIX = 'desktop-setup.exe';
-const WILYTRADER_EXTENSION_ASSET_SUFFIX = 'extension.zip';
 const MASTER_TRADING_LOG_FILE_NAME = 'master trading log.xlsx';
 const MASTER_TRADING_LOG_TEMPLATE_FILE_NAME = 'master trading log - Template.xlsx';
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const EXTENSION_RUNTIME_HEARTBEAT_STALE_MS = 30_000;
 const ffmpegPath = require('ffmpeg-static') as string | null;
 
 interface ActiveTradeSession {
@@ -757,6 +756,7 @@ function estimateSessionFinalizationMs(session: ActiveTradeSession, stoppedAtMs:
 }
 
 function getStatus(): WilyTraderDesktopStatus {
+  pruneStaleExtensionRuntimeStatus();
   const now = Date.now();
   const finalization = finalizingSession ? {
     ...finalizingSession.finalization,
@@ -3677,6 +3677,7 @@ async function refreshUpdateStatuses(reason: 'startup' | 'scheduled' | 'manual',
 
 async function checkExtensionUpdates(force = false): Promise<void> {
   if (!force && extensionStatus.checkedAt) return;
+  pruneStaleExtensionRuntimeStatus();
   extensionStatus = {
     ...extensionStatus,
     ...detectLocalExtensionManifest(),
@@ -3716,14 +3717,17 @@ async function checkExtensionUpdates(force = false): Promise<void> {
 }
 
 async function fetchLatestExtensionVersion(): Promise<string> {
-  return fetchLatestWilyTraderVersion();
+  const release = await fetchLatestWilyTraderRelease();
+  if (!release.extensionZip) throw new Error(`Latest release ${release.version} does not include a WilyTrader extension zip asset.`);
+  return release.extensionZip.version;
 }
 
 async function checkDesktopUpdates(force = false): Promise<void> {
   if (!force && desktopUpdateStatus.checkedAt) return;
   const installed = app.getVersion() || desktopUpdateStatus.installedVersion || '0.0.0';
   try {
-    const latest = await fetchLatestWilyTraderVersion();
+    const release = await fetchLatestWilyTraderRelease();
+    const latest = release.desktopInstaller?.version ?? release.version;
     const updateAvailable = isRemoteVersionNewer(installed, latest);
     desktopUpdateStatus = {
       installedVersion: installed,
@@ -3788,13 +3792,33 @@ async function fetchLatestWilyTraderRelease(): Promise<WilyTraderReleaseInfo> {
       url: asset.browser_download_url ?? '',
     }))
     .filter((asset) => asset.name && /^https?:\/\//i.test(asset.url));
+  const desktopInstallers = assets
+    .map((asset) => ({ ...asset, version: parseDesktopAssetVersion(asset.name) }))
+    .filter((asset): asset is WilyTraderReleaseAsset => Boolean(asset.version))
+    .sort((a, b) => compareVersions(a.version, b.version));
+  const extensionZips = assets
+    .map((asset) => ({ ...asset, version: parseExtensionAssetVersion(asset.name) }))
+    .filter((asset): asset is WilyTraderReleaseAsset => Boolean(asset.version))
+    .sort((a, b) => compareVersions(b.version, a.version));
   return {
     tagName,
     version,
     htmlUrl: release.html_url || `${WILYTRADER_RELEASE_BASE_URL}/tag/v${version}`,
-    desktopInstaller: assets.find((asset) => /^wilytrader-\d+\.\d+\.\d+-desktop-setup\.exe$/i.test(asset.name)) ?? null,
-    extensionZip: assets.find((asset) => /^wilytrader-\d+\.\d+\.\d+-extension\.zip$/i.test(asset.name)) ?? null,
+    desktopInstaller: desktopInstallers[0] ?? null,
+    extensionZip: extensionZips[0] ?? null,
   };
+}
+
+function parseDesktopAssetVersion(name: string): string | null {
+  const match = name.match(/^wilytrader-(\d+\.\d+\.\d+)-desktop-setup\.exe$/i);
+  return match ? match[1] : null;
+}
+
+function parseExtensionAssetVersion(name: string): string | null {
+  const decoupled = name.match(/^wilytrader-extension-(\d+\.\d+\.\d+)\.zip$/i);
+  if (decoupled) return decoupled[1];
+  const legacy = name.match(/^wilytrader-(\d+\.\d+\.\d+)-extension\.zip$/i);
+  return legacy ? legacy[1] : null;
 }
 
 async function latestKnownExtensionVersion(): Promise<string> {
@@ -3810,7 +3834,8 @@ async function latestKnownExtensionVersion(): Promise<string> {
 
 async function latestKnownDesktopVersion(): Promise<string> {
   if (desktopUpdateStatus.latestVersion) return desktopUpdateStatus.latestVersion;
-  const latest = await fetchLatestWilyTraderVersion();
+  const release = await fetchLatestWilyTraderRelease();
+  const latest = release.desktopInstaller?.version ?? release.version;
   desktopUpdateStatus = {
     ...desktopUpdateStatus,
     latestVersion: latest,
@@ -3827,8 +3852,12 @@ async function openLatestExtensionReleasePage(): Promise<{ ok: boolean; message:
 }
 
 async function openLatestExtensionDownload(): Promise<{ ok: boolean; message: string; url?: string }> {
-  const latest = await latestKnownExtensionVersion();
-  const url = `${WILYTRADER_RELEASE_BASE_URL}/download/v${latest}/wilytrader-${latest}-${WILYTRADER_EXTENSION_ASSET_SUFFIX}`;
+  const release = await fetchLatestWilyTraderRelease();
+  if (!release.extensionZip) {
+    return { ok: false, message: `Latest release ${release.version} does not include a WilyTrader extension zip asset.`, url: release.htmlUrl };
+  }
+  const latest = release.extensionZip.version;
+  const url = release.extensionZip.url;
   await shell.openExternal(url);
   return { ok: true, message: `Opened WilyTrader ${latest} extension zip download.`, url };
 }
@@ -3842,6 +3871,7 @@ async function updateLatestExtensionFiles(): Promise<{
   releaseUrl?: string | null;
 }> {
   const release = await fetchLatestWilyTraderRelease();
+  const extensionVersion = release.extensionZip?.version ?? null;
   const install = detectCurrentWilyTraderInstall();
   if (!install) {
     return {
@@ -3864,7 +3894,7 @@ async function updateLatestExtensionFiles(): Promise<{
       if (!release.extensionZip) throw new Error(`Release ${release.version} does not include a WilyTrader extension zip asset.`);
       const downloadDir = path.join(os.tmpdir(), 'wilytrader-extension-updates');
       const zipPath = path.join(downloadDir, safeUpdateFileName(release.extensionZip.name));
-      const extractDir = path.join(downloadDir, `extract-${release.version}-${Date.now()}`);
+      const extractDir = path.join(downloadDir, `extract-${release.extensionZip.version}-${Date.now()}`);
       await downloadFile(release.extensionZip.url, zipPath);
       await extractZipFile(zipPath, extractDir);
       const extracted = readWilyTraderManifest(extractDir);
@@ -3878,11 +3908,11 @@ async function updateLatestExtensionFiles(): Promise<{
     extensionStatus = {
       ...extensionStatus,
       ...detectLocalExtensionManifest(),
-      latestVersion: release.version,
+      latestVersion: extensionVersion ?? updated.version,
       updateAvailable: extensionStatus.runtimeInstalledVersion
-        ? isRemoteVersionNewer(extensionStatus.runtimeInstalledVersion, release.version)
+        ? isRemoteVersionNewer(extensionStatus.runtimeInstalledVersion, extensionVersion ?? updated.version)
         : false,
-      updateMessage: extensionStatus.runtimeInstalledVersion && isRemoteVersionNewer(extensionStatus.runtimeInstalledVersion, release.version)
+      updateMessage: extensionStatus.runtimeInstalledVersion && isRemoteVersionNewer(extensionStatus.runtimeInstalledVersion, extensionVersion ?? updated.version)
         ? `Local files are ${updated.version}; reload WilyTrader in Chrome to update the running tab.`
         : `Extension files are updated to ${updated.version}.`,
       checkedAt: new Date().toISOString(),
@@ -3919,20 +3949,25 @@ async function openLatestDesktopReleasePage(): Promise<{ ok: boolean; message: s
 }
 
 async function openLatestDesktopDownload(): Promise<{ ok: boolean; message: string; url?: string }> {
-  const latest = await latestKnownDesktopVersion();
-  const url = `${WILYTRADER_RELEASE_BASE_URL}/download/v${latest}/wilytrader-${latest}-${WILYTRADER_DESKTOP_ASSET_SUFFIX}`;
+  const release = await fetchLatestWilyTraderRelease();
+  if (!release.desktopInstaller) {
+    return { ok: false, message: `Latest release ${release.version} does not include a WilyTrader Desktop installer asset.`, url: release.htmlUrl };
+  }
+  const latest = release.desktopInstaller.version;
+  const url = release.desktopInstaller.url;
   await shell.openExternal(url);
   return { ok: true, message: `Opened WilyTrader Desktop ${latest} installer download.`, url };
 }
 
 async function installLatestDesktopRelease(): Promise<{ ok: boolean; message: string; installerPath?: string; releaseUrl?: string | null }> {
   const release = await fetchLatestWilyTraderRelease();
+  const desktopVersion = release.desktopInstaller?.version ?? release.version;
   const currentVersion = app.getVersion() || '0.0.0';
-  if (!isRemoteVersionNewer(currentVersion, release.version)) {
+  if (!isRemoteVersionNewer(currentVersion, desktopVersion)) {
     return { ok: false, message: `WilyTrader Desktop is already up to date (${currentVersion}).`, releaseUrl: release.htmlUrl };
   }
   if (!release.desktopInstaller) {
-    return { ok: false, message: `Desktop ${release.version} is available, but no installer asset was found.`, releaseUrl: release.htmlUrl };
+    return { ok: false, message: `Desktop ${desktopVersion} is available, but no installer asset was found.`, releaseUrl: release.htmlUrl };
   }
 
   const updateDir = path.join(os.tmpdir(), 'wilytrader-desktop-updates');
@@ -3943,7 +3978,7 @@ async function installLatestDesktopRelease(): Promise<{ ok: boolean; message: st
     setTimeout(() => app.quit(), 750);
     return {
       ok: true,
-      message: `Downloaded WilyTrader Desktop ${release.version}. WilyTrader will close and launch the installer.`,
+      message: `Downloaded WilyTrader Desktop ${desktopVersion}. WilyTrader will close and launch the installer.`,
       installerPath,
       releaseUrl: release.htmlUrl,
     };
@@ -3988,6 +4023,7 @@ interface GeminiCliModelSummary {
 interface WilyTraderReleaseAsset {
   name: string;
   url: string;
+  version: string;
 }
 
 interface WilyTraderReleaseInfo {
@@ -5304,31 +5340,66 @@ function replaceDirectoryContents(sourceDir: string, destinationDir: string): vo
 async function launchUpdateInstaller(installerPath: string): Promise<void> {
   const resolved = path.resolve(installerPath);
   if (!fs.existsSync(resolved)) throw new Error(`Installer not found: ${resolved}`);
-  if (process.platform !== 'win32') {
-    const openError = await shell.openPath(resolved);
-    if (openError) throw new Error(openError);
+  const shellOpenError = await shell.openPath(resolved);
+  if (!shellOpenError) {
+    debugLog('updates', 'installer shell.openPath handoff started', { installerPath: resolved });
     return;
   }
+  debugLog('updates', 'installer shell.openPath failed', { installerPath: resolved, error: shellOpenError });
+  if (process.platform !== 'win32') {
+    throw new Error(shellOpenError);
+  }
 
-  const psLiteral = "'" + resolved.replace(/'/g, "''") + "'";
   await new Promise<void>((resolve, reject) => {
+    let settled = false;
     const child = spawn('powershell.exe', [
       '-NoProfile',
       '-ExecutionPolicy',
       'Bypass',
       '-Command',
-      `Start-Process -LiteralPath ${psLiteral}`,
+      'Start-Process -LiteralPath $args[0] -WorkingDirectory (Split-Path -Parent $args[0])',
+      resolved,
     ], {
       detached: true,
       stdio: 'ignore',
-      windowsHide: true,
+      windowsHide: false,
     });
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error('Timed out while launching the update installer.'));
+    }, 5_000);
+
     child.once('spawn', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       child.unref();
       resolve();
     });
-    child.once('error', reject);
+    child.once('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(err);
+    });
   });
+}
+
+function pruneStaleExtensionRuntimeStatus(): void {
+  if (!extensionStatus.runtimeLastSeenAt) return;
+  const lastSeenMs = Date.parse(extensionStatus.runtimeLastSeenAt);
+  if (!Number.isFinite(lastSeenMs) || Date.now() - lastSeenMs <= EXTENSION_RUNTIME_HEARTBEAT_STALE_MS) return;
+  extensionStatus = {
+    ...extensionStatus,
+    runtimeInstalledVersion: null,
+    runtimeExtensionId: null,
+    runtimePageUrl: null,
+    runtimeTokenName: null,
+    runtimeTokenAddress: null,
+    runtimeTokenChain: null,
+  };
 }
 
 function chromeExtensionsTarget(): { url: string; profileName: string | null; extensionId: string | null } {
