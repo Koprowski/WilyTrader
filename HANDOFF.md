@@ -1,5 +1,28 @@
 # WilyTrader Handoff
 
+## 2026-06-05 Desktop OHLC Screenshot Links
+
+Finding: `ohlc_screenshot` links could repeat the same screenshot across
+multiple trade-log rows. The selector first tried direct execution
+`screenshotPath` values, but archived sessions move the folder and make those
+stored absolute paths stale. Once direct lookup failed, the fallback matched by
+token filename and picked the last sell screenshot, so repeated same-token rows
+could point to the same final screenshot.
+
+Resolution in Desktop/extension `0.4.2`: Desktop now re-resolves stale
+screenshot paths by basename inside the current session screenshot folder,
+matches screenshot files by execution ID, then uses screenshot metadata with
+token and trade-window checks before falling back to token-only filename
+matching. The fallback now scores screenshots by side and distance to the
+trade's entry/exit time.
+
+Validation:
+
+- `npm --prefix desktop run typecheck`
+- `npm --prefix desktop run build`
+- Archived-session screenshot selector probe against
+  `E:\Apps\WilyTrader Captures\Archive\20260604.2312 Trade`
+
 ## 2026-06-05 Desktop Master Template Seeding
 
 Finding: the master workbook finalizer still applied OHLC SOL/percent formats by

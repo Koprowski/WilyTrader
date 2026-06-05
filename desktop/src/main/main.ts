@@ -144,6 +144,16 @@ interface TradeExecutionPoint {
   screenshotPath?: string | null;
 }
 
+interface TradeScreenshotCandidate {
+  path: string;
+  side: string | null;
+  executionId: string | null;
+  tokenName: string | null;
+  tokenAddress: string | null;
+  timestampMs: number | null;
+  rank: number;
+}
+
 type XlsxStyleKey = 'integer' | 'sol3' | 'percent1' | 'nativePrice' | 'date';
 
 type XlsxCell = string | number | {
@@ -3204,32 +3214,97 @@ function normalizeTradeExecutionPoint(execution: Record<string, unknown>): Trade
 }
 
 function selectTradeOhlcScreenshot(session: ActiveTradeSession, trade: NormalizedTrade): string | null {
-  const fromExecutions = (trade.executions ?? [])
-    .map((execution) => execution.screenshotPath)
-    .filter((screenshotPath): screenshotPath is string => Boolean(screenshotPath && fs.existsSync(screenshotPath)));
-  const fromExecutionIds = fromExecutions.length > 0 ? [] : findTradeScreenshotsByExecutionId(session, trade);
-  const candidates = fromExecutions.length > 0
-    ? fromExecutions
-    : fromExecutionIds.length > 0
-      ? fromExecutionIds
-      : findTradeScreenshots(session, trade);
-  if (candidates.length === 0) return null;
-  const sorted = [...new Set(candidates)].sort((a, b) => a.localeCompare(b));
-  const sellScreenshot = [...sorted].reverse().find((screenshot) => /(?:^|-|\\|\/)sell(?:-|\.|\\|\/)/i.test(screenshot));
-  return sellScreenshot ?? sorted[sorted.length - 1] ?? null;
+  const executionCandidates = findTradeScreenshotsFromExecutions(session, trade);
+  if (executionCandidates.length > 0) return chooseTradeScreenshot(executionCandidates, trade);
+
+  const metadataCandidates = findTradeScreenshotsByMetadata(session, trade);
+  if (metadataCandidates.length > 0) return chooseTradeScreenshot(metadataCandidates, trade);
+
+  const tokenCandidates = findTradeScreenshots(session, trade).map((screenshotPath) =>
+    ({
+      ...screenshotCandidateFromPath(screenshotPath, 3),
+      tokenName: trade.tokenName,
+      tokenAddress: trade.tokenAddress,
+    })
+  );
+  return chooseTradeScreenshot(tokenCandidates, trade);
 }
 
-function findTradeScreenshotsByExecutionId(session: ActiveTradeSession, trade: NormalizedTrade): string[] {
-  if (!fs.existsSync(session.screenshotDir)) return [];
-  const executionIds = (trade.executions ?? [])
-    .map((execution) => execution.id?.toLowerCase())
-    .filter((id): id is string => Boolean(id));
-  if (executionIds.length === 0) return [];
-  return fs
-    .readdirSync(session.screenshotDir)
-    .filter((name) => name.toLowerCase().endsWith('.png'))
-    .filter((name) => executionIds.some((id) => name.toLowerCase().includes(id)))
-    .map((name) => path.join(session.screenshotDir, name));
+function findTradeScreenshotsFromExecutions(session: ActiveTradeSession, trade: NormalizedTrade): TradeScreenshotCandidate[] {
+  const candidates: TradeScreenshotCandidate[] = [];
+  const seen = new Set<string>();
+  for (const execution of trade.executions ?? []) {
+    const resolved = resolveSessionScreenshotPath(session, execution.screenshotPath ?? null);
+    if (resolved && !seen.has(resolved)) {
+      seen.add(resolved);
+      candidates.push({
+        path: resolved,
+        side: execution.side,
+        executionId: execution.id,
+        tokenName: trade.tokenName,
+        tokenAddress: trade.tokenAddress,
+        timestampMs: execution.timestampMs,
+        rank: 0,
+      });
+    }
+
+    const executionId = execution.id?.toLowerCase();
+    if (!executionId || !fs.existsSync(session.screenshotDir)) continue;
+    for (const name of fs.readdirSync(session.screenshotDir)) {
+      if (!name.toLowerCase().endsWith('.png')) continue;
+      if (!name.toLowerCase().includes(executionId)) continue;
+      const screenshotPath = path.join(session.screenshotDir, name);
+      if (seen.has(screenshotPath)) continue;
+      seen.add(screenshotPath);
+      const pathCandidate = screenshotCandidateFromPath(screenshotPath, 1);
+      candidates.push({
+        ...pathCandidate,
+        side: execution.side ?? pathCandidate.side,
+        executionId: execution.id,
+        tokenName: trade.tokenName,
+        tokenAddress: trade.tokenAddress,
+        timestampMs: execution.timestampMs ?? pathCandidate.timestampMs,
+      });
+    }
+  }
+  return candidates;
+}
+
+function resolveSessionScreenshotPath(session: ActiveTradeSession, screenshotPath: string | null): string | null {
+  if (!screenshotPath) return null;
+  if (fs.existsSync(screenshotPath)) return screenshotPath;
+  const basename = path.basename(screenshotPath);
+  const sessionCandidate = path.join(session.screenshotDir, basename);
+  if (fs.existsSync(sessionCandidate)) return sessionCandidate;
+  return null;
+}
+
+function findTradeScreenshotsByMetadata(session: ActiveTradeSession, trade: NormalizedTrade): TradeScreenshotCandidate[] {
+  if (!fs.existsSync(session.screenshotMetadataDir)) return [];
+  const candidates: TradeScreenshotCandidate[] = [];
+  for (const name of fs.readdirSync(session.screenshotMetadataDir)) {
+    if (!name.toLowerCase().endsWith('.json')) continue;
+    const metadataPath = path.join(session.screenshotMetadataDir, name);
+    try {
+      const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf-8')) as Record<string, unknown>;
+      const event = metadata.event && typeof metadata.event === 'object' ? metadata.event as Record<string, unknown> : {};
+      const screenshotPath = resolveSessionScreenshotPath(session, strOrNull(metadata.screenshotPath));
+      if (!screenshotPath) continue;
+      const candidate: TradeScreenshotCandidate = {
+        path: screenshotPath,
+        side: strOrNull(event.side) ?? screenshotCandidateFromPath(screenshotPath, 2).side,
+        executionId: strOrNull(event.executionId),
+        tokenName: strOrNull(event.tokenName),
+        tokenAddress: strOrNull(event.tokenAddress),
+        timestampMs: parseTimestampMs(event.timestampMs ?? event.timestamp) ?? parseTimestampMs(metadata.capturedAtMs ?? metadata.capturedAt),
+        rank: 2,
+      };
+      if (screenshotCandidateMatchesTrade(candidate, trade, true)) candidates.push(candidate);
+    } catch {
+      continue;
+    }
+  }
+  return candidates;
 }
 
 function findTradeScreenshots(session: ActiveTradeSession, trade: NormalizedTrade): string[] {
@@ -3242,6 +3317,90 @@ function findTradeScreenshots(session: ActiveTradeSession, trade: NormalizedTrad
     .filter((name) => name.toLowerCase().endsWith('.png'))
     .filter((name) => tokenCandidates.length === 0 || tokenCandidates.some((token) => name.toLowerCase().includes(token.slice(0, 24))))
     .map((name) => path.join(session.screenshotDir, name));
+}
+
+function screenshotCandidateFromPath(screenshotPath: string, rank: number): TradeScreenshotCandidate {
+  const name = path.basename(screenshotPath);
+  const timestampMatch = name.match(/^(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/);
+  const timestampMs = timestampMatch
+    ? new Date(
+        Number(timestampMatch[1]),
+        Number(timestampMatch[2]) - 1,
+        Number(timestampMatch[3]),
+        Number(timestampMatch[4]),
+        Number(timestampMatch[5]),
+        Number(timestampMatch[6])
+      ).getTime()
+    : null;
+  const side = /(?:^|-)sell(?:-|\.|$)/i.test(name)
+    ? 'sell'
+    : /(?:^|-)buy(?:-|\.|$)/i.test(name)
+      ? 'buy'
+      : null;
+  const executionId = name.match(/(exec-[A-Za-z0-9-]+)/i)?.[1] ?? null;
+  return {
+    path: screenshotPath,
+    side,
+    executionId,
+    tokenName: null,
+    tokenAddress: null,
+    timestampMs,
+    rank,
+  };
+}
+
+function screenshotCandidateMatchesTrade(candidate: TradeScreenshotCandidate, trade: NormalizedTrade, requireTimeWindow: boolean): boolean {
+  const candidateExecutionId = candidate.executionId;
+  const tokenMatches =
+    Boolean(trade.tokenAddress && candidate.tokenAddress && normalizeTokenKey(trade.tokenAddress) === normalizeTokenKey(candidate.tokenAddress)) ||
+    Boolean(trade.tokenName && candidate.tokenName && normalizeTokenKey(trade.tokenName) === normalizeTokenKey(candidate.tokenName));
+  const executionMatches = Boolean(
+    candidateExecutionId &&
+    (trade.executions ?? []).some((execution) => execution.id && normalizeTokenKey(execution.id) === normalizeTokenKey(candidateExecutionId))
+  );
+  const timeMatches = isScreenshotWithinTradeWindow(candidate.timestampMs, trade);
+  if (executionMatches) return true;
+  if (!tokenMatches) return false;
+  return !requireTimeWindow || timeMatches;
+}
+
+function chooseTradeScreenshot(candidates: TradeScreenshotCandidate[], trade: NormalizedTrade): string | null {
+  const unique = [...new Map(candidates.map((candidate) => [candidate.path, candidate])).values()]
+    .filter((candidate) => fs.existsSync(candidate.path))
+    .filter((candidate) => candidate.rank < 3 || screenshotCandidateMatchesTrade(candidate, trade, false));
+  if (unique.length === 0) return null;
+  return unique
+    .sort((a, b) =>
+      screenshotScore(a, trade) - screenshotScore(b, trade) ||
+      String(a.path).localeCompare(String(b.path))
+    )[0]?.path ?? null;
+}
+
+function screenshotScore(candidate: TradeScreenshotCandidate, trade: NormalizedTrade): number {
+  const exitMs = trade.timestampMs;
+  const entryMs = trade.entryTimestampMs;
+  const timeMs = candidate.timestampMs;
+  const outsidePenalty = isScreenshotWithinTradeWindow(timeMs, trade) ? 0 : 1_000_000_000_000;
+  const sidePenalty = candidate.side === 'sell' ? 0 : candidate.side === 'buy' ? 25_000_000 : 50_000_000;
+  const targetMs = candidate.side === 'buy'
+    ? entryMs ?? exitMs
+    : exitMs ?? entryMs;
+  const distance = targetMs !== null && timeMs !== null ? Math.abs(timeMs - targetMs) : 500_000_000;
+  return outsidePenalty + candidate.rank * 100_000_000 + sidePenalty + distance;
+}
+
+function isScreenshotWithinTradeWindow(timestampMs: number | null, trade: NormalizedTrade): boolean {
+  if (timestampMs === null || !Number.isFinite(timestampMs)) return false;
+  const entryMs = trade.entryTimestampMs;
+  const exitMs = trade.timestampMs;
+  const toleranceMs = 30_000;
+  if (entryMs !== null && timestampMs < entryMs - toleranceMs) return false;
+  if (exitMs !== null && timestampMs > exitMs + toleranceMs) return false;
+  return true;
+}
+
+function normalizeTokenKey(value: string): string {
+  return value.trim().toLowerCase();
 }
 
 function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
