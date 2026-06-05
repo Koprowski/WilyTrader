@@ -1,7 +1,7 @@
 {
-  "name": "wilytrader-desktop",
-  "version": "0.2.0",
-  "description": "Audio-first WilyTrader Desktop trade session recorder and localhost bridge.",
+  "name": "wilytrader",
+  "version": "0.2.1",
+  "description": "WilyTrader local trading capture app and localhost bridge.",
   "main": "dist/main/main.js",
   "author": "Jason Koprowski",
   "license": "MIT",
@@ -18,8 +18,8 @@
     "dist:win": "npm run build && electron-builder --win nsis --x64 --publish never"
   },
   "build": {
-    "appId": "com.wilytrader.desktop",
-    "productName": "WilyTrader Desktop",
+    "appId": "com.wilytrader.app",
+    "productName": "WilyTrader",
     "asar": false,
     "directories": {
       "output": "release"
@@ -49,11 +49,11 @@
     },
     "nsis": {
       "oneClick": false,
-      "perMachine": false,
+      "perMachine": true,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "WilyTrader Desktop"
+      "shortcutName": "WilyTrader"
     }
   },
   "dependencies": {
@@ -62,8 +62,8 @@
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
-    "electron-builder": "^26.0.12",
     "electron": "^41.3.0",
+    "electron-builder": "^26.0.12",
     "typescript": "^5.4.0"
   }
 }

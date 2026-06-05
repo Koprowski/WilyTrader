@@ -1,5 +1,17 @@
 # WilyTrader Handoff
 
+## 2026-06-05 Product Install Identity
+
+Resolution for release tag `0.4.7`: the installed Windows product is renamed
+from **WilyTrader Desktop** to **WilyTrader**. The installer uses app id
+`com.wilytrader.app`, shortcut name `WilyTrader`, and per-machine installs so
+the default install root is `C:\Program Files\WilyTrader`. The packaged layout
+remains Electron-standard: app files under `resources\app` and the bundled
+Chrome extension under `resources\extension`. Desktop app version is `0.2.1`;
+Chrome extension version is `0.4.7`. First launch copies legacy settings from
+`%APPDATA%\WilyTrader Desktop\settings.json` to `%APPDATA%\WilyTrader` when the
+new settings file does not exist.
+
 ## 2026-06-05 Restore Separate Desktop/Extension Versions
 
 Finding: Desktop and Chrome extension versions became coupled in commit

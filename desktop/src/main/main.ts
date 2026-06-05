@@ -27,6 +27,8 @@ const MAX_BRIDGE_BODY_BYTES = 25 * 1024 * 1024;
 const WILYTRADER_TAGS_API_URL = 'https://api.github.com/repos/Koprowski/WilyTrader/tags?per_page=10';
 const WILYTRADER_LATEST_RELEASE_API_URL = 'https://api.github.com/repos/Koprowski/WilyTrader/releases/latest';
 const WILYTRADER_RELEASE_BASE_URL = 'https://github.com/Koprowski/WilyTrader/releases';
+const APP_DISPLAY_NAME = 'WilyTrader';
+const LEGACY_DESKTOP_DISPLAY_NAME = 'WilyTrader Desktop';
 const MASTER_TRADING_LOG_FILE_NAME = 'master trading log.xlsx';
 const MASTER_TRADING_LOG_TEMPLATE_FILE_NAME = 'master trading log - Template.xlsx';
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -263,7 +265,7 @@ function createWindow(): void {
     height: 680,
     minWidth: 760,
     minHeight: 540,
-    title: 'WilyTrader Desktop',
+    title: APP_DISPLAY_NAME,
     show: false,
     webPreferences: {
       preload: preloadPath,
@@ -274,18 +276,19 @@ function createWindow(): void {
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show();
     mainWindow?.focus();
-    console.log(`[WilyTrader Desktop] window ready: ${mainWindow?.getTitle() ?? 'untitled'}`);
+    console.log(`[${APP_DISPLAY_NAME}] window ready: ${mainWindow?.getTitle() ?? 'untitled'}`);
   });
   mainWindow.webContents.on('console-message', (_event, level, message) => {
     debugLog('renderer-console', 'console-message', { level, message });
   });
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
-    console.log(`[WilyTrader Desktop] renderer exited: ${details.reason}`);
+    console.log(`[${APP_DISPLAY_NAME}] renderer exited: ${details.reason}`);
   });
   void mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
 }
 
 app.whenReady().then(() => {
+  migrateLegacyUserData();
   settings = loadSettings();
   lastCompletedSessionDir = findLastCompletedSessionDir(settings.outputDir);
   extensionStatus = {
@@ -295,7 +298,7 @@ app.whenReady().then(() => {
   registerIpc();
   registerTradeSessionHotkey();
   createWindow();
-  console.log(`[WilyTrader Desktop] started. Bridge port ${BRIDGE_PORT}. Output: ${settings.outputDir}`);
+  console.log(`[${APP_DISPLAY_NAME}] started. Bridge port ${BRIDGE_PORT}. Output: ${settings.outputDir}`);
   scheduleUpdateChecks();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -421,13 +424,13 @@ function debugLog(scope: string, message: string, details?: unknown): void {
   };
   const line = JSON.stringify(entry);
   try {
-    const userData = app.isReady() ? app.getPath('userData') : path.join(os.homedir(), 'AppData', 'Roaming', 'wilytrader-desktop');
+    const userData = app.isReady() ? app.getPath('userData') : path.join(os.homedir(), 'AppData', 'Roaming', APP_DISPLAY_NAME);
     fs.mkdirSync(userData, { recursive: true });
     fs.appendFileSync(path.join(userData, 'debug.log'), `${line}${os.EOL}`, 'utf-8');
   } catch {
     // Keep debug logging non-fatal.
   }
-  console.log(`[WilyTrader Desktop][${scope}] ${message}`, details ?? '');
+  console.log(`[${APP_DISPLAY_NAME}][${scope}] ${message}`, details ?? '');
 }
 
 function errorDetails(err: unknown): Record<string, unknown> {
@@ -506,9 +509,9 @@ function registerTradeSessionHotkey(): void {
   });
   if (registered) {
     registeredTradeSessionHotkey = hotkey;
-    console.log(`[WilyTrader Desktop] registered trade-session hotkey ${hotkey}`);
+    console.log(`[${APP_DISPLAY_NAME}] registered trade-session hotkey ${hotkey}`);
   } else {
-    console.log(`[WilyTrader Desktop] failed to register trade-session hotkey ${hotkey}`);
+    console.log(`[${APP_DISPLAY_NAME}] failed to register trade-session hotkey ${hotkey}`);
   }
 }
 
@@ -526,7 +529,7 @@ async function toggleTradeSessionFromHotkey(): Promise<void> {
     }
     startSession();
   } catch (err) {
-    console.log(`[WilyTrader Desktop] hotkey toggle failed: ${(err as Error).message}`);
+    console.log(`[${APP_DISPLAY_NAME}] hotkey toggle failed: ${(err as Error).message}`);
     broadcastStatus();
   }
 }
@@ -563,7 +566,7 @@ function startSession(): WilyTraderDesktopStatus {
   };
 
   writeJson(path.join(sessionDir, 'session_manifest.json'), {
-    app: 'WilyTrader Desktop',
+    app: APP_DISPLAY_NAME,
     mode: 'trade',
     sessionStartedAt: new Date(sessionStartedAtMs).toISOString(),
     sessionStartedAtMs,
@@ -589,7 +592,7 @@ async function stopSession(): Promise<StopSessionResult> {
   const stoppedAtMs = Date.now();
   startFinalizingSession(session, stoppedAtMs);
   writeJson(path.join(session.sessionDir, 'session_manifest.json'), {
-    app: 'WilyTrader Desktop',
+    app: APP_DISPLAY_NAME,
     mode: 'trade',
     sessionStartedAt: new Date(session.sessionStartedAtMs).toISOString(),
     sessionStartedAtMs: session.sessionStartedAtMs,
@@ -949,7 +952,7 @@ async function handleBridgeRequest(req: http.IncomingMessage, res: http.ServerRe
   if (req.method === 'GET' && url.pathname === '/v1/wilytrader/status') {
     writeBridgeJson(res, 200, {
       ok: true,
-      receiver: 'WilyTrader Desktop',
+      receiver: APP_DISPLAY_NAME,
       supportsTabScreenshotUpload: true,
       ...getStatus(),
     });
@@ -962,7 +965,7 @@ async function handleBridgeRequest(req: http.IncomingMessage, res: http.ServerRe
       receiveExtensionStatus(payload);
       writeBridgeJson(res, 200, {
         ok: true,
-        receiver: 'WilyTrader Desktop',
+        receiver: APP_DISPLAY_NAME,
         extension: extensionStatus,
       });
     } catch (err) {
@@ -977,7 +980,7 @@ async function handleBridgeRequest(req: http.IncomingMessage, res: http.ServerRe
       receiveExtensionDiagnostic(payload);
       writeBridgeJson(res, 200, {
         ok: true,
-        receiver: 'WilyTrader Desktop',
+        receiver: APP_DISPLAY_NAME,
         activeSession: Boolean(activeSession),
       });
     } catch (err) {
@@ -1076,7 +1079,7 @@ async function receiveLedger(payload: unknown, res: http.ServerResponse): Promis
   broadcastStatus();
   writeBridgeJson(res, 200, {
     ok: true,
-    receiver: 'WilyTrader Desktop',
+    receiver: APP_DISPLAY_NAME,
     sessionDir: session.sessionDir,
     ledgerPath: path.join(session.inputsDir, 'wilytrader.json'),
     screenshotPath,
@@ -1252,7 +1255,7 @@ function recordMarketCapObservation(
 function writeTranscriptJson(session: ActiveTradeSession): string {
   const transcriptPath = path.join(session.inputsDir, 'transcript.json');
   writeJson(transcriptPath, {
-    source: 'WilyTrader Desktop audio-first transcript pipeline',
+    source: 'WilyTrader audio-first transcript pipeline',
     sessionStartedAtMs: session.sessionStartedAtMs,
     segments: session.transcriptSegments,
   });
@@ -1264,7 +1267,7 @@ function writeTranscriptMd(session: ActiveTradeSession): string {
   const lines = [
     '# Transcript',
     '',
-    `Generated by WilyTrader Desktop - ${new Date().toLocaleString()}`,
+    `Generated by WilyTrader - ${new Date().toLocaleString()}`,
     '',
   ];
   if (session.transcriptSegments.length === 0) {
@@ -1283,7 +1286,7 @@ function writeRootTranscriptTxt(session: ActiveTradeSession): string {
   const txtPath = path.join(session.sessionDir, 'transcript.txt');
   const lines = [
     `Transcript - ${path.basename(session.sessionDir)}`,
-    `Generated by WilyTrader Desktop - ${new Date().toLocaleString()}`,
+    `Generated by WilyTrader - ${new Date().toLocaleString()}`,
     '',
   ];
   if (session.transcriptSegments.length === 0) {
@@ -1869,7 +1872,7 @@ function renderTradeExtractionPrompt(
     };
   });
 
-  return `You are extracting a WilyTrader Desktop trade log from a trader's spoken transcript.
+  return `You are extracting a WilyTrader trade log from a trader's spoken transcript.
 
 Use the actual trades as the source of truth. Return one JSON object for each actual trade only.
 Do not invent targets, rationale, excerpts, or scores. Use null when the transcript does not support a field.
@@ -2548,7 +2551,7 @@ function writeTradeLogMd(session: ActiveTradeSession, trades: NormalizedTrade[])
   const lines = [
     '# Trade Log',
     '',
-    `Generated by WilyTrader Desktop - ${new Date().toLocaleString()}`,
+    `Generated by WilyTrader - ${new Date().toLocaleString()}`,
     `Session started: ${new Date(session.sessionStartedAtMs).toLocaleString()}`,
     `Total trades: ${trades.length}`,
     '',
@@ -3084,11 +3087,11 @@ function xmlStyles(): string {
 }
 
 function xmlAppProps(): string {
-  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>WilyTrader Desktop</Application></Properties>';
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>WilyTrader</Application></Properties>';
 }
 
 function xmlCoreProps(): string {
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:creator>WilyTrader Desktop</dc:creator><dcterms:created xsi:type="dcterms:W3CDTF">${new Date().toISOString()}</dcterms:created></cp:coreProperties>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:creator>WilyTrader</dc:creator><dcterms:created xsi:type="dcterms:W3CDTF">${new Date().toISOString()}</dcterms:created></cp:coreProperties>`;
 }
 
 function extractExecutionEvent(payload: unknown): BridgeExecutionEvent | null {
@@ -3439,7 +3442,7 @@ function requireActiveSession(): ActiveTradeSession {
 }
 
 function getOutputRoot(): string {
-  return path.join(app.getPath('documents'), 'WilyTrader Desktop', 'Sessions');
+  return path.join(app.getPath('documents'), APP_DISPLAY_NAME, 'Sessions');
 }
 
 function fallbackSettings(): WilyTraderDesktopSettings {
@@ -3467,6 +3470,26 @@ function defaultSettings(): WilyTraderDesktopSettings {
 
 function settingsPath(): string {
   return path.join(app.getPath('userData'), 'settings.json');
+}
+
+function legacyUserDataPath(): string {
+  return path.join(app.getPath('appData'), LEGACY_DESKTOP_DISPLAY_NAME);
+}
+
+function migrateLegacyUserData(): void {
+  const current = app.getPath('userData');
+  const legacy = legacyUserDataPath();
+  if (path.resolve(current).toLowerCase() === path.resolve(legacy).toLowerCase()) return;
+  const legacySettings = path.join(legacy, 'settings.json');
+  const currentSettings = path.join(current, 'settings.json');
+  if (!fs.existsSync(legacySettings) || fs.existsSync(currentSettings)) return;
+  try {
+    fs.mkdirSync(current, { recursive: true });
+    fs.copyFileSync(legacySettings, currentSettings);
+    debugLog('settings', 'migrated legacy settings', { from: legacySettings, to: currentSettings });
+  } catch (err) {
+    debugLog('settings', 'legacy settings migration failed', errorDetails(err));
+  }
 }
 
 function loadSettings(): WilyTraderDesktopSettings {
@@ -3626,7 +3649,7 @@ function defaultDesktopUpdateStatus(): WilyTraderDesktopUpdateStatus {
     installedVersion,
     latestVersion: null,
     updateAvailable: false,
-    updateMessage: `WilyTrader Desktop ${installedVersion}; update status not checked yet.`,
+    updateMessage: `WilyTrader ${installedVersion}; update status not checked yet.`,
     checkedAt: null,
   };
 }
@@ -3734,8 +3757,8 @@ async function checkDesktopUpdates(force = false): Promise<void> {
       latestVersion: latest,
       updateAvailable,
       updateMessage: updateAvailable
-        ? `WilyTrader Desktop ${latest} is available; installed ${installed}.`
-        : `WilyTrader Desktop is up to date (${installed}).`,
+        ? `WilyTrader ${latest} is available; installed ${installed}.`
+        : `WilyTrader is up to date (${installed}).`,
       checkedAt: new Date().toISOString(),
     };
   } catch (err) {
@@ -3945,18 +3968,18 @@ async function openLatestDesktopReleasePage(): Promise<{ ok: boolean; message: s
   const latest = await latestKnownDesktopVersion();
   const url = `${WILYTRADER_RELEASE_BASE_URL}/tag/v${latest}`;
   await shell.openExternal(url);
-  return { ok: true, message: `Opened WilyTrader Desktop ${latest} release page.`, url };
+  return { ok: true, message: `Opened WilyTrader ${latest} release page.`, url };
 }
 
 async function openLatestDesktopDownload(): Promise<{ ok: boolean; message: string; url?: string }> {
   const release = await fetchLatestWilyTraderRelease();
   if (!release.desktopInstaller) {
-    return { ok: false, message: `Latest release ${release.version} does not include a WilyTrader Desktop installer asset.`, url: release.htmlUrl };
+    return { ok: false, message: `Latest release ${release.version} does not include a WilyTrader installer asset.`, url: release.htmlUrl };
   }
   const latest = release.desktopInstaller.version;
   const url = release.desktopInstaller.url;
   await shell.openExternal(url);
-  return { ok: true, message: `Opened WilyTrader Desktop ${latest} installer download.`, url };
+  return { ok: true, message: `Opened WilyTrader ${latest} installer download.`, url };
 }
 
 async function installLatestDesktopRelease(): Promise<{ ok: boolean; message: string; installerPath?: string; releaseUrl?: string | null }> {
@@ -3964,7 +3987,7 @@ async function installLatestDesktopRelease(): Promise<{ ok: boolean; message: st
   const desktopVersion = release.desktopInstaller?.version ?? release.version;
   const currentVersion = app.getVersion() || '0.0.0';
   if (!isRemoteVersionNewer(currentVersion, desktopVersion)) {
-    return { ok: false, message: `WilyTrader Desktop is already up to date (${currentVersion}).`, releaseUrl: release.htmlUrl };
+    return { ok: false, message: `WilyTrader is already up to date (${currentVersion}).`, releaseUrl: release.htmlUrl };
   }
   if (!release.desktopInstaller) {
     return { ok: false, message: `Desktop ${desktopVersion} is available, but no installer asset was found.`, releaseUrl: release.htmlUrl };
@@ -3978,7 +4001,7 @@ async function installLatestDesktopRelease(): Promise<{ ok: boolean; message: st
     setTimeout(() => app.quit(), 750);
     return {
       ok: true,
-      message: `Downloaded WilyTrader Desktop ${desktopVersion}. WilyTrader will close and launch the installer.`,
+      message: `Downloaded WilyTrader ${desktopVersion}. WilyTrader will close and launch the installer.`,
       installerPath,
       releaseUrl: release.htmlUrl,
     };
@@ -4125,7 +4148,7 @@ async function checkDependencies(payload?: { geminiCliCommand?: string }): Promi
       ? {
           ok: true,
           optional: true,
-          message: 'Gemini CLI is already installed and working. Node/npm is only needed if WilyTrader Desktop needs to install or update Gemini CLI for you.',
+          message: 'Gemini CLI is already installed and working. Node/npm is only needed if WilyTrader needs to install or update Gemini CLI for you.',
         }
       : {
           ok: false,
@@ -4166,7 +4189,7 @@ async function installWhisperDependency(): Promise<{ ok: boolean; message: strin
       await extractZipFile(zipPath, binDir);
     }
     const installed = findWhisperBinary();
-    if (!installed) return { ok: false, message: 'Whisper downloaded, but WilyTrader Desktop could not verify the executable and model.' };
+    if (!installed) return { ok: false, message: 'Whisper downloaded, but WilyTrader could not verify the executable and model.' };
     return {
       ok: true,
       message: `Whisper installed under ${root}.`,
@@ -4259,7 +4282,7 @@ async function installNodeLts(): Promise<{ ok: boolean; message: string; stdoutT
   }
   return {
     ok: true,
-    message: 'Node.js LTS install completed. If npm is still missing, restart WilyTrader Desktop so Windows refreshes PATH.',
+    message: 'Node.js LTS install completed. If npm is still missing, restart WilyTrader so Windows refreshes PATH.',
     stdoutTail,
     stderrTail,
   };
@@ -4510,7 +4533,7 @@ async function testGeminiCliConnection(
     return {
       ok: false,
       message: 'Gemini CLI was not found on this machine. Install it, then run this test again.',
-      guidance: guidance('WilyTrader Desktop could not find the configured Gemini CLI command.'),
+      guidance: guidance('WilyTrader could not find the configured Gemini CLI command.'),
     };
   }
   if (!versionProbe.ok) {
@@ -5874,7 +5897,7 @@ function writeStatusFileForSession(session: ActiveTradeSession, status: string, 
   writeJson(path.join(session.sessionDir, 'session_status.json'), {
     status,
     updatedAt: new Date().toISOString(),
-    app: 'WilyTrader Desktop',
+    app: APP_DISPLAY_NAME,
     sessionDir: session.sessionDir,
     sessionStartedAtMs: session.sessionStartedAtMs,
     ...details,

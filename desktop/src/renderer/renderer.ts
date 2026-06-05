@@ -614,7 +614,7 @@ function renderDesktopUpdateStatus(update: WilyTraderDesktopStatus['desktopUpdat
   if (desktopGuidanceEl) {
     desktopGuidanceEl.hidden = !update.updateAvailable;
     desktopGuidanceEl.textContent = update.updateAvailable && update.latestVersion
-      ? `WilyTrader checks automatically at startup. Install Update downloads WilyTrader Desktop ${update.latestVersion}, starts the installer, and closes this app.`
+      ? `WilyTrader checks automatically at startup. Install Update downloads WilyTrader ${update.latestVersion}, starts the installer, and closes this app.`
       : '';
   }
   if (desktopUpdateActionsEl) desktopUpdateActionsEl.hidden = !update.updateAvailable;
@@ -826,10 +826,10 @@ async function checkExtensionUpdates(): Promise<void> {
 }
 
 async function checkDesktopUpdates(): Promise<void> {
-  setUiBusy(false, 'Checking WilyTrader Desktop update status...');
+  setUiBusy(false, 'Checking WilyTrader update status...');
   const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi;
   if (typeof api.checkDesktopUpdates !== 'function') {
-    throw new Error('Desktop update checks are unavailable in this running app. Restart WilyTrader Desktop.');
+    throw new Error('Desktop update checks are unavailable in this running app. Restart WilyTrader.');
   }
   renderStatus(await api.checkDesktopUpdates());
 }
@@ -856,7 +856,7 @@ async function refreshDependencyStatus(): Promise<void> {
       geminiCliCommand: getInputValue('geminiCliCommand') || 'gemini',
     });
     if (typeof api.checkDependencies !== 'function') {
-      throw new Error('Dependency checker is unavailable in the running app. Restart WilyTrader Desktop so the updated preload API is loaded.');
+      throw new Error('Dependency checker is unavailable in the running app. Restart WilyTrader so the updated preload API is loaded.');
     }
     const result = await api.checkDependencies({ geminiCliCommand: getInputValue('geminiCliCommand') || 'gemini' });
     debugLog('renderer', 'refreshDependencyStatus completed', result);
@@ -929,7 +929,7 @@ async function refreshGeminiSigninStatus(): Promise<void> {
       hasStatusApi: typeof api.geminiCliSigninStatus === 'function',
     });
     if (typeof api.geminiCliSigninStatus !== 'function') {
-      throw new Error('Gemini sign-in status is unavailable in the running app. Restart WilyTrader Desktop so the updated preload API is loaded.');
+      throw new Error('Gemini sign-in status is unavailable in the running app. Restart WilyTrader so the updated preload API is loaded.');
     }
     const result = await api.geminiCliSigninStatus();
     debugLog('renderer', 'refreshGeminiSigninStatus completed', result);
@@ -949,7 +949,7 @@ async function signInGemini(): Promise<void> {
       geminiCliCommand: getInputValue('geminiCliCommand') || 'gemini',
     });
     if (typeof api.geminiCliSignin !== 'function' || typeof api.geminiCliSigninStatus !== 'function') {
-      setSettingsMessage('Gemini sign-in is unavailable in the running app. Restart WilyTrader Desktop so the updated preload API is loaded.', true);
+      setSettingsMessage('Gemini sign-in is unavailable in the running app. Restart WilyTrader so the updated preload API is loaded.', true);
       return;
     }
     const status = await api.geminiCliSigninStatus();
@@ -1015,7 +1015,7 @@ async function copyLastCompletedSessionFolderLink(): Promise<void> {
 async function syncMasterTradingLog(): Promise<void> {
   const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi;
   if (typeof api.syncMasterTradingLog !== 'function') {
-    throw new Error('Master sync is unavailable in this running app. Restart WilyTrader Desktop.');
+    throw new Error('Master sync is unavailable in this running app. Restart WilyTrader.');
   }
   for (const button of syncMasterButtons) {
     button.disabled = true;
@@ -1050,7 +1050,7 @@ async function openChromeExtensions(): Promise<void> {
 async function openLatestExtensionRelease(): Promise<void> {
   const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi;
   if (typeof api.openLatestExtensionRelease !== 'function') {
-    throw new Error('Release links are unavailable in this running app. Restart WilyTrader Desktop.');
+    throw new Error('Release links are unavailable in this running app. Restart WilyTrader.');
   }
   const result = await api.openLatestExtensionRelease();
   setSettingsMessage(result.message, !result.ok);
@@ -1059,7 +1059,7 @@ async function openLatestExtensionRelease(): Promise<void> {
 async function downloadLatestExtensionRelease(): Promise<void> {
   const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi;
   if (typeof api.downloadLatestExtensionRelease !== 'function') {
-    throw new Error('Download links are unavailable in this running app. Restart WilyTrader Desktop.');
+    throw new Error('Download links are unavailable in this running app. Restart WilyTrader.');
   }
   const result = await api.downloadLatestExtensionRelease();
   setSettingsMessage(result.message, !result.ok);
@@ -1068,7 +1068,7 @@ async function downloadLatestExtensionRelease(): Promise<void> {
 async function updateLatestExtensionFiles(): Promise<void> {
   const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi;
   if (typeof api.updateLatestExtensionFiles !== 'function') {
-    throw new Error('Extension file updates are unavailable in this running app. Restart WilyTrader Desktop.');
+    throw new Error('Extension file updates are unavailable in this running app. Restart WilyTrader.');
   }
   setSettingsMessage('Updating WilyTrader extension files...');
   const result = await api.updateLatestExtensionFiles();
@@ -1079,7 +1079,7 @@ async function updateLatestExtensionFiles(): Promise<void> {
 async function openLatestDesktopRelease(): Promise<void> {
   const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi;
   if (typeof api.openLatestDesktopRelease !== 'function') {
-    throw new Error('Desktop release links are unavailable in this running app. Restart WilyTrader Desktop.');
+    throw new Error('Desktop release links are unavailable in this running app. Restart WilyTrader.');
   }
   const result = await api.openLatestDesktopRelease();
   setSettingsMessage(result.message, !result.ok);
@@ -1088,7 +1088,7 @@ async function openLatestDesktopRelease(): Promise<void> {
 async function downloadLatestDesktopRelease(): Promise<void> {
   const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi;
   if (typeof api.downloadLatestDesktopRelease !== 'function') {
-    throw new Error('Desktop download links are unavailable in this running app. Restart WilyTrader Desktop.');
+    throw new Error('Desktop download links are unavailable in this running app. Restart WilyTrader.');
   }
   const result = await api.downloadLatestDesktopRelease();
   setSettingsMessage(result.message, !result.ok);
@@ -1097,10 +1097,10 @@ async function downloadLatestDesktopRelease(): Promise<void> {
 async function installLatestDesktopRelease(): Promise<void> {
   const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi;
   if (typeof api.installLatestDesktopRelease !== 'function') {
-    throw new Error('Desktop update installs are unavailable in this running app. Restart WilyTrader Desktop.');
+    throw new Error('Desktop update installs are unavailable in this running app. Restart WilyTrader.');
   }
-  if (!window.confirm('Download and install the latest WilyTrader Desktop update now? WilyTrader will close after starting the installer.')) return;
-  setSettingsMessage('Downloading WilyTrader Desktop installer...');
+  if (!window.confirm('Download and install the latest WilyTrader update now? WilyTrader will close after starting the installer.')) return;
+  setSettingsMessage('Downloading WilyTrader installer...');
   const result = await api.installLatestDesktopRelease();
   setSettingsMessage(result.message, !result.ok);
 }
@@ -1178,14 +1178,14 @@ function debugLog(scope: string, message: string, details?: unknown): void {
     const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi | undefined;
     if (api && typeof api.logDebug === 'function') {
       void api.logDebug(scope, message, sanitizeForLog(details)).catch((err) => {
-        console.warn('[WilyTrader Desktop debug log failed]', err);
+        console.warn('[WilyTrader debug log failed]', err);
       });
       return;
     }
   } catch {
     // fall through to console
   }
-  console.log(`[WilyTrader Desktop][${scope}] ${message}`, details ?? '');
+  console.log(`[WilyTrader][${scope}] ${message}`, details ?? '');
 }
 
 function errorDetails(error: unknown): Record<string, unknown> {
