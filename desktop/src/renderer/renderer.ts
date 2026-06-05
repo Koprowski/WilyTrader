@@ -266,7 +266,12 @@ void window.wilyTraderDesktop.getSettings().then((settings) => {
   populateSettings(settings);
 }).catch(showError);
 void window.wilyTraderDesktop.getAppInfo().then(renderAppInfo).catch(showError);
-void window.wilyTraderDesktop.getStatus().then(renderStatus).catch(showError);
+void window.wilyTraderDesktop.getStatus()
+  .then((status) => {
+    renderStatus(status);
+    void refreshUpdateStatusOnRendererLoad();
+  })
+  .catch(showError);
 
 function renderAppInfo(info: WilyTraderDesktopAppInfo): void {
   for (const element of appVersionEls) {
@@ -803,6 +808,18 @@ async function checkDesktopUpdates(): Promise<void> {
     throw new Error('Desktop update checks are unavailable in this running app. Restart WilyTrader Desktop.');
   }
   renderStatus(await api.checkDesktopUpdates());
+}
+
+async function refreshUpdateStatusOnRendererLoad(): Promise<void> {
+  try {
+    const api = window.wilyTraderDesktop as WilyTraderDesktopRuntimeApi;
+    if (typeof api.checkDesktopUpdates === 'function') {
+      renderStatus(await api.checkDesktopUpdates());
+    }
+    renderStatus(await window.wilyTraderDesktop.checkExtensionUpdates());
+  } catch (err) {
+    debugLog('renderer', 'startup update refresh failed', errorDetails(err));
+  }
 }
 
 async function refreshDependencyStatus(): Promise<void> {

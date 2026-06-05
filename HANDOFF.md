@@ -1,5 +1,17 @@
 # WilyTrader Handoff
 
+## 2026-06-05 Desktop UI Reload Update Refresh
+
+Resolution in Desktop/extension `0.4.3`: renderer startup now forces Desktop
+and extension update-status refreshes after the first status render. Electron
+reload recreates the UI but keeps the main process alive, so this bypasses the
+main-process `checkedAt` cache in the same way as pressing **Refresh Status**.
+
+Validation:
+
+- `npm --prefix desktop run typecheck`
+- `npm --prefix desktop run dist:win`
+
 ## 2026-06-05 Desktop OHLC Screenshot Links
 
 Finding: `ohlc_screenshot` links could repeat the same screenshot across
