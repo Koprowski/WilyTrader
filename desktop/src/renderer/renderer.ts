@@ -630,13 +630,14 @@ function renderStatus(status: WilyTraderDesktopStatus): void {
 function renderDesktopUpdateStatus(update: WilyTraderDesktopStatus['desktopUpdate']): void {
   const installed = update.installedVersion || 'unknown';
   if (desktopVersionEl) desktopVersionEl.textContent = `Installed: ${installed}`;
-  if (desktopUpdateEl) desktopUpdateEl.textContent = update.updateMessage;
+  if (desktopUpdateEl) {
+    desktopUpdateEl.hidden = desktopUpdateInstalling;
+    if (!desktopUpdateInstalling) desktopUpdateEl.textContent = update.updateMessage;
+  }
 
   if (desktopGuidanceEl) {
-    desktopGuidanceEl.hidden = !update.updateAvailable && !desktopUpdateInstalling;
-    desktopGuidanceEl.textContent = desktopUpdateInstalling
-      ? 'Downloading and starting the WilyTrader installer. Keep this window open until the installer appears.'
-      : update.updateAvailable && update.latestVersion
+    desktopGuidanceEl.hidden = desktopUpdateInstalling || !update.updateAvailable;
+    desktopGuidanceEl.textContent = update.updateAvailable && update.latestVersion
         ? `WilyTrader checks automatically at startup. Install Update downloads WilyTrader ${update.latestVersion}, starts the installer, and closes this app.`
         : '';
   }
@@ -1204,7 +1205,8 @@ function showDesktopUpdateProgress(progress: DesktopUpdateProgress): void {
 
   if (desktopUpdateProgressLabelEl) desktopUpdateProgressLabelEl.textContent = label;
   if (desktopUpdateProgressSizeEl) desktopUpdateProgressSizeEl.textContent = progress.installerName || '';
-  if (desktopUpdateEl) desktopUpdateEl.textContent = label;
+  if (desktopUpdateEl) desktopUpdateEl.hidden = true;
+  if (desktopGuidanceEl) desktopGuidanceEl.hidden = true;
   setSettingsMessage(label, progress.stage === 'failed');
 }
 
