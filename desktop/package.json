@@ -1,6 +1,6 @@
 {
   "name": "wilytrader",
-  "version": "0.4.11",
+  "version": "0.4.12",
   "description": "WilyTrader local trading capture app and localhost bridge.",
   "main": "dist/main/main.js",
   "author": "Jason Koprowski",

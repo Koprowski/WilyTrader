@@ -264,6 +264,7 @@
     updateActiveToken();
     render();
     preloadTradeExecutionSound();
+    bindCentralTargetCommandListener();
     schedulePendingPulseAutoBuyCheck();
     bindRouteWatcher();
     bindRollingMarketCapSampler();
@@ -272,6 +273,7 @@
     bindAxiomQuoteHeartbeat();
     bindDesktopStatusHeartbeat();
     startUpdateChecks();
+    runTask(syncCentralTargetMonitor("startup"));
     runTask(sendDesktopExtensionStatus("startup"));
     if (isOverlayVisibleRoute()) void syncBridge("startup");
   }
@@ -4622,6 +4624,7 @@
     });
     if (latestExecution?.id) lastSyncedExecutionId = latestExecution.id;
     runTask(syncTradeArtifacts(reason, isNewTradeExecution ? latestExecution : null, shouldCaptureScreenshot));
+    runTask(syncCentralTargetMonitor(reason));
   }
 
   function render() {
@@ -5712,6 +5715,148 @@
     });
   }
 
+  function bindCentralTargetCommandListener() {
+    if (!chrome?.runtime?.onMessage) return;
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      if (message?.type !== "WILYTRADER_EXECUTE_EXIT_TARGET") return false;
+      executeCentralExitTargetCommand(message)
+        .catch((error) => ({
+          ok: false,
+          reason: "command-exception",
+          error: error?.message || String(error),
+          executionId: null,
+        }))
+        .then((result) => {
+          sendResponse(result);
+          return sendRuntimeMessage({
+            type: "WILYTRADER_TARGET_EXECUTION_RESULT",
+            ...result,
+            targetId: message.targetId || null,
+            positionId: message.positionId || null,
+            tokenKey: message.tokenKey || null,
+            tokenAddress: message.tokenAddress || null,
+            correlationId: message.correlationId || null,
+          });
+        })
+        .catch((error) => handleExtensionContextError(error));
+      return true;
+    });
+  }
+
+  async function syncCentralTargetMonitor(reason = "state-sync") {
+    if (!extensionContextValid || !state) return;
+    updateActiveToken();
+    const positions = Object.values(state.positions || {});
+    const exitTargets = Object.values(state.exitTargets || {});
+    const response = await sendRuntimeMessage({
+      type: "WILYTRADER_SYNC_TARGETS",
+      reason,
+      pageUrl: window.location.href,
+      pageTitle: document.title,
+      activeToken: summarizeToken(activeToken),
+      positions,
+      exitTargets,
+      sessionStartedAt: state.sessionStartedAt || null,
+      executionCount: Array.isArray(state.executions) ? state.executions.length : 0,
+    });
+    if (!response?.ok) {
+      emitDiagnostic("target-monitor-sync-failed", {
+        reason,
+        error: response?.error || "No background response.",
+      });
+    }
+  }
+
+  async function executeCentralExitTargetCommand(command) {
+    const receivedAt = new Date().toISOString();
+    const sellPercent = normalizeTargetSellPercent(command.sellPercent);
+    const targetId = normalizeBridgeString(command.targetId);
+    const positionId = normalizeBridgeString(command.positionId);
+    const tokenKey = normalizeBridgeString(command.tokenKey);
+    const tokenAddress = normalizeBridgeString(command.tokenAddress);
+    const correlationId = normalizeBridgeString(command.correlationId);
+    updateActiveToken();
+    const token = activeToken;
+    const position = token?.key ? state.positions[token.key] : null;
+    const target = targetId ? state.exitTargets?.[targetId] : null;
+    const context = {
+      correlationId,
+      targetId,
+      positionId,
+      tokenKey,
+      tokenAddress,
+      sellPercent,
+      targetKind: command.kind || null,
+      targetMarketCapUsd: Number(command.targetMarketCapUsd || 0),
+      triggerMarketCapUsd: Number(command.triggerMarketCapUsd || 0),
+      triggerSource: command.triggerSource || null,
+      triggerReadAtMs: command.triggerReadAtMs || null,
+      triggerQuoteAgeMs: command.triggerQuoteAgeMs || null,
+      ownerTabId: command.ownerTabId ?? null,
+      triggerTabId: command.triggerTabId ?? null,
+      activeToken: summarizeToken(token),
+      position: summarizePosition(position),
+      receivedAt,
+    };
+
+    const fail = async (reason, extra = {}) => {
+      const result = {
+        ok: false,
+        reason,
+        error: reason,
+        executionId: null,
+      };
+      emitDiagnostic("target-monitor-command-rejected", { ...context, ...extra, reason }, { desktop: true });
+      await syncCentralTargetMonitor(`command-rejected:${reason}`);
+      return result;
+    };
+
+    if (targetExitInFlight || tradeInFlight) return fail("execution-in-flight", { targetExitInFlight, tradeInFlight });
+    if (!targetId || !positionId) return fail("missing-target-or-position-id");
+    if (!token?.key) return fail("no-active-token");
+    if (tokenKey && token.key !== tokenKey) return fail("active-token-key-mismatch");
+    if (tokenAddress && token.address !== tokenAddress) return fail("active-token-address-mismatch");
+    if (!position) return fail("no-open-position-for-active-token", { positionKeys: Object.keys(state.positions || {}) });
+    if (position.positionId !== positionId) return fail("position-id-mismatch", { activePositionId: position.positionId });
+    if (!target) return fail("target-missing");
+    if (target.positionId !== positionId) return fail("target-position-mismatch", { targetPositionId: target.positionId });
+    if (target.triggeredAt) return fail("target-already-triggered", { triggeredAt: target.triggeredAt });
+
+    targetExitInFlight = targetId;
+    target.triggeredAt = receivedAt;
+    try {
+      emitDiagnostic("target-monitor-command-accepted", context, { desktop: true });
+      await persistAndSync("exit-target-triggered");
+      setStatus(`${formatExitTargetKind(target.kind)} ${formatTargetSellPercent(sellPercent)} touched ${formatters.usd(target.marketCapUsd)}.`);
+      const execution = await sell(sellPercent);
+      if (!execution) {
+        if (state.exitTargets[targetId]) state.exitTargets[targetId].triggeredAt = null;
+        await persistAndSync("exit-target-rearmed");
+        await syncCentralTargetMonitor("exit-target-rearmed");
+        return {
+          ok: false,
+          reason: "sell-returned-empty",
+          error: "sell-returned-empty",
+          executionId: null,
+        };
+      }
+      if (state.exitTargets[targetId]) {
+        delete state.exitTargets[targetId];
+        lastAxiomExitTargetSyncKey = null;
+        await persistAndSync("exit-target-filled");
+        render();
+      }
+      await syncCentralTargetMonitor("exit-target-filled");
+      return {
+        ok: true,
+        reason: "filled",
+        executionId: execution.id || null,
+      };
+    } finally {
+      targetExitInFlight = null;
+    }
+  }
+
   function detectBestChartCaptureRect() {
     const ignoredRoot = root;
     const candidates = Array.from(document.querySelectorAll("canvas, svg"))
@@ -5994,7 +6139,7 @@
   function bindExitTargetWatcher() {
     window.setInterval(() => {
       if (!extensionContextValid) return;
-      runTask(evaluateExitTargets());
+      runTask(syncCentralTargetMonitor("target-monitor-heartbeat"));
     }, AXIOM_TARGET_TRIGGER_INTERVAL_MS);
   }
 
