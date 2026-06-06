@@ -263,6 +263,10 @@ interface FinalizingTradeSession {
   finalization: WilyTraderSessionFinalization;
 }
 
+interface MasterSyncOptions {
+  allowFinalizingSessionDir?: string | null;
+}
+
 let mainWindow: BrowserWindow | null = null;
 let activeSession: ActiveTradeSession | null = null;
 let finalizingSession: FinalizingTradeSession | null = null;
@@ -649,7 +653,6 @@ async function stopSession(): Promise<StopSessionResult> {
   const sortedTrades = sortTradesByExitDateTime(enrichment.trades);
   const tradeLogMdPath = settings.generateTradeLogOnStop ? writeTradeLogMd(session, sortedTrades) : '';
   const tradeLogXlsxPath = settings.generateTradeLogOnStop ? await writeTradeLogXlsx(session, sortedTrades, stoppedAtMs) : '';
-  updateFinalizationProgress(session, 'complete', 'Session finalized.', 100);
   writeStatusFileForSession(session, 'complete', {
     durationMs: stoppedAtMs - session.sessionStartedAtMs,
     tradeLogMdPath,
@@ -667,6 +670,21 @@ async function stopSession(): Promise<StopSessionResult> {
     extractionResponsePath: enrichment.responsePath,
   }, 'success');
   lastCompletedSessionDir = session.sessionDir;
+  let masterSyncResult: MasterSyncResult | null = null;
+  if (settings.autoSyncMasterTradingLogAfterStop && tradeLogXlsxPath) {
+    updateFinalizationProgress(session, 'master-sync', 'Syncing master trading log.', 96);
+    masterSyncResult = await syncMasterTradingLog({ allowFinalizingSessionDir: session.sessionDir });
+    if (!masterSyncResult.ok) {
+      warnings.push(`Master sync after stop failed: ${masterSyncResult.message}`);
+    }
+    lastCompletedSessionDir = findLastCompletedSessionDir(settings.outputDir) ?? lastCompletedSessionDir;
+  }
+  updateFinalizationProgress(
+    session,
+    'complete',
+    masterSyncResult ? (masterSyncResult.ok ? 'Session finalized and master synced.' : 'Session finalized; master sync failed.') : 'Session finalized.',
+    100
+  );
   broadcastStatus();
   finalizingSession = null;
   broadcastStatus();
@@ -678,6 +696,7 @@ async function stopSession(): Promise<StopSessionResult> {
     tradeLogXlsxPath,
     tradeLogMdPath,
     warnings,
+    masterSyncResult,
   };
 }
 
@@ -768,9 +787,11 @@ function updateFinalizationProgress(
       finalizingSession.finalization.estimatedTotalMs - (now - finalizingSession.finalization.startedAtMs)
     ),
   };
-  writeStatusFileForSession(session, phase === 'complete' ? 'complete' : 'finalizing', {
-    finalization: finalizingSession.finalization,
-  });
+  if (fs.existsSync(session.sessionDir)) {
+    writeStatusFileForSession(session, phase === 'complete' ? 'complete' : 'finalizing', {
+      finalization: finalizingSession.finalization,
+    });
+  }
   broadcastStatus();
 }
 
@@ -3741,6 +3762,7 @@ function fallbackSettings(): WilyTraderDesktopSettings {
     microphoneCaptureEnabled: true,
     saveBrowserScreenshots: true,
     generateTradeLogOnStop: true,
+    autoSyncMasterTradingLogAfterStop: true,
     masterTradingLogPath: defaultMasterTradingLogPath(defaultCapturesRoot()),
     autoCheckExtensionUpdates: true,
     tradeSessionHotkey: 'Ctrl+Alt+T',
@@ -3862,6 +3884,7 @@ function sanitizeSettings(value: WilyTraderDesktopSettings): WilyTraderDesktopSe
     microphoneCaptureEnabled: Boolean(value.microphoneCaptureEnabled),
     saveBrowserScreenshots: Boolean(value.saveBrowserScreenshots),
     generateTradeLogOnStop: Boolean(value.generateTradeLogOnStop),
+    autoSyncMasterTradingLogAfterStop: Boolean(value.autoSyncMasterTradingLogAfterStop),
     masterTradingLogPath: strOrNull(value.masterTradingLogPath) ?? defaultMasterTradingLogPath(outputDir),
     autoCheckExtensionUpdates: Boolean(value.autoCheckExtensionUpdates),
     tradeSessionHotkey: isUsableHotkey(value.tradeSessionHotkey) ? value.tradeSessionHotkey.trim() : defaults.tradeSessionHotkey,
@@ -5400,8 +5423,11 @@ function copyLastCompletedSessionFolderLink(): { ok: boolean; message: string; p
   return { ok: true, message: `Copied session folder link: ${resolved.path}`, path: resolved.path };
 }
 
-async function syncMasterTradingLog(): Promise<MasterSyncResult> {
-  if (activeSession || finalizingSession) {
+async function syncMasterTradingLog(options: MasterSyncOptions = {}): Promise<MasterSyncResult> {
+  const allowedFinalizingSession = finalizingSession
+    && options.allowFinalizingSessionDir
+    && sameResolvedPath(finalizingSession.sessionDir, options.allowFinalizingSessionDir);
+  if (activeSession || (finalizingSession && !allowedFinalizingSession)) {
     return emptyMasterSyncResult(false, 'Wait for the active WilyTrader session to finish before syncing the master trading log.');
   }
 
@@ -5469,6 +5495,7 @@ async function syncMasterTradingLog(): Promise<MasterSyncResult> {
     }
   }
   debugLog('master-sync', 'master sync completed', { masterPath, summary });
+  lastCompletedSessionDir = findLastCompletedSessionDir(settings.outputDir) ?? lastCompletedSessionDir;
   return {
     ok: true,
     message: fs.existsSync(masterPath)

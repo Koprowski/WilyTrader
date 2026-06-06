@@ -84,6 +84,7 @@ export interface StopSessionResult {
   tradeLogXlsxPath: string;
   tradeLogMdPath: string;
   warnings: string[];
+  masterSyncResult?: MasterSyncResult | null;
 }
 
 export interface MasterSyncResult {
@@ -148,6 +149,7 @@ export interface WilyTraderDesktopSettings {
   microphoneCaptureEnabled: boolean;
   saveBrowserScreenshots: boolean;
   generateTradeLogOnStop: boolean;
+  autoSyncMasterTradingLogAfterStop: boolean;
   masterTradingLogPath: string;
   autoCheckExtensionUpdates: boolean;
   tradeSessionHotkey: string;

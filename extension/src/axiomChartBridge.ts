@@ -497,6 +497,7 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
       disableSelection: false,
       disableSave: true,
       disableUndo: true,
+      zOrder: "top",
       overrides: buildMarkerOverrides(marker),
     });
     return { ...marker, time: markerTime, entityId: id, mode: "public" };
@@ -639,6 +640,8 @@ export function createAxiomChartBridge(opts: { preferIframeIndex?: number } = {}
       backgroundColor: marker.style.background || marker.style.color,
       fontsize: marker.style.fontSize ?? 11,
       bold: true,
+      zOrder: "top",
+      zIndex: 1000000,
     };
   }
 

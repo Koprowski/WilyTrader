@@ -471,6 +471,9 @@ function normalizeWorkflowRow(row, sessionName, sourceType, archivePath) {
   for (const column of WORKFLOW_COLUMNS) out[column] = row[column] ?? "";
   for (const column of NICS_COLUMNS) out[column] = row[column] ?? "";
   for (const column of OHLC_COLUMNS) out[column] = row[column] ?? "";
+  if (sourceType === "workflow-xlsx") {
+    out.ohlc_screenshot = normalizeArchivedOhlcScreenshot(out.ohlc_screenshot, archivePath, sessionName);
+  }
   if (!out.entry_date) out.entry_date = folderDate(sessionName);
   if (!out.entry_mc_actual && row.entry_mc_actual) out.entry_mc_actual = row.entry_mc_actual;
   if (!out.target_exit_low_mc && row.target_low_mc) out.target_exit_low_mc = row.target_low_mc;
@@ -480,6 +483,75 @@ function normalizeWorkflowRow(row, sessionName, sourceType, archivePath) {
   if (!out.notes && sourceType === "legacy-csv") out.notes = row.notes || "Imported from legacy trade_log.csv.";
   fillTimeBucketFields(out);
   return out;
+}
+
+function normalizeArchivedOhlcScreenshot(value, archivePath, sessionName) {
+  const text = String(value ?? "").trim();
+  if (!text || !archivePath || !sessionName) return value;
+  const parsed = parseHyperlinkFormula(text);
+  const target = parsed?.target ?? text;
+  if (!/\.(?:png|jpg|jpeg|gif|webp)(?:$|[?#])/i.test(target)) return value;
+  const archivedTarget = archivedOhlcScreenshotTarget(target, archivePath, sessionName);
+  if (!archivedTarget) return value;
+  const label = parsed?.label || path.basename(localPathFromFileTarget(target));
+  return `HYPERLINK("${excelFormulaString(archivedTarget)}","${excelFormulaString(label)}")`;
+}
+
+function archivedOhlcScreenshotTarget(target, archivePath, sessionName) {
+  const targetPath = localPathFromFileTarget(target);
+  const normalizedTarget = targetPath.replace(/[\\/]+/g, "/");
+  const existingArchiveTarget = existingArchiveTargetFromScreenshotPath(normalizedTarget);
+  if (existingArchiveTarget) return existingArchiveTarget;
+  const normalizedSessionName = String(sessionName).replace(/[\\/]+/g, "/");
+  const lowerTarget = normalizedTarget.toLowerCase();
+  const sessionMarker = `/${normalizedSessionName.toLowerCase()}/`;
+  let suffix = "";
+  const sessionIndex = lowerTarget.indexOf(sessionMarker);
+  if (sessionIndex >= 0) {
+    suffix = normalizedTarget.slice(sessionIndex + sessionMarker.length);
+  } else {
+    const screenshotsMarker = "/inputs/trade-screenshots/";
+    const screenshotsIndex = lowerTarget.lastIndexOf(screenshotsMarker);
+    if (screenshotsIndex >= 0) suffix = normalizedTarget.slice(screenshotsIndex + 1);
+  }
+  if (!suffix) suffix = path.join("Inputs", "trade-screenshots", path.basename(targetPath));
+  return path.join(archivePath, ...suffix.split(/[\\/]+/).filter(Boolean));
+}
+
+function existingArchiveTargetFromScreenshotPath(normalizedTarget) {
+  const parts = normalizedTarget.split("/").filter(Boolean);
+  const inputsIndex = parts.findIndex((part, index) =>
+    part.toLowerCase() === "inputs" && parts[index + 1]?.toLowerCase() === "trade-screenshots"
+  );
+  if (inputsIndex <= 0) return null;
+  const sessionFolder = parts[inputsIndex - 1];
+  if (!isTradeSessionFolderName(sessionFolder)) return null;
+  const root = normalizedTarget.startsWith("/") ? `${path.sep}${path.join(...parts.slice(0, inputsIndex - 1))}` : path.join(...parts.slice(0, inputsIndex - 1));
+  const suffix = parts.slice(inputsIndex);
+  const candidate = path.join(root, "Archive", sessionFolder, ...suffix);
+  return fss.existsSync(candidate) ? candidate : null;
+}
+
+function localPathFromFileTarget(target) {
+  const text = String(target ?? "").trim();
+  if (/^file:\/\//i.test(text)) {
+    try {
+      return fileURLToPath(text);
+    } catch {
+      return text.replace(/^file:\/\/\/?/i, "").replace(/\//g, path.sep);
+    }
+  }
+  return text;
+}
+
+function parseHyperlinkFormula(value) {
+  const text = String(value ?? "").trim();
+  const match = text.match(/^=?\s*HYPERLINK\s*\(\s*"((?:[^"]|"")*)"(?:\s*,\s*"((?:[^"]|"")*)")?/i);
+  if (!match) return null;
+  return {
+    target: match[1].replace(/""/g, '"'),
+    label: match[2] ? match[2].replace(/""/g, '"') : "",
+  };
 }
 
 function fillTimeBucketFields(row) {
@@ -710,6 +782,7 @@ async function main() {
       rowsRemovedBeforeImport = before - allRows.length;
     }
   }
+  const archivedOhlcScreenshotLinksRepaired = repairArchivedOhlcScreenshotLinks(allRows);
 
   const existingRowCount = allRows.length;
   const seen = new Set(allRows.map(rowKey));
@@ -749,7 +822,7 @@ async function main() {
   const rowsToAppend = sortRowsForAppend(allRows.slice(existingRowCount));
   const rowsBackfilled = [...results, ...backfillResults, ...supplementalResults]
     .reduce((sum, result) => sum + (result.rowsBackfilled ?? 0), 0);
-  const forceRewrite = rowsBackfilled > 0 || rowsRemovedBeforeImport > 0 || metaClusterAssignmentsRepaired;
+  const forceRewrite = rowsBackfilled > 0 || rowsRemovedBeforeImport > 0 || metaClusterAssignmentsRepaired || archivedOhlcScreenshotLinksRepaired > 0;
   const rowsForSave = forceRewrite
     ? [...allRows.slice(0, existingRowCount), ...rowsToAppend]
     : allRows;
@@ -773,6 +846,7 @@ async function main() {
     skippedArchivedFolders: archivedReadiness.skipped.map((entry) => entry.sessionName),
     skippedArchivedFolderDetails: archivedReadiness.skipped,
     rowsRemovedBeforeImport,
+    archivedOhlcScreenshotLinksRepaired,
     metaClusterAssignmentsRepaired,
     rowsInMaster: allRows.length,
     rowsAppended: rowsToAppend.length,
@@ -1520,6 +1594,10 @@ function backfillMissingNicsFields(allRows, key, sourceRow) {
   const target = allRows.find((row) => rowKey(row) === key);
   if (!target) return false;
   let changed = false;
+  if (!isBlank(sourceRow.source_folder_archived_path) && target.source_folder_archived_path !== sourceRow.source_folder_archived_path) {
+    target.source_folder_archived_path = sourceRow.source_folder_archived_path;
+    changed = true;
+  }
   for (const column of NICS_COLUMNS) {
     if (isBlank(target[column]) && !isBlank(sourceRow[column])) {
       target[column] = sourceRow[column];
@@ -1529,6 +1607,22 @@ function backfillMissingNicsFields(allRows, key, sourceRow) {
   if (!isBlank(sourceRow.ohlc_screenshot) && target.ohlc_screenshot !== sourceRow.ohlc_screenshot) {
     target.ohlc_screenshot = sourceRow.ohlc_screenshot;
     changed = true;
+  }
+  return changed;
+}
+
+function repairArchivedOhlcScreenshotLinks(rows) {
+  let changed = 0;
+  for (const row of rows) {
+    const repaired = normalizeArchivedOhlcScreenshot(
+      row.ohlc_screenshot,
+      row.source_folder_archived_path,
+      row.source_session
+    );
+    if (!isBlank(repaired) && repaired !== row.ohlc_screenshot) {
+      row.ohlc_screenshot = repaired;
+      changed++;
+    }
   }
   return changed;
 }
