@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WilyTrader Axiom Chart Bridge
 // @namespace    https://github.com/Koprowski/WilyTrader
-// @version      0.4.12
+// @version      0.4.13
 // @description  Draw WilyTrader average entry/exit lines as native TradingView chart shapes on axiom.trade.
 // @match        https://axiom.trade/*
 // @run-at       document-idle
@@ -404,6 +404,7 @@
         disableSelection: false,
         disableSave: true,
         disableUndo: true,
+        zOrder: "top",
         overrides: buildMarkerOverrides(marker),
       });
       return { ...marker, time: markerTime, entityId: id, mode: "public" };
@@ -545,6 +546,8 @@
         backgroundColor: marker.style.background || marker.style.color,
         fontsize: marker.style.fontSize ?? 11,
         bold: true,
+        zOrder: "top",
+        zIndex: 1000000,
       };
     }
 
