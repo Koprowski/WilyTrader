@@ -1,6 +1,6 @@
 # WilyTrader
 
-Local-only WilyTrader workspace for Padre.gg and Axiom paper trading. The existing Chrome extension remains in `extension/`; the new audio-first desktop vertical slice lives in `desktop/`.
+Local-only WilyTrader workspace for Axiom.trade (primary) & Padre.gg (worked a few weeks ago but not maintained) paper trading. The existing Chrome extension remains in `extension/`; the new audio-first desktop vertical slice lives in `desktop/`.
 
 ## What It Does
 
